@@ -474,6 +474,21 @@ const siteHeader = (header, links = 0) => {
     }
   }
 }, asWritten = (header) => header.matches(`${authored}, [data-exact-site]`);
+// A nested scroller must not change the route's transparent bar.
+function transparentBar(route, target = null) {
+  const header = headerOf(route);
+  if (!header) return;
+  if (route.getAttribute("data-navigationbar") !== "transparent" || asWritten(header)) {
+    header.removeAttribute("data-exact-bar-scrolled");
+    return;
+  }
+  const name = route.getAttribute("data-navigationscroll");
+  const scroller = name ? [...route.querySelectorAll(`[id="${CSS.escape(name)}"]`)].find(el => el.closest("[navigationKey]") === route)
+    : [...route.querySelectorAll('[data-scroll="true"]')].find(el => el.closest("[navigationKey]") === route);
+  const documentScroll = scroller?.getAttribute("data-scrolldocument") === "true" && !scroller.hasAttribute("data-exact-offpage");
+  if (target && target !== (documentScroll ? document : scroller)) return;
+  header.toggleAttribute("data-exact-bar-scrolled", (documentScroll ? document.scrollingElement?.scrollTop : scroller?.scrollTop) > 0);
+}
 // The items of the bar iOS makes of a shown `header`, or null where it makes none: kernel/src/bars.rs `header_bar`,
 // ported to the elements both runtimes write alike, since the JS target keeps no kernel to ask. `walk` is `Walk::walk`:
 // a bar's header holds one heading, or none and only what the bar places (`unplaced`: a node that is no box), and an item is a pressable it reaches, not the title's, or a disabled button. A header drawn as written is no bar.
@@ -857,6 +872,14 @@ export const navigation = {
     // Capture before either target's link listener commits. Early replay before connect has no action-row association.
     document.addEventListener("click", captureRow, true);
     document.addEventListener("click", captureLink, true);
+    document.addEventListener("scroll", event => {
+      if (event.target === document) {
+        for (const route of root.querySelectorAll('[navigationkey][data-navigationbar="transparent"]')) transparentBar(route, document);
+      } else if (root.contains(event.target)) {
+        const route = event.target.closest?.('[navigationkey][data-navigationbar="transparent"]');
+        if (route) transparentBar(route, event.target);
+      }
+    }, { capture: true, passive: true });
     document.addEventListener("dragstart", (event) => {
       if (root.contains(event.target) && event.target.matches?.("img[data-symbol-source], :is(button, a[href], [data-exact-on~=\"press\"]) img")) {
         event.preventDefault();
@@ -1034,6 +1057,7 @@ export const navigation = {
     }
     for (const route of root.querySelectorAll("[navigationKey]")) {
       markSites(route);
+      transparentBar(route);
     }
     // site headers, under a root with no `navigationBack` too
     for (const nav of root.querySelectorAll("[navigationBack]")) {

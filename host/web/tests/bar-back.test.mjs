@@ -520,3 +520,83 @@ for (const [runtime, webDist] of Object.entries({ wasm: process.env.EXACT_WEB_DI
     }
   }, 600000);
 }
+
+for (const engine of ['chromium', 'firefox', 'webkit']) test(`${engine}: a transparent route bar clears its paint at the scroll edge`, async () => {
+  const suite = await suiteBrowser(engine);
+  try {
+    for (const colorScheme of ['light', 'dark']) {
+      const page = await suite.newPage({ colorScheme });
+      const html = withLook(readFileSync(resolve(ROOT, 'host/web/index.html'), 'utf8'))
+        .replace('<div id="exact-root"></div>', `<div id="exact-root">
+          <div navigationkey="1" data-navigationbar="transparent" data-navigationscroll="content" id="transparent">
+            <header id="clear"><h2>Picture</h2><button>Edit</button></header>
+            <div id="content" data-scroll="true" style="height:100px;overflow:auto"><div style="height:600px">Picture<div id="nested" style="height:20px;overflow:auto"><div style="height:100px">Nested</div></div></div></div>
+          </div>
+          <div navigationkey="2"><header id="normal"><h2>Normal</h2></header></div>
+          <div navigationkey="3" data-navigationbar="transparent"><header id="canvas"><h2>Canvas</h2></header></div>
+          <div navigationkey="4" data-navigationbar="transparent"><header id="own" style="background-color:rgb(10,20,30);border-bottom:3px solid red"><h2>Own paint</h2></header></div>
+          <div navigationkey="5" data-navigationbar="transparent"><header id="site"><nav>Site</nav></header></div>
+          <div navigationkey="6" data-navigationbar="transparent"><header id="bare" data-exact-said="appearance"><h2>Authored</h2></header></div>
+        </div>`)
+        .replace('<script type="module" src="./glue.js"></script>', () => `<script type="module">${readFileSync(resolve(ROOT, 'host/web/navigation.js'), 'utf8')}
+          const shell = document.getElementById('exact-root');
+          navigation.connect(shell, () => false, () => {});
+          window.project = () => navigation.project(shell, () => {});
+          project();
+        </script>`);
+      await page.setContent(html);
+      await page.waitForFunction(() => window.project, null, { timeout: 5000 });
+      const paint = id => page.evaluate(id => {
+        const el = document.getElementById(id), s = getComputedStyle(el);
+        return [s.backgroundColor, s.borderBottomColor, s.borderBottomWidth, el.getBoundingClientRect().height];
+      }, id);
+      const normal = await paint('normal'), top = await paint('clear');
+      expect(top.slice(0, 2)).toEqual(['rgba(0, 0, 0, 0)', 'rgba(0, 0, 0, 0)']);
+      expect((await paint('canvas')).slice(0, 2)).toEqual(top.slice(0, 2));
+      expect((await paint('own')).slice(0, 3)).toEqual(['rgb(10, 20, 30)', 'rgb(255, 0, 0)', '3px']);
+      for (const id of ['site', 'bare']) expect((await paint(id))[2]).toBe('0px');
+      const scroll = y => page.evaluate(y => new Promise(resolve => {
+        const el = document.getElementById('content');
+        el.addEventListener('scroll', () => requestAnimationFrame(resolve), { once: true });
+        el.scrollTop = y;
+      }), y);
+      await page.evaluate(() => new Promise(resolve => {
+        const nested = document.getElementById('nested');
+        nested.addEventListener('scroll', () => requestAnimationFrame(resolve), { once: true });
+        nested.scrollTop = 10;
+      }));
+      expect(await paint('clear')).toEqual(top);
+      await scroll(40);
+      expect((await paint('clear')).slice(0, 3)).toEqual(normal.slice(0, 3));
+      expect((await paint('clear'))[3]).toBe(top[3]);
+      await scroll(0);
+      expect(await paint('clear')).toEqual(top);
+      await page.evaluate(() => {
+        document.getElementById('content').scrollTop = 40;
+        project();
+      });
+      expect((await paint('clear')).slice(0, 3)).toEqual(normal.slice(0, 3));
+      await page.evaluate(() => { document.getElementById('transparent').removeAttribute('data-navigationbar'); project(); });
+      expect((await paint('clear')).slice(0, 3)).toEqual(normal.slice(0, 3));
+      await page.evaluate(() => {
+        document.getElementById('transparent').setAttribute('data-navigationbar', 'transparent');
+        const content = document.getElementById('content');
+        content.setAttribute('data-scrolldocument', 'true');
+        content.firstElementChild.style.height = '2000px';
+        document.documentElement.setAttribute('data-scrolldocument', '');
+        project();
+      });
+      await page.evaluate(() => new Promise(resolve => {
+        document.addEventListener('scroll', () => requestAnimationFrame(resolve), { once: true });
+        window.scrollTo(0, 40);
+      }));
+      expect((await paint('clear')).slice(0, 3)).toEqual(normal.slice(0, 3));
+      await page.evaluate(() => new Promise(resolve => {
+        document.addEventListener('scroll', () => requestAnimationFrame(resolve), { once: true });
+        window.scrollTo(0, 0);
+      }));
+      expect(await paint('clear')).toEqual(top);
+      await page.close();
+    }
+  } finally { await suite.close(); }
+}, 30000);

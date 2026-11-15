@@ -349,6 +349,8 @@
      them, in the bar's ink (D4.14). A header drawn as written, a site's (`data-exact-site`) or one that says
      `appearance: none`, is no bar here or in a sheet (LLP 1153 D8). */
   :where(#exact-root :is([navigationkey], [navigationkey] > :where([data-exact-list-item])) > header:where(:not([data-exact-site], [data-exact-said~="appearance"]))) { background-color: var(--exact-background); backdrop-filter: none; box-shadow: none; border-bottom: 1px solid var(--exact-separator); color: var(--exact-label); }
+  /* Keep the border's space when its paint clears, so crossing the scroll edge cannot resize the bar. */
+  :where(#exact-root :is([navigationkey][data-navigationbar="transparent"], [navigationkey][data-navigationbar="transparent"] > :where([data-exact-list-item])) > header:not([data-exact-bar-scrolled], [data-exact-site], [data-exact-said~="appearance"])) { background-color: transparent; border-bottom-color: transparent; }
   /* A level-1 heading in a route's bar stands where iOS draws its large title, in a bar that collapses as the page
      scrolls. The web's bar never collapses, so the title keeps its level's size (`title1`, LLP 1115 D3) and takes at
      least the large title's line, centred in it by equal margins: the bar is as tall as with the large title, and the
