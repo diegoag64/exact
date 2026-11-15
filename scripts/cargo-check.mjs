@@ -6,15 +6,16 @@ import { withHostDeployment } from './filesystem.mjs';
 import { delimiter, dirname, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import process from 'node:process';
+import { EXE } from './paths.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 /** Add rustup's tools when a non-interactive shell omitted them from PATH. */
 export function cargoOnPath(env = process.env, home = homedir()) {
   const dirs = (env.PATH ?? '').split(delimiter).filter(Boolean);
-  if (dirs.some(dir => existsSync(resolve(dir, 'cargo')))) return true;
+  if (dirs.some(dir => existsSync(resolve(dir, `cargo${EXE}`)))) return true;
   const rustup = resolve(env.CARGO_HOME ?? resolve(home, '.cargo'), 'bin');
-  if (!existsSync(resolve(rustup, 'cargo'))) return false;
+  if (!existsSync(resolve(rustup, `cargo${EXE}`))) return false;
   env.PATH = [rustup, ...dirs].join(delimiter);
   return true;
 }
