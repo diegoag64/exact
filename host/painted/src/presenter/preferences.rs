@@ -18,29 +18,6 @@ impl<D: DataSource> Presenter<D> {
         self.after_commit()
     }
 
-    /// Reread Windows language, regional format and zone after a settings
-    /// notification. Keep the launch seed and the agent's supplied facts.
-    #[cfg(windows)]
-    pub fn refresh_windows_place(&mut self) -> Option<String> {
-        self.refresh_place(crate::zone::current_place)
-    }
-
-    #[cfg(any(windows, test))]
-    pub(super) fn refresh_place(
-        &mut self,
-        read: impl FnOnce(f64) -> exact_runner::time::Place,
-    ) -> Option<String> {
-        if self.agent {
-            return None;
-        }
-        let previous = self.host.runner().place();
-        let place = read(previous.seed);
-        if &place == previous {
-            return None;
-        }
-        self.set_place(&place)
-    }
-
     /// A candidate has a new runner, but belongs to the same launch.
     pub(super) fn restore_time(&self, host: &mut Host<D>) -> Result<(), HostError> {
         host.set_scheme(self.dark());

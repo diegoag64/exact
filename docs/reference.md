@@ -1745,12 +1745,6 @@ Linux takes its locale from the first nonempty `LC_ALL`, `LC_MESSAGES`, or `LANG
 none set, `formatLocale` is the locale),
 normalizes POSIX names to BCP 47 (`C`/`POSIX` use `en-US`), and reads the zone from
 `TZ` when it names a zoneinfo entry, otherwise the system's IANA zone (UTC fallback).
-Windows takes `locale` from the first preferred UI language and `formatLocale`
-from the user's regional format. A 12/24-hour choice that differs from that
-region's default adds `-u-hc-h12` or `-u-hc-h23` to `formatLocale`. It reads the
-system's IANA zone unless `TZ` names one. Windows settings and time-change
-notifications refresh these facts without changing the launch seed. Agent
-launches keep the drive's supplied facts.
 
 A drive asserts backgrounding with the `prefer` name/value pair `visibility-state hidden`
 (`"prefer visibility-state hidden"`), and returns with `"prefer visibility-state visible"`.
