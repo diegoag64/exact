@@ -24,6 +24,7 @@ import { main as issue } from './issue.mjs';
 import { noteOf, publish, stoppedEarly } from './known.mjs';
 import { bisectAffected, probeOutcomes } from './async-bisect.mjs';
 import { fileURLToPath } from 'node:url';
+import { formatPart } from './gate.mjs';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const option = (name, fallback) => process.argv.includes(name) ? process.argv[process.argv.indexOf(name) + 1] : fallback;
@@ -250,7 +251,7 @@ export function checks(sha, since, selection = {}) {
     ...(lane.length ? [(([command, ...args]) => ['lane', command, args])(cargoTests('--', '--ignored', ...lane))] : []),
     ['clippy', 'cargo', ['clippy', '--all-targets', '--keep-going', '--', '-D', 'warnings']],
     ['workspace-clippy', 'cargo', ['clippy', ...workspace, '--all-targets', '--keep-going', '--', '-D', 'warnings']],
-    ['fmt', 'cargo', ['fmt', '--all', '--', '--check']],
+    formatPart,
     ['caps', 'bun', ['scripts/caps.mjs']],
     ['boot', 'bun', ['scripts/boot.mjs']],
     ['wasm', 'bun', ['scripts/wasm-check.mjs']],
