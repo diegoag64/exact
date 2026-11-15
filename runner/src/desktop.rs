@@ -1,7 +1,7 @@
 //! A button's presentations past the window (LLP 1133.025 D4, D5): a
 //! `-exact-menu="status"` button is the app's status item on macOS, and one
-//! with `dock` among its ids an item of the Dock menu. Windows'
-//! notification-area icon is accepted and not built (LLP 1133.025 §14).
+//! with `dock` among its ids an item of the Dock menu. Windows presents a
+//! status button as a notification-area icon.
 //! The agent reads both from the session's tree on every host, as
 //! `state.statusItems` and `state.dockMenu`, so a drive sees what a Mac
 //! would place, and the buttons stay ordinary where no host places them.
@@ -44,7 +44,7 @@ fn shown(kernel: &Kernel, id: ViewId) -> bool {
 }
 
 /// A button's label: its `aria-label`, else its text.
-fn label(kernel: &Kernel, id: ViewId) -> String {
+pub fn label(kernel: &Kernel, id: ViewId) -> String {
     let Some(node) = kernel.node(id) else {
         return String::new();
     };

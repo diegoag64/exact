@@ -125,6 +125,8 @@ use scroll_end::Completion;
 mod scroll_end_tests;
 mod shortcuts;
 mod status_bar;
+#[cfg(windows)]
+pub mod status_items;
 #[cfg(target_os = "android")]
 pub(crate) mod still;
 mod swipe;
@@ -1212,6 +1214,15 @@ impl<D: DataSource> Presenter<D> {
     pub(crate) fn placement_hidden(&self, id: ViewId) -> bool {
         let mut at = Some(id);
         while let Some(id) = at {
+            #[cfg(windows)]
+            if self
+                .host
+                .kernel()
+                .node(id)
+                .is_some_and(|n| self.window.status_items.contains(&n.key))
+            {
+                return true;
+            }
             if matches!(
                 self.brush.placements.get(&id),
                 Some(crate::placement::Placement::Hidden)

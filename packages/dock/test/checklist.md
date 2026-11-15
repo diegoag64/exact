@@ -47,8 +47,10 @@ Built for Windows so far: the host's services (`host/windows/src/desktop.rs`:
 `RegisterHotKey`, `FlashWindowEx`, the `Run` value), the three packages'
 Rust (`packages/*/windows/lib.rs`), `keepRunning`, the hidden login launch
 and one instance (`host/windows/src/window/lifecycle.rs`,
-`host/windows/src/instance.rs`), cross-checked on this Mac only. Not built:
-the notification-area icon, a launch with no window at every launch, the
+`host/windows/src/instance.rs`), and notification-area icons with native
+menus and Explorer restart recovery (`host/windows/src/status.rs`). The
+status tests exercise the real Shell API and menu loop in a signed-in
+Windows session. Not built: a launch with no window at every launch, the
 startup task and the modifier pair's hook (LLP 1133.025 §14). Run these in the NucBox's signed-in console
 session (`docs/testing.md`, "Windows: the NucBox"), not over SSH, with a
 development build of an app that depends on the three packages.

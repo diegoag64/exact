@@ -2827,9 +2827,12 @@ the virtual clock).
   fails `lower-menu-status`) and presents the button as the app's
   `NSStatusItem` on macOS, taking its place in the page; its `popovertarget`
   menu is the item's menu. A click opens the menu when there is one and runs
-  `press` when there is none. Windows' notification-area icon is accepted and
-  not built (LLP 1133.025 §14): there, as on every other host, the button
-  stays an ordinary button in the window. With
+  `press` when there is none. On Windows the button becomes a notification-area
+  icon, taking no room in the window. It uses the app's window icon (or the
+  system application icon), and its `popovertarget` menu is a Windows context
+  menu. A primary click runs the button's own `press` when present; otherwise
+  either mouse button opens the menu. Labels, disabled rows and checkmarks
+  follow the live tree. Other hosts keep an ordinary button. With
   `host.macos.activationPolicy: "accessory"` the app has no Dock tile and
   opens no window at launch. Bare `focus()` is the window's, as the web's
   `window.focus()`: on macOS and Windows it shows the session's window if
@@ -2842,10 +2845,10 @@ the virtual clock).
   hide it, as on the Mac, and a login item registered `hidden` opens no
   window at that launch. A Windows app is one process: launching it again
   shows the window it has, and a location on that command line (a
-  jump-list task) opens in it. Windows' notification-area icon is not built
-  (LLP 1133.025 §14), so an app that keeps running there gives the person
-  its own way back (a global shortcut whose action calls `focus()`) and its
-  own way out (a button whose action calls `close()`).
+  jump-list task) opens in it. Notification-area icons remain available
+  while the window is hidden and are restored after Explorer restarts.
+  Give the status menu actions that call `focus()` to show the window and
+  `close()` to quit; Windows adds no automatic Quit item.
 
   `@exact/global-shortcuts` on Windows accepts `PrintScreen` and modified
   chords such as `Control+PrintScreen`. Bare `PrintScreen` answers

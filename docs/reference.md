@@ -572,11 +572,13 @@ location there. A bare `focus()` shows it too, `hideWindow()` hides it as
 the close button does (refused in the journal without `keepRunning`), and
 the app's own `close()` ends the app. A login item registered `hidden` (`@exact/login-item`) opens
 no window at that launch: the app runs, and shows its window when launched
-again or when it calls `focus()`. The notification-area icon, which would
-be the usual way back and its Exit, is not built yet (LLP 1133.025 §14), so
-an app that keeps running gives the person a way back and a way out of its
-own: a global shortcut whose action calls `focus()`, and a button whose
-action calls `close()`.
+again or when it calls `focus()`. A `-exact-menu="status"` button places a
+notification-area icon using the app's window icon. Its `popovertarget`
+menu stays available while the window is hidden. A primary click runs the
+button's own `press`, if present; otherwise either mouse button opens the
+menu. Menu items can call `focus()` to show the window or `close()` to quit.
+The host restores icons after Explorer restarts. Windows controls whether
+an icon appears on the taskbar or in its overflow area.
 
 A native module whose work must finish before the app exits (a child process
 to stop, a socket to flush) overrides `willQuit(done:)`. On every orderly

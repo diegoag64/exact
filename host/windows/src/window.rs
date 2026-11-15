@@ -25,6 +25,7 @@ use winit::{
 mod edit_menu;
 mod frames;
 mod lifecycle;
+mod status;
 use frames::{next_frame_deadline, presentation_resumes, FrameSchedule};
 
 struct App<D: DataSource> {
@@ -75,6 +76,7 @@ struct App<D: DataSource> {
     appearance: crate::appearance::Changes,
     modal: crate::modal::Schedule,
     desktop: Rc<crate::desktop::Desktop>,
+    status: Option<crate::status::Status>,
     /// The app called `close()`: the window closes, never hides.
     closing: bool,
     /// Closing the window hides it (`keepRunning`).
@@ -92,6 +94,7 @@ impl<D: DataSource> Drop for App<D> {
             eprintln!("exact-windows: successful frames {}", self.frames);
         }
         self.timers.clear();
+        self.status.take();
         self.accessibility.take();
         exact_ink::device::d3d11::fields::clear();
         // The module's GPU swapchain must release its HWND before the window.
@@ -325,6 +328,7 @@ pub(super) fn run<D: DataSource + Default + 'static>(
         appearance: Default::default(),
         modal: Default::default(),
         desktop,
+        status: None,
         refit_after_scale: false,
         closing: false,
         keep_running: opening.keep_running,
@@ -939,6 +943,7 @@ impl<D: DataSource + Default + 'static> ApplicationHandler<crate::accessibility:
                             handle.hwnd.get(),
                         )));
                         let hwnd = handle.hwnd.get();
+                        self.status = status::install(hwnd, &mut p);
                         p.set_url_opener(move |url| crate::url::open(hwnd, url));
                         let proxy = self.proxy.clone();
                         p.set_window_closer(move || {
@@ -1377,6 +1382,7 @@ impl<D: DataSource + Default + 'static> App<D> {
                 window.request_redraw();
             }
         }
+        self.service_status();
         if let Err(error) = self.blink(Instant::now()) {
             self.fail(events, error);
             return;
@@ -1414,6 +1420,7 @@ impl<D: DataSource + Default + 'static> App<D> {
         } else {
             events.set_control_flow(ControlFlow::Wait);
         }
+        status::deadline(&self.status, events);
         let continuous =
             self.frame_limit.is_some() || p.wants_display_frames() || p.needs_animation_frame();
         let unpaced =

@@ -3,6 +3,9 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
+#[cfg(all(test, windows))]
+mod status_tests;
+
 #[cfg(windows)]
 mod accessibility;
 #[cfg(windows)]
@@ -38,6 +41,8 @@ mod pads;
 mod placement;
 #[cfg(windows)]
 mod probe;
+#[cfg(windows)]
+mod status;
 #[cfg(windows)]
 mod timers;
 #[cfg(windows)]

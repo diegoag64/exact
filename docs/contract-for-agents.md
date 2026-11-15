@@ -4357,9 +4357,13 @@ id, or alone, also files the button in the app's Dock menu:
 bar item on macOS. Its text or `aria-label` is the item's title and tooltip,
 one `img` or `svg` child its image (a template image), and its
 `popovertarget` menu the item's menu; a click opens that menu, or runs `press`
-when there is none. On macOS the button takes no room in the page; elsewhere,
-Windows included (its notification-area icon is not built), it is an
-ordinary button. An accessory app's status menu ends with the host's Quit,
+when there is none. On Windows it places a notification-area icon using the
+app's window icon, with the system application icon as fallback. A primary
+click runs its own `press` when present; otherwise either mouse button opens
+its menu. The menu uses current labels, disabled states and checkmarks.
+Icons remain while the window is hidden and return after Explorer restarts.
+On macOS and Windows a placed button takes no room in the page; on other
+hosts it remains an ordinary button. A macOS accessory app's status menu ends with the host's Quit,
 which `-exact-menu-remove="status-quit"` removes. Bare `focus()` brings the
 window forward on macOS and Windows, showing it if it was hidden (Linux logs
 it as unsupported); `hideWindow()` puts it away again with the app still

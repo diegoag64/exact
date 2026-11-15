@@ -73,6 +73,8 @@ enum Keyboard {
 /// What the presenter keeps of the window.
 #[derive(Default)]
 pub(super) struct State {
+    #[cfg(windows)]
+    pub(super) status_items: Vec<exact_kernel::NodeKey>,
     pub(super) status_bar: status_bar::State,
     window: Option<Window>,
     /// The page's frame in the window as last fitted.
