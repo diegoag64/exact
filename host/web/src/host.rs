@@ -841,8 +841,9 @@ impl<D: DataSource> Host<D> {
         }
         // One parent visit per batch: a theme flip touches every text row,
         // but their shared parent's fold needs to be decided only once.
+        let mut visited = exact_kernel::id::IdSet::default();
         for id in refold {
-            self.refold(id, batch);
+            self.refold(id, batch, &mut visited);
         }
         let roots = self.page_roots();
         if roots != self.roots {
