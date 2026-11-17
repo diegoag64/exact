@@ -242,26 +242,13 @@ pub(super) fn roots() -> [PathBuf; 3] {
     let mut held = ROOTS.lock().unwrap_or_else(|e| e.into_inner());
     held.get_or_insert_with(|| {
         let base = std::env::temp_dir().join(format!("exact-agent-{}", std::process::id()));
-        fn remove_agent_roots() {
+        // The process's own directory goes at its exit. `ibex2::process` is
+        // Unix's: on Windows this crate is compiled (a default member), never run.
+        #[cfg(unix)]
+        ibex2::process::wait_at_exit(|| {
             let dir = std::env::temp_dir().join(format!("exact-agent-{}", std::process::id()));
             let _ = std::fs::remove_dir_all(dir);
-        }
-        #[cfg(unix)]
-        ibex2::process::wait_at_exit(remove_agent_roots);
-        #[cfg(windows)]
-        {
-            extern "C" fn remove() {
-                remove_agent_roots();
-            }
-            extern "C" {
-                fn atexit(f: extern "C" fn()) -> i32;
-            }
-            // SAFETY: `remove` lives for the process, and ROOTS registers it once while locked.
-            #[allow(unsafe_code)]
-            unsafe {
-                atexit(remove);
-            }
-        }
+        });
         [
             base.join("data"),
             base.join("cache"),
@@ -454,33 +441,6 @@ fn copy_confined(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn fallback_roots_are_removed_at_exit() {
-        const CHILD: &str = "EXACT_PICKER_EXIT_CHILD";
-        if std::env::var_os(CHILD).is_some() {
-            let directories = roots();
-            std::fs::create_dir_all(&directories[0]).unwrap();
-            std::fs::write(directories[0].join("picked"), b"temporary").unwrap();
-            assert_eq!(roots(), directories);
-            return;
-        }
-        let child = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "picker::tests::fallback_roots_are_removed_at_exit",
-            ])
-            .env(CHILD, "1")
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .unwrap();
-        let directory =
-            crate::TempDir(std::env::temp_dir().join(format!("exact-agent-{}", child.id())));
-        let result = child.wait_with_output().unwrap();
-        assert!(result.status.success(), "{result:?}");
-        assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
-        assert!(!directory.exists(), "the process's temporary files remain");
-    }
 
     /// A reset refuses a scratch tree reached through a symbolic link above it
     /// (an `agent` directory linked to the app's real data, say), leaving

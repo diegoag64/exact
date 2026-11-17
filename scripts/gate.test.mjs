@@ -33,6 +33,8 @@ test('batched formatting checks the same modules and local dependencies as cargo
   const write = (path, text) => { const file = join(root, path); mkdirSync(dirname(file), { recursive: true }); writeFileSync(file, text); };
   const cargo = args => spawnSync('cargo', args, { cwd: root, encoding: 'utf8' });
   try {
+    // The repository's pinned toolchain, which has rustfmt, not whatever rustup's default is.
+    write('rust-toolchain.toml', readFileSync(resolve(import.meta.dir, '../rust-toolchain.toml'), 'utf8'));
     write('Cargo.toml', '[workspace]\nmembers = ["one", "two"]\nexclude = ["local"]\nresolver = "2"\n');
     write('one/Cargo.toml', '[package]\nname = "one"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nlocal = { path = "../local" }\n');
     write('two/Cargo.toml', '[package]\nname = "two"\nversion = "0.1.0"\nedition = "2024"\n');
