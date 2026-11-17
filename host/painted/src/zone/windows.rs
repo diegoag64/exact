@@ -27,7 +27,9 @@ fn regional_locale() -> Option<String> {
     if written <= 1 {
         return None;
     }
-    String::from_utf16(&buffer[..written as usize - 1]).ok()
+    let name = String::from_utf16(&buffer[..written as usize - 1]).ok()?;
+    // An alternate sort follows `_` (`es-ES_tradnl`, `de-DE_phoneb`), which no BCP 47 tag has.
+    Some(name.split('_').next().unwrap_or_default().to_owned())
 }
 
 fn wide_string(mut read: impl FnMut(*mut u16, i32) -> i32) -> Option<String> {
