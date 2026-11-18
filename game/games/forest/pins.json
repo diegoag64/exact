@@ -1,10 +1,10 @@
 {
   "ticks": {
-    "0": "0x537fcdc3493f9d36",
-    "4500": "0xd64d8bd70ecc36d2"
+    "0": "0x098e7fadfcf1d04d",
+    "4500": "0x79f37afe470b6c3e"
   },
   "saves": {
-    "night": "6542292e0bb4336b8a0f60d3883e8712c656a49d3668be071d469c06558461f5"
+    "night": "6194ce6da6df60c5a672798ccca49bb2428f9f2a00e40d9fe9a4d3af90eac13c"
   },
   "hosts": [
     "linux",
@@ -18,10 +18,10 @@
   "profiles": [
     "gpu-dev"
   ],
-  "inputs": "c9b3886997c393ae1fe841f1ba7e48692376f70da9bd9c298db321069817d807",
-  "sourceInputs": "c8ac3ee45b10487c6eb15daa4976435a3353c68ebd60037ec295159326ef341d",
+  "inputs": "449230c7a76d6dfb1e9071b73e61ad4b30b15343d8bada7fed1b31de55aab6ca",
+  "sourceInputs": "46c0573f653c090d8c2c84e22e9e9ab82dc7676ff16d6676b3826b2a57771ed3",
   "game": "forest",
   "generated": "bun game/prove.mjs forest --repin --hosts 'linux,web'",
-  "at": "6c0919ce30568f0df0724536667df9afdf36ad29",
-  "reason": "Body records write default ccd, force and inertia"
+  "at": "fb6d7b4121165c7cc0c8ee1fd40fb7c23e43956a",
+  "reason": "Collider saves write every field; hashes and continuation bytes change."
 }

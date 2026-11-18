@@ -235,7 +235,7 @@ final class SplitHost {
     /// Read and present again with no batch: a controller came or went, or
     /// entered its window.
     func sync() {
-        presenter.navigation.resync()
+        presenter.navigationHost.resync()
         // With no batch to run them, the passes that read what the window shows.
         presenter.afterBatch { [weak presenter] in presenter?.toolbar.sync(); presenter?.shortcuts.sync() }
     }
@@ -284,7 +284,7 @@ final class SplitHost {
     /// Table cells hold their rows apart from the list's native children.
     private func currentRow(in list: NodeView) -> UInt32? {
         let children = presenter.tables.feeds[list.id].map { $0.children ?? $0.rows.map(\.node) }
-            ?? list.container.subviews.compactMap { $0 as? NodeView }
+            ?? list.childNodes
         for row in children where presenter.views[row.id] === row && row.style["display"]?.string != "none"
             && row.props["popover"] == nil && row.props["navigationSplit"] != "placeholder" {
             if row.handlers.contains("press") || row.props["href"]?.isEmpty == false {
@@ -505,7 +505,7 @@ final class SplitHost {
         // A table draws no separator beside its selected row, above it or under it.
         var beside: [NodeView] = []
         if let row {
-            let siblings = (row.superview?.subviews ?? []).compactMap { $0 as? NodeView }.filter { presenter.views[$0.id] === $0 && ($0 === row || !$0.isHidden) }
+            let siblings = NodeView.committed(row.superview?.subviews ?? []).filter { presenter.views[$0.id] === $0 && ($0 === row || !$0.isHidden) }
             beside = [row]
             if let index = siblings.firstIndex(where: { $0 === row }), index > 0 { beside.append(siblings[index - 1]) }
         }
@@ -610,7 +610,7 @@ final class SplitHost {
     @discardableResult func closeDetail() -> Bool {
         for _ in 0..<32 {
             guard active, let top = shown?.detail else { return true }
-            if presenter.navigation.dismiss(top) != nil || shown?.detail === top { return false }
+            if presenter.navigationHost.dismiss(top) != nil || shown?.detail === top { return false }
         }
         return shown?.detail == nil
     }
@@ -624,8 +624,8 @@ final class SplitHost {
     var summary: [String: Any] {
         guard let controller, active, let shown else { return ["installed": false, "wanted": wanted] }
         return ["installed": true, "list": Int(shown.list.id), "table": shown.table.map { Int($0) } ?? NSNull(),
-                "listWidth": Agent.r2(controller.listColumnWidth), "detailWidth": Agent.r2(controller.detailWidth),
-                "authoredWidth": shown.width.map { Agent.r2($0) } ?? NSNull(),
+                "listWidth": InspectionValue.r2(controller.listColumnWidth), "detailWidth": InspectionValue.r2(controller.detailWidth),
+                "authoredWidth": shown.width.map { InspectionValue.r2($0) } ?? NSNull(),
                 "routes": shown.routes.map { Int($0.id) }, "detail": shown.detail.map { Int($0.id) } ?? NSNull(),
                 "base": shown.base, "row": shown.row.map { Int($0) } ?? NSNull(), "empty": controller.detail.saysNothing ?? NSNull(),
                 "placeholder": placeholder.map { Int($0.id) } ?? NSNull(), "marked": marked.map { Int($0.id) } ?? NSNull()]
@@ -654,29 +654,6 @@ private final class MarkWindow {
     deinit {
         responder?.invalidate()
         tokens.forEach(NotificationCenter.default.removeObserver)
-    }
-}
-
-extension Presenter {
-    /// The view over `view` in the authored tree: an open popover's authored
-    /// parent, and for a subtree the split's pane holds, its home in the
-    /// page; else its superview. What inerts or hides a node from
-    /// assistive technology is read up it.
-    func authoredSuperview(of view: NSView) -> NSView? {
-        if let pane = navigation.split.controller?.detailPane, view.superview === pane, navigation.split.active, let node = view as? NodeView {
-            return blocks.parent(of: node)
-        }
-        return menus.parent(of: view)
-    }
-}
-
-extension NodeView {
-    /// The implicit form ground uses AppKit's desktop tint in both panes.
-    var standsOnSplitGround: Bool {
-        guard !wrote("background_color"), case .object(let role)? = style["background_color"],
-              role["sys"]?.string == "windowBackgroundColor", let presenter,
-              presenter.navigation.split.active else { return false }
-        return isDescendant(of: presenter.viewport) || presenter.navigation.split.pane(holding: self) != nil
     }
 }
 #endif

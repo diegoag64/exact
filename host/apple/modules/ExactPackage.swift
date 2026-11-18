@@ -1,13 +1,14 @@
 // What a package's Swift implementation of a module sees of exact2 (LLP
 // 1133.001 D5; LLP 1133.009 D10 items 1-3; LLP 1133.008 D8 item 9): the
 // `ExactPackage` module, compiled on its own before the packages, which
-// import it, and linked into the app's one module, whose adapter for each
-// package (`exactExtensions`, written by host/apple/build.mjs) holds one
-// instance per session. Nothing of ExactKit or of the app's own module is
-// reachable from here.
+// import it. The seam links into the app module; each package's implementation
+// links into its own library, loaded at first use (LLP 1067.000.001). Its
+// adapter keeps one instance per session. Nothing of ExactKit or of the
+// app's own module is reachable from here.
 //
 // Every entry is on the main thread (LLP 1067.000 D4).
 import AVFoundation
+import Darwin
 import Foundation
 import Security
 #if os(macOS)
@@ -88,6 +89,34 @@ public protocol ExactCredentialMember: AnyObject {
 public struct ExactCredentialFailure: Error {
     public let json: [String: Any]
     public init(_ json: [String: Any]) { self.json = json }
+}
+
+/// A package-owned output directory held by descriptor. Every file is opened
+/// relative to that descriptor, so replacing its path cannot redirect a
+/// later write (LLP 1133.009 D10 item 4).
+public final class ExactPackageDirectory: @unchecked Sendable {
+    private let handle: FileHandle
+    fileprivate init(_ handle: FileHandle) { self.handle = handle }
+
+    /// Append `data` to one regular file in this directory, creating it with
+    /// owner-only permissions. A link or a name containing a path separator
+    /// is refused.
+    public func append(_ data: Data, to name: String) -> Bool {
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.contains("\0") else { return false }
+        let fd = openat(handle.fileDescriptor, name, O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK, 0o600)
+        guard fd >= 0 else { return false }
+        let file = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG else { try? file.close(); return false }
+        do {
+            try file.write(contentsOf: data)
+            try file.close()
+            return true
+        } catch {
+            try? file.close()
+            return false
+        }
+    }
 }
 
 /// Shared by contexts of the same session. Registrations do not keep a
@@ -201,7 +230,8 @@ public final class ExactPackageContext {
     public let tracks: ExactTracks
     /// The process's audio session, which the host owns (D7, D10 item 5).
     public let audioSession: ExactAudioSession
-    private let fileFn: (String) -> URL?
+    private let fileFn: (String) -> URL?, directoryFn: (String) -> URL?
+    private let replaceDirectoryFn: (String) -> FileHandle?
     /// Under the agent, unless the drive bound the implementation as in
     /// production (`--bind`): an implementation that is its own substitute
     /// then opens no device and asks the OS for nothing (LLP 1133.006 D8).
@@ -273,6 +303,8 @@ public final class ExactPackageContext {
                 data: URL? = nil, cache: URL? = nil, temporary: URL? = nil, changed: @escaping (String) -> Void,
                 log: @escaping (String) -> Void, now: @escaping () -> Double,
                 tracks: ExactTracks = ExactTracks(), file: @escaping (String) -> URL? = { _ in nil },
+                directory: @escaping (String) -> URL? = { _ in nil },
+                replaceDirectory: @escaping (String) -> FileHandle? = { _ in nil },
                 audioSession: ExactAudioSession = ExactAudioSession { _, _, _, _ in nil },
                 picture: @escaping (UInt32, String) -> Void = { _, _ in },
                 surfaces: ExactSurfaces = ExactSurfaces { _ in nil }, orientation: @escaping () -> Double = { 0 },
@@ -299,7 +331,8 @@ public final class ExactPackageContext {
         let scratch = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
         self.data = data ?? scratch; self.cache = cache ?? scratch; self.temporary = temporary ?? scratch
         changedFn = changed; logFn = log; nowFn = now
-        self.tracks = tracks; fileFn = file; self.audioSession = audioSession; pictureFn = picture
+        self.tracks = tracks; fileFn = file; directoryFn = directory; replaceDirectoryFn = replaceDirectory
+        self.audioSession = audioSession; pictureFn = picture
         self.surfaces = surfaces; orientationFn = orientation; viewFn = view; invokeFn = invoke
         emitFn = emit; activationFn = activation; wakeFn = wake; self.wakes = wakes; self.transfers = transfers
         self.pads = pads; afterFn = after; self.regions = regions; self.push = push; self.hostEvents = hostEvents; expireWakeFn = expireWake; stateFn = state
@@ -312,7 +345,8 @@ public final class ExactPackageContext {
     public func after(_ ms: Double, _ body: @escaping () -> Void) -> () -> Void { afterFn(ms, false, body) }
 
     /// Coalesce a refresh across an agent seek: run at the next clock instant
-    /// at or past the deadline, without adding a stop or advancing settlement.
+    /// at or past the deadline, before pending package reads are dispatched,
+    /// without adding a stop or advancing settlement.
     /// On the live clock this waits as `after` does. Main thread.
     @discardableResult
     public func after(_ ms: Double, coalescing: Bool, _ body: @escaping () -> Void) -> () -> Void { afterFn(ms, coalescing, body) }
@@ -361,8 +395,8 @@ public final class ExactPackageContext {
         invokeFn(handle, handler, args, reply)
     }
 
-    /// A picture of the interface's `img` scheme changed (LLP 1133.019 D11
-    /// item 1): the host loads `source` again wherever it is shown.
+    /// A picture of the interface's `img` scheme or a published image file
+    /// changed: the host reloads its image and canvas handles.
     public func pictureChanged(_ source: String) { pictureFn(0, source) }
     /// A picture the app may no longer read (D2): the host clears it from
     /// every `img` that shows it and from its cache, cancels its loads and
@@ -396,6 +430,18 @@ public final class ExactPackageContext {
     /// A destination may be missing; an existing destination must be a regular
     /// file, and existing parts must lead through no symbolic link.
     public func file(_ path: String) -> URL? { fileFn(path) }
+
+    /// The directory an admitted `app:/` path names. A package may create,
+    /// fill or empty it, but an existing regular file or symbolic link is
+    /// refused.
+    public func directory(_ path: String) -> URL? { directoryFn(path) }
+
+    /// Empty and recreate an admitted package output directory, returning a
+    /// descriptor-backed writer. Replacing any component after admission
+    /// cannot redirect its removal or writes.
+    public func replaceDirectory(_ path: String) -> ExactPackageDirectory? {
+        replaceDirectoryFn(path).map(ExactPackageDirectory.init)
+    }
 
     /// Under the agent, what the implementation discloses of its own objects
     /// for `state.extensions` (LLP 1133.008 D8 item 9): listed as its
@@ -512,6 +558,17 @@ public protocol ExactPackage: AnyObject {
     /// The host ran the app for this implementation's due wake requests
     /// (`context.wakes`, LLP 1133.017 D8): raise their events, then `done`.
     func woke(_ wake: ExactWake)
+}
+
+/// The retained result of a package library's C factory. The shared seam owns
+/// this box so an existential's layout never crosses the C entry itself.
+public final class ExactPackageImplementation {
+    public let package: any ExactPackage
+    public let authenticator: (any ExactAuthenticator)?
+    public init(_ package: any ExactPackage, authenticator: (any ExactAuthenticator)? = nil) {
+        self.package = package
+        self.authenticator = authenticator
+    }
 }
 
 public extension ExactPackage {
@@ -812,10 +869,28 @@ public final class ExactTrackEntry {
     /// A video track's running capture, while its lease is held (LLP
     /// 1133.008 D3, D8 item 3); nil otherwise and under the agent.
     public var video: (() -> ExactVideoSource?)?
+    /// The session clock when getUserMedia opened this track.
+    public var startedAt: Double?
     /// Under the agent, where no capture exists: the picture a viewfinder of
     /// the track draws, upright and unmirrored, which an observer analyses as
     /// each frame (LLP 1133.027 D17 item 2). The camera package sets it.
-    public var picture: CGImage?
+    public var picture: CGImage? {
+        didSet {
+            if oldValue !== picture {
+                for notify in Array(pictureObservers.values) {
+                    do { try notify() }
+                    catch { NSLog("exact: track %@ picture observer: %@", id, String(describing: error)) }
+                }
+            }
+        }
+    }
+    private var pictureObservers: [UUID: () throws -> Void] = [:]
+    /// A thrown error is logged; remaining observers still run.
+    public func observePicture(_ changed: @escaping () throws -> Void) -> ExactSubscription {
+        let id = UUID()
+        pictureObservers[id] = changed
+        return ExactSubscription { [weak self] in self?.pictureObservers[id] = nil }
+    }
     public init(id: String, kind: String, tracks: [String] = [], owner: ExactTrackOwner? = nil) {
         self.id = id; self.kind = kind; self.tracks = tracks; self.owner = owner
     }
@@ -867,20 +942,28 @@ public protocol ExactVideoSource: AnyObject {
     /// The camera it captures from.
     var device: AVCaptureDevice { get }
     /// Run `change` on the session's queue between `beginConfiguration()`
-    /// and `commitConfiguration()`: add or remove inputs and outputs only.
-    /// Never waited for from the main thread.
-    func configure(_ change: @escaping (AVCaptureSession) -> Void)
+    /// and `commitConfiguration()`: add or remove inputs and outputs and
+    /// configure their connections. With `stopped`, stop capture first and
+    /// resume afterwards if it was running (intrinsic-matrix delivery must
+    /// be enabled before startRunning). Never waited for from the main thread.
+    func configure(stopped: Bool, _ change: @escaping (AVCaptureSession) -> Void)
     /// Run `work` on the session's queue, after every configuration asked
     /// before it: a capture from an output it added.
     func run(_ work: @escaping (AVCaptureSession) -> Void)
     /// A package's process object for this capture, made by `make` on first
     /// ask and kept while the capture lives (the camera's photo output).
     func shared<T: AnyObject>(_ key: String, _ make: () -> T) -> T
-    /// Constraints that keep the camera (`zoom`, `torch`), applied to the
-    /// device and reported by the tracks on it, as `applyConstraints` would.
+    /// Constraints that keep the camera (`frameRate`, `zoom`, `torch`), applied
+    /// on the capture queue and reported by its tracks. Called inside `run`,
+    /// completes before returning; elsewhere, queues the change.
     func apply(_ constraints: [String: Any])
     /// Focus and expose at `point`, in the device's unit square.
     func focus(at point: CGPoint)
+}
+
+public extension ExactVideoSource {
+    /// Configure without stopping capture.
+    func configure(_ change: @escaping (AVCaptureSession) -> Void) { configure(stopped: false, change) }
 }
 
 /// A running audio capture, which a consumer taps.
@@ -1005,3 +1088,35 @@ public final class ExactAudioSession {
         _ = claimFn(active ? "call-activated" : "call-deactivated", [], false, { _ in })
     }
 }
+
+#if os(macOS)
+
+/// Shared by the display list and still capture (LLP 1178 D1–D3).
+public enum ExactScreenGeometry {
+    public static var primaryTop: CGFloat { NSScreen.screens.first?.frame.maxY ?? 0 }
+    public static func id(_ screen: NSScreen) -> CGDirectDisplayID {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+    }
+    public static func flipped(_ rect: NSRect) -> [CGFloat] {
+        [rect.minX, primaryTop - rect.maxY, rect.width, rect.height]
+    }
+    public static func record(_ screen: NSScreen) -> [String: Any] {
+        let (r, a) = (flipped(screen.frame), flipped(screen.visibleFrame))
+        return [
+            "left": r[0], "top": r[1], "width": r[2], "height": r[3],
+            "availLeft": a[0], "availTop": a[1], "availWidth": a[2], "availHeight": a[3],
+            "devicePixelRatio": screen.backingScaleFactor,
+            "isPrimary": NSScreen.screens.first.map(id) == id(screen),
+            "isInternal": CGDisplayIsBuiltin(id(screen)) != 0, "label": screen.localizedName,
+        ]
+    }
+    public static func client(_ screen: NSScreen, view: NSView?) -> Any {
+        guard let view, let window = view.window else { return NSNull() }
+        let content = window.convertToScreen(view.convert(view.bounds, to: nil))
+        let r = screen.frame
+        return ["x": r.minX - content.minX, "y": content.maxY - r.maxY,
+                "width": r.width, "height": r.height]
+    }
+}
+
+#endif

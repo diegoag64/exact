@@ -54,7 +54,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
         view.frame = host.view.bounds
         view.layoutIfNeeded()
         spin(0.3)
-        let navigation = session.presenter.navigation
+        let navigation = session.presenter.navigationHost
         let tabs = try XCTUnwrap(navigation.tabController)
         tapTab(tabs, 1)
         XCTAssertEqual(tabs.selectedIndex, 1, "Second selected")
@@ -69,7 +69,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
     /// the route `name` pushed over its first one.
     private func pushed(_ name: String) throws -> (ExactSession, UINavigationController, RouteController) {
         let session = try booted("EXACT_NAVIGATION_BARS_PLAN", label: "scroller-\(name)")
-        let nav = try XCTUnwrap(session.presenter.navigation.primaryNavigation)
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
         let reply = Agent(session: session).tap(["id": Int(try node(session, "start-open-\(name)").id)])
         XCTAssertNil(reply["error"], "the opener for \(name) is tapped")
         until("\(name) pushed") { nav.viewControllers.count == 2 && nav.transitionCoordinator == nil }
@@ -117,19 +117,19 @@ final class NavigationCollapseIOSTests: XCTestCase {
         for width: CGFloat in [380, 402, 360, 402] {
             waitFor("the previous layout is idle") { !session.ownerInFlight && !Agent(session: session).nativeInFlight() }
             waitForMainQueue("the previous reports")
-            let batches = session.appliedBatches, syncs = p.navigation.syncCalls
+            let batches = session.appliedBatches, syncs = p.navigationHost.syncCalls
             let start = CACurrentMediaTime()
             view.frame.size.width = width
             view.setNeedsLayout()
             view.layoutIfNeeded()
             let milliseconds = (CACurrentMediaTime() - start) * 1000
             waitForMainQueue("the resize reports")
-            let route = try XCTUnwrap(p.navigation.activeRoute)
+            let route = try XCTUnwrap(p.navigationHost.activeRoute)
             XCTAssertEqual(p.owners.told[route.node.id]?.block, .size(route.view.bounds.size))
             XCTAssertEqual(route.node.bounds.size, route.view.bounds.size)
             XCTAssertEqual(session.appliedBatches - batches, 1, "the viewport and route bounds share a layout")
-            XCTAssertEqual(p.navigation.syncCalls - syncs, 1, "navigation synchronizes once")
-            print("ROUTE-RESIZE width=\(width) ms=\(milliseconds) batches=\(session.appliedBatches - batches) syncs=\(p.navigation.syncCalls - syncs)")
+            XCTAssertEqual(p.navigationHost.syncCalls - syncs, 1, "navigation synchronizes once")
+            print("ROUTE-RESIZE width=\(width) ms=\(milliseconds) batches=\(session.appliedBatches - batches) syncs=\(p.navigationHost.syncCalls - syncs)")
         }
     }
 
@@ -188,7 +188,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
         let scroll = try XCTUnwrap(scroller.scrollView)
         XCTAssertTrue(route.collapseScroll === scroller)
         XCTAssertTrue(route.contentScrollView(for: .top) === scroll)
-        let observation = try XCTUnwrap(p.navigation.observation())
+        let observation = try XCTUnwrap(p.navigationHost.observation())
         XCTAssertEqual(observation["collapseScroller"] as? Int, Int(scroller.id))
         XCTAssertNotNil(observation["barHeight"] as? Double)
         let barBottom = nav.navigationBar.convert(nav.navigationBar.bounds, to: nil).maxY
@@ -212,7 +212,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
 
     func testUnchangedProjectionLeavesTheNativeInsetPolicyAlone() throws {
         let session = try booted("EXACT_LARGE_TITLE_PLAN", label: "inset-policy")
-        let navigation = session.presenter.navigation
+        let navigation = session.presenter.navigationHost
         let nav = try XCTUnwrap(navigation.primaryNavigation)
         let route = try XCTUnwrap(nav.topViewController as? RouteController)
         let home = try node(session, "home-scroll")
@@ -239,7 +239,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
     /// at the top, so the hero picture bleeds to the edge.
     func testATransparentBarInsetsNothingOfItsScroller() throws {
         let session = try booted("EXACT_TRANSPARENT_BAR_PLAN", label: "transparent-bar", beforeItsWindow: true)
-        let nav = try XCTUnwrap(session.presenter.navigation.primaryNavigation)
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
         let route = try XCTUnwrap(nav.topViewController as? RouteController)
         XCTAssertFalse(nav.isNavigationBarHidden, "the bar shows")
         XCTAssertEqual(route.navigationItem.scrollEdgeAppearance, NavigationHost.clearScrollEdge, "clear at the scroller's top")
@@ -252,6 +252,88 @@ final class NavigationCollapseIOSTests: XCTestCase {
         XCTAssertEqual(home.scrollOrigin, 0, "CSS scrollTop 0 is the top edge")
     }
 
+    func testATransparentBarsEmptyBandLeavesTouchesToThePage() throws {
+        let session = try booted("EXACT_TRANSPARENT_BAR_PLAN", label: "transparent-bar-touch", beforeItsWindow: true)
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
+        let bar = nav.navigationBar
+        let control = try node(session, "hero-control")
+        let point = CGPoint(x: 50, y: bar.bounds.midY)
+        control.frame = try XCTUnwrap(control.superview).convert(CGRect(x: 20, y: point.y - 10, width: 60, height: 20), from: bar)
+        XCTAssertNil(bar.hitTest(point, with: nil), "the clear band leaves the touch to the page")
+
+        func labels(_ view: UIView) -> [UILabel] { ((view as? UILabel).map { [$0] } ?? []) + view.subviews.flatMap(labels) }
+        let title = try XCTUnwrap(labels(bar).first { $0.text == "Product" && !$0.isHidden })
+        let titlePoint = title.convert(CGPoint(x: title.bounds.midX, y: title.bounds.midY), to: bar)
+        XCTAssertNotNil(bar.hitTest(titlePoint, with: nil), "the bar keeps its title")
+
+        let scroll = try XCTUnwrap(try node(session, "home-scroll").scroll)
+        scroll.contentOffset.y = 100
+        nav.view.layoutIfNeeded()
+        XCTAssertNotNil(bar.hitTest(point, with: nil), "the scrolled bar keeps its material's band")
+    }
+
+    func testATransparentBarsTouchesFollowTheNativeSelectedScroller() throws {
+        let session = try booted("EXACT_TRANSPARENT_BAR_PLAN", label: "transparent-native-scroll", beforeItsWindow: true)
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
+        let route = try XCTUnwrap(nav.topViewController as? RouteController)
+        let automatic = try XCTUnwrap(route.collapseScrollView)
+        let native = UIScrollView(frame: route.view.bounds)
+        native.contentInsetAdjustmentBehavior = .never
+        native.contentSize = CGSize(width: native.bounds.width, height: 3000)
+        route.view.addSubview(native)
+        route.setContentScrollView(native, for: .top)
+        XCTAssertTrue(route.contentScrollView(for: .top) === native)
+        let bar = nav.navigationBar, point = CGPoint(x: 50, y: nav.navigationBar.bounds.midY)
+
+        automatic.contentOffset.y = 0
+        native.contentOffset.y = 100
+        nav.view.layoutIfNeeded()
+        XCTAssertNotNil(bar.hitTest(point, with: nil), "the selected scroller's material keeps the touch")
+
+        automatic.contentOffset.y = 100
+        native.contentOffset.y = -native.adjustedContentInset.top
+        nav.view.layoutIfNeeded()
+        XCTAssertNil(bar.hitTest(point, with: nil), "the selected scroller's clear edge leaves the touch to the page")
+
+        route.collapseScrollView = nil
+        native.contentOffset.y = 100
+        nav.view.layoutIfNeeded()
+        XCTAssertNotNil(bar.hitTest(point, with: nil), "a native selection needs no collapse scroller")
+    }
+
+    func testATransparentBarKeepsTouchesOnNativeBackgroundOverrides() throws {
+        let session = try booted("EXACT_TRANSPARENT_BAR_PLAN", label: "transparent-native-appearance", beforeItsWindow: true)
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
+        let route = try XCTUnwrap(nav.topViewController as? RouteController)
+        let bar = nav.navigationBar, point = CGPoint(x: 50, y: nav.navigationBar.bounds.midY)
+        let opaque = UINavigationBarAppearance()
+        opaque.configureWithOpaqueBackground()
+        route.navigationItem.scrollEdgeAppearance = opaque
+        nav.view.layoutIfNeeded()
+        XCTAssertNotNil(bar.hitTest(point, with: nil), "an opaque route hatch background keeps the touch")
+
+        route.navigationItem.scrollEdgeAppearance = nil
+        bar.scrollEdgeAppearance = opaque
+        nav.view.layoutIfNeeded()
+        XCTAssertNotNil(bar.hitTest(point, with: nil), "the bar's fallback background keeps the touch")
+
+        let clear = UINavigationBarAppearance()
+        clear.configureWithTransparentBackground()
+        bar.scrollEdgeAppearance = clear
+        nav.view.layoutIfNeeded()
+        XCTAssertNil(bar.hitTest(point, with: nil), "a native clear background leaves the touch to the page")
+
+        nav.traitOverrides.verticalSizeClass = .compact
+        route.navigationItem.compactScrollEdgeAppearance = opaque
+        nav.view.layoutIfNeeded()
+        XCTAssertEqual(bar.traitCollection.verticalSizeClass, .compact)
+        XCTAssertNotNil(bar.hitTest(point, with: nil), "the compact edge's opaque background keeps the touch")
+        route.navigationItem.compactScrollEdgeAppearance = nil
+        bar.compactScrollEdgeAppearance = clear
+        nav.view.layoutIfNeeded()
+        XCTAssertNil(bar.hitTest(point, with: nil), "the compact edge's clear background leaves the touch to the page")
+    }
+
     /// LLP 1115.000 D11.1 over `scripts/fixtures/large-title.contract`: one
     /// stack with no tabs, the shape `exact new` makes, whose first screen
     /// names no scroller. Its large title opens expanded, its content below
@@ -260,7 +342,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
     /// root (`installPrimary`).
     func testASingleStacksFirstScreenOpensWithItsLargeTitleExpanded() throws {
         let session = try booted("EXACT_LARGE_TITLE_PLAN", label: "large-title", beforeItsWindow: true)
-        let nav = try XCTUnwrap(session.presenter.navigation.primaryNavigation)
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
         let route = try XCTUnwrap(nav.topViewController as? RouteController)
         let home = try node(session, "home-scroll"), sv = try XCTUnwrap(home.scroll)
         XCTAssertTrue(route.collapseScroll === home, "the scroller it does not name is the bar's")
@@ -283,7 +365,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
     func testAnAgentDragToTheEndUnderALargeTitleRestsAtTheEnd() throws {
         let session = try booted("EXACT_LARGE_TITLE_PLAN", label: "large-title-drag", beforeItsWindow: true)
         let home = try node(session, "home-scroll"), sv = try XCTUnwrap(home.scroll)
-        let bar = try XCTUnwrap(session.presenter.navigation.primaryNavigation).navigationBar
+        let bar = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation).navigationBar
         let expanded = bar.frame.height
         let reply = Agent(session: session).tap(["id": Int(home.id), "scrollDrag": [0.0, -100_000.0], "ms": 100.0])
         XCTAssertNil(reply["error"], "\(reply)")
@@ -302,7 +384,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
     func testTheWheelUnderALargeTitleRestsAsAPersonsScrollDoes() throws {
         let session = try booted("EXACT_LARGE_TITLE_PLAN", label: "large-title-wheel", beforeItsWindow: true)
         let home = try node(session, "home-scroll"), sv = try XCTUnwrap(home.scroll)
-        let top = try node(session, "home-top"), bar = try XCTUnwrap(session.presenter.navigation.primaryNavigation).navigationBar
+        let top = try node(session, "home-top"), bar = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation).navigationBar
         let expanded = bar.frame.height, open = sv.contentOffset.y
         let onScreen = { top.convert(top.bounds, to: nil).minY }, opened = onScreen()
         Agent.scroll(from: sv, dx: 0, dy: 300)
@@ -354,7 +436,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
     func testAnAgentDragPastTheTopOpensACollapsedLargeTitle() throws {
         let session = try booted("EXACT_LARGE_TITLE_PLAN", label: "large-title-pull", beforeItsWindow: true)
         let home = try node(session, "home-scroll"), sv = try XCTUnwrap(home.scroll)
-        let bar = try XCTUnwrap(session.presenter.navigation.primaryNavigation).navigationBar
+        let bar = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation).navigationBar
         let expanded = bar.frame.height, start = sv.contentOffset.y
         let agent = Agent(session: session)
         XCTAssertNil(agent.tap(["id": Int(home.id), "scrollDrag": [0.0, -300.0], "ms": 100.0])["error"])
@@ -375,7 +457,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
     func testATraitOrTintChangeWithANewSizeAppliesTheSizeFirst() throws {
         let session = try booted("EXACT_LARGE_TITLE_PLAN", label: "appearance-resize")
         let view = try XCTUnwrap(session.view)
-        let nav = try XCTUnwrap(session.presenter.navigation.primaryNavigation)
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
         XCTAssertEqual(nav.view.bounds.width, 402, accuracy: 0.5)
         // Fix the window's tint so the appearance change reaches the view
         // through its trait callback alone: the system tint changes with the
@@ -412,7 +494,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
     func testEveryBatchAfterAResizeUsesTheNewNavigationSize() throws {
         let session = try booted("EXACT_LARGE_TITLE_PLAN", label: "batch-resize")
         let view = try XCTUnwrap(session.view)
-        let nav = try XCTUnwrap(session.presenter.navigation.primaryNavigation)
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
         let feed = try node(session, "home-scroll"), scroll = try XCTUnwrap(feed.scroll)
         feed.handlers.insert("refresh")
         feed.props["refreshing"] = "true"
@@ -518,7 +600,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
         let session = try booted("EXACT_COVER_SCROLL_PLAN", label: "resize-safe-area")
         let view = try XCTUnwrap(session.view), window = try XCTUnwrap(window)
         let host = try XCTUnwrap(window.rootViewController)
-        let nav = try XCTUnwrap(session.presenter.navigation.primaryNavigation)
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
         window.frame = scene.coordinateSpace.bounds
         view.frame = host.view.bounds
         view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
@@ -790,7 +872,7 @@ final class NavigationCollapseIOSTests: XCTestCase {
     func testAPoppingRouteKeepsItsSideClearanceUntilItLeavesTheWindow() throws {
         for left in [false, true] {
             let (session, nav, route) = try pushed("tall")
-            let navigation = session.presenter.navigation
+            let navigation = session.presenter.navigationHost
             let host = try XCTUnwrap(window?.rootViewController)
             host.additionalSafeAreaInsets = UIEdgeInsets(top: 0, left: left ? 84 : 0, bottom: 0, right: left ? 0 : 84)
             host.view.layoutIfNeeded()
@@ -827,13 +909,13 @@ final class NavigationCollapseIOSTests: XCTestCase {
         let first = try node(session, "pair-first"), second = try node(session, "pair-second")
         XCTAssertTrue(pair.collapseScroll === first, "the first vertical scroller is the bar's")
         XCTAssertTrue(session.presenter.scrollsToTopTarget() === first.scroll, "and the status bar's")
-        XCTAssertTrue(session.presenter.navigation.contentScroller(of: pair) === first)
+        XCTAssertTrue(session.presenter.navigationHost.contentScroller(of: pair) === first)
         XCTAssertEqual(second.scroll?.scrollsToTop, false)
         sessions.removeLast().destroy()
         window?.isHidden = true
         let (named, _, route) = try pushed("named")
         let other = try node(named, "named-second")
-        XCTAssertTrue(named.presenter.navigation.contentScroller(of: route) === other, "the one the route names")
+        XCTAssertTrue(named.presenter.navigationHost.contentScroller(of: route) === other, "the one the route names")
         XCTAssertTrue(named.presenter.scrollsToTopTarget() === other.scroll, "the status bar's too")
         XCTAssertEqual(try node(named, "named-first").scroll?.scrollsToTop, false)
         XCTAssertNil(route.collapseScroll, "it is not at the route's top, so the title keeps still, as before")

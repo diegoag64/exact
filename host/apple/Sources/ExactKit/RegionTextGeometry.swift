@@ -155,8 +155,9 @@ final class RegionParagraph: Sendable {
             captured.reserveCapacity(lines.count)
             for (index, line) in lines.enumerated() {
                 if index > 0 && index % 128 == 0 { try metadataCheckpoint() }
-                captured.append(RegionLine(line, flush: flush, width: offeredWidth, rtl: source.direction == 1, whiteSpace: source.whiteSpace,
-                                           text: attributed, inset: source.insets.at(CTLineGetStringRange(line).location), captureHits: captureHits,
+                let location = CTLineGetStringRange(line).location
+                captured.append(RegionLine(line, flush: flush, width: offeredWidth, rtl: source.base(at: location), whiteSpace: source.whiteSpace,
+                                           text: attributed, inset: source.insets.at(location), captureHits: captureHits,
                                            origin: origins.indices.contains(index) ? origins[index] : nil,
                                            emptyIndex: fragments.indices.contains(index) && CTLineGetGlyphCount(line) == 0 ? fragments[index].utf16_start : nil))
             }

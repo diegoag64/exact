@@ -170,9 +170,24 @@ impl<D: DataSource> Bridge<D> {
 
     /// `exact_scrolled`: a scroller the presenter shows, or the page, now
     /// stands at `(left, top)` CSS px, for `frame` (LLP 1051.000 D1).
-    pub fn scrolled(&mut self, page: bool, view: u32, left: f64, top: f64) {
+    /// Page 2 consumes the collection mailbox's revision and sequence words;
+    /// `top` is its main-axis offset (LLP 1171 D21).
+    pub fn scrolled(&mut self, page: u32, view: u32, left: f64, top: f64) {
+        if page == 2 {
+            let Some(words) = self.input.get(..16) else {
+                return;
+            };
+            let revision = u64::from_le_bytes(words[..8].try_into().unwrap());
+            let sequence = u64::from_le_bytes(words[8..].try_into().unwrap());
+            if let Some(h) = self.host.as_mut() {
+                h.runner_mut()
+                    .collection_travel(view, revision, sequence, top);
+            }
+            return;
+        }
         if let Some(h) = self.host.as_mut() {
-            h.runner_mut().scrolled((!page).then_some(view), left, top);
+            h.runner_mut()
+                .scrolled((page == 0).then_some(view), left, top);
             if !h.runner_mut().intersect_due().is_empty() {
                 if let Some(executor) = self.executor.as_deref() {
                     executor.notify();
@@ -278,7 +293,7 @@ impl<D: DataSource> Bridge<D> {
         let request = String::from_utf8_lossy(&self.input[..len.min(self.input.len())]);
         let out = match self.host.as_mut() {
             Some(h) => h.command(&request),
-            None => exact_runner::agent::error("not booted"),
+            None => exact_runner::json::error("not booted"),
         };
         self.emit(out)
     }
@@ -317,8 +332,8 @@ impl<D: DataSource> Bridge<D> {
     /// The executor wakes so the next pump delivers the answer.
     pub fn auth(&mut self, len: usize) -> u32 {
         let json = String::from_utf8_lossy(&self.input[..len.min(self.input.len())]).into_owned();
-        let field = |k: &str| exact_runner::agent::field_str(&json, k);
-        let ticket = exact_runner::agent::field_num(&json, "ticket").unwrap_or(0.0) as u64;
+        let field = |k: &str| exact_runner::json::field_str(&json, k);
+        let ticket = exact_runner::json::field_num(&json, "ticket").unwrap_or(0.0) as u64;
         if let Some(h) = self.host.as_mut() {
             let runner = h.runner_mut();
             match field("op").as_deref() {
@@ -327,7 +342,7 @@ impl<D: DataSource> Bridge<D> {
                     Some(url) => auth::complete(runner, ticket, Ok(&url)),
                     None => {
                         let status =
-                            exact_runner::agent::field_num(&json, "status").unwrap_or(502.0) as u16;
+                            exact_runner::json::field_num(&json, "status").unwrap_or(502.0) as u16;
                         let message = field("message").unwrap_or_default();
                         auth::complete(runner, ticket, Err((status, &message)))
                     }
@@ -384,11 +399,18 @@ impl<D: DataSource> Bridge<D> {
         self.output.len() as u32
     }
 
+    /// The views prepared off screen and not yet revealed (`exact_unshown`).
+    pub fn unshown(&mut self, views: &[u32]) {
+        if let Some(h) = self.host.as_mut() {
+            h.set_unshown(views);
+        }
+    }
+
     /// A select's options (`exact_select_options`), as JSON in the output
     /// buffer: `[{"value","label","disabled"}]` in order, and which one it
     /// shows (`chosen`, an index or null). Not a batch: nothing changes.
     pub fn select_options(&mut self, view: u32) -> u32 {
-        let quote = exact_runner::agent::quote;
+        let quote = exact_runner::json::quote;
         let mut json = String::from("{\"options\":[");
         let mut chosen = None;
         if let Some(h) = self.host.as_ref() {
@@ -498,54 +520,6 @@ impl<D: DataSource> Bridge<D> {
         self.output.len() as u32
     }
 
-    /// A navigation root's tabs (`exact_root_tabs`; `Kernel::root_tabs`, LLP
-    /// 1115.001 D11), as JSON in the output buffer: `{"tablist":view,
-    /// "tabs":[view...],"panels":[view...],"navigation":[bool...],
-    /// "unsaid":bool,"covered":bool}`, the tabs that name a panel and those
-    /// panels in tab order, or `null` for a root with one stack. `navigation`:
-    /// whether each panel's tab needs a navigation controller
-    /// (`Runner::panels_need_navigation`), read from the plan, so it is known
-    /// for a tab not built yet. `unsaid`: the app left the bar's placement
-    /// unsaid, by the web's rule for its own sidebar (`host/web/navigation.js`
-    /// `unsaidBar`, LLP 1116.004 D1.1): the tablist is a direct child of the
-    /// root, not vertical, in flow in the root's flex column, and itself a
-    /// row. It is read here because the layout rows it asks of never cross to
-    /// the presenter (`style::presenter_ignores`). `covered`: the tablist is
-    /// covered whole, as the boot covers one a tab bar replaces
-    /// (`closed.rs`). Not a batch: nothing changes.
-    pub fn root_tabs(&mut self, view: u32) -> u32 {
-        use exact_kernel::{Display, FlexDirection, PositionType, PropId};
-        let list = |ids: &[u32]| ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-        let json = self.host.as_ref().and_then(|h| {
-            let kernel = h.runner().kernel();
-            let tabs = kernel.root_tabs(view)?;
-            let (root, bar) = (kernel.node(view)?, kernel.node(tabs.tablist)?);
-            let column = |d| matches!(d, FlexDirection::Column | FlexDirection::ColumnReverse);
-            let unsaid = root.children().contains(&tabs.tablist)
-                && bar.props.str(PropId::AccessibilityOrientation) != Some("vertical")
-                && root.style.display == Display::Flex
-                && column(root.style.flex_direction)
-                && matches!(
-                    bar.layout_position(),
-                    PositionType::Static | PositionType::Relative
-                )
-                && !column(bar.style.flex_direction);
-            let arena = kernel.arena();
-            let covered = arena.slot_of(tabs.tablist).and_then(|s| arena.cover(s))
-                == Some(exact_kernel::HostCover::Whole);
-            let navigation = h.runner().panels_need_navigation(&tabs.panels);
-            let navigation = navigation.iter().map(bool::to_string).collect::<Vec<_>>().join(",");
-            Some(format!(
-                "{{\"tablist\":{},\"tabs\":[{}],\"panels\":[{}],\"navigation\":[{navigation}],\"unsaid\":{unsaid},\"covered\":{covered}}}",
-                tabs.tablist,
-                list(&tabs.tabs),
-                list(&tabs.panels)
-            ))
-        });
-        self.output = json.unwrap_or_else(|| "null".into()).into_bytes();
-        self.output.len() as u32
-    }
-
     /// Whether the stack whose root route is `view` splits (`exact_stack_split`;
     /// `Runner::stack_split`, LLP 1115.002 D4), as JSON in the output buffer:
     /// `{"list":view|null,"width":number|null,"rows":[[route,row]...],
@@ -598,8 +572,8 @@ impl<D: DataSource> Bridge<D> {
     /// D4), as JSON in the output buffer: `{"style","sections":[{"view",
     /// "header","footer","headerLook","footerLook","card","spaceAbove","rows":[{"view","custom","symbol",("symbolPath","symbolViewBox": an
     /// svg-only icon's, `icon_path::push_json`),"title",
-    /// "secondary","subtitle","accessory","target","pressable","action",
-    /// "checked","destructive","disabled","authoredEdge","nextAuthoredTop","titleLook","secondaryLook"}]}],"spaceBelow"}`,
+    /// "secondary","subtitle","accessory","accessoryView","target","pressable","action",
+    /// "checked","destructive","disabled","authoredEdge","nextAuthoredTop","titleLook","secondaryLook"}]}],"spaceBelow","animates"}`,
     /// `null` for a node that is not one. A look is `{"lines","ellipsis",
     /// "color","font"}`: a colour row's wire form and `{"size","weight",
     /// "italic","family","numeric"}`, each `null` where the author said nothing.
@@ -608,7 +582,7 @@ impl<D: DataSource> Bridge<D> {
     /// radio, whose bound state is `checked`. Not a batch: nothing changes.
     pub fn grouped_list(&mut self, view: u32) -> u32 {
         use exact_kernel::Accessory;
-        let quote = exact_runner::agent::quote;
+        let quote = exact_runner::json::quote;
         let opt = |v: &Option<String>, json: &mut String| match v {
             Some(t) => quote(t, json),
             None => json.push_str("null"),
@@ -649,10 +623,16 @@ impl<D: DataSource> Bridge<D> {
             }
             json.push('}');
         };
-        let list = self
-            .host
-            .as_ref()
-            .and_then(|h| h.runner().kernel().grouped_list(view));
+        // A text or an image with a press of its own stays its own element (`grouped_list_with`).
+        let list = self.host.as_ref().and_then(|h| {
+            let runner = h.runner();
+            let acts = |id| {
+                runner
+                    .handlers_of(id)
+                    .contains(&exact_plan::EventKind::Press)
+            };
+            runner.kernel().grouped_list_with(view, &acts)
+        });
         let mut json = String::new();
         match list {
             None => json.push_str("null"),
@@ -712,6 +692,9 @@ impl<D: DataSource> Bridge<D> {
                             r.authored_edge,
                             r.next_authored_top
                         ));
+                        if let Some(view) = r.accessory_view {
+                            json.push_str(&format!(",\"accessoryView\":{view}"));
+                        }
                         look(",\"titleLook\":", &r.title_look, &mut json);
                         look(",\"secondaryLook\":", &r.secondary_look, &mut json);
                         json.push('}');
@@ -719,8 +702,9 @@ impl<D: DataSource> Bridge<D> {
                     json.push_str("]}");
                 }
                 json.push_str(&format!(
-                    "],\"spaceBelow\":{}}}",
-                    list.space_below.map_or("null".into(), |v| v.to_string())
+                    "],\"spaceBelow\":{},\"animates\":{}}}",
+                    list.space_below.map_or("null".into(), |v| v.to_string()),
+                    list.animates
                 ));
             }
         }

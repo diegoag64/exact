@@ -1,5 +1,6 @@
 import { beneathApp } from "./type.js";
-import { AGENT_ADMITTED, agentParameters } from "./routes.js";
+import { agentParameters } from "./routes.js";
+const AGENT_ADMITTED = true; // false in a release, as the release gate writes it (agent-gate.mjs, LLP 1069.007 D2)
 // Read safe-area insets from probe padding and keyboard height from the visual viewport
 let probe;
 export function environment() {
@@ -274,14 +275,19 @@ export function pageReporter(agent, platform = globalThis) {
     "can-open-files": true,
     "has-focus": true,
     "root-font-size": 16,
+    "screen-reader": "unknown",
     "gpu-tier": "high",
-    "iframe-partition": false
+    "iframe-partition": false,
+    presented: true
   }, cache = {
     persisted: false,
     restores: 0
   };
   // cache: the drive's page is never put away
   let frozen = false;
+  // `presented` (LLP 1069.000 D2 r7): the browser has presented a picture of this page. Under the agent each frame is
+  // presented at its commit (true, until `prefer presented`); on the page, false until `presentedNow`.
+  let seen = false;
   let sharesFiles;
   const canShareFiles = () => sharesFiles ??= (() => {
     try {
@@ -304,6 +310,7 @@ export function pageReporter(agent, platform = globalThis) {
     ...cache
   } : {
     ...cache,
+    "screen-reader": "unknown",
     frozen,
     "visibility-state": platform.document.visibilityState === "hidden" ? "hidden" : "visible",
     online: platform.navigator.onLine !== false,
@@ -314,7 +321,8 @@ export function pageReporter(agent, platform = globalThis) {
     "has-focus": typeof platform.document.hasFocus !== "function" || platform.document.hasFocus(),
     "navigation-type": navigationType,
     "gpu-tier": gpuTier(),
-    "iframe-partition": false
+    "iframe-partition": false,
+    presented: seen
   };
   // iframe-partition: a browser never honours an iframe's `partition` (LLP 1020.002 Q4)
   const bits = () => {
@@ -333,13 +341,13 @@ export function pageReporter(agent, platform = globalThis) {
     const next = { ...facts };
     for (const [name, raw] of Object.entries(page ?? {})) {
       const value = String(raw);
-      if (name === "visibility-state" && (value === "visible" || value === "hidden") || name === "gpu-tier" && [
+      if (name === "screen-reader" && ["on", "off", "unknown"].includes(value) || name === "visibility-state" && (value === "visible" || value === "hidden") || name === "gpu-tier" && [
         "low",
         "mid",
         "high"
       ].includes(value)) {
         next[name] = value;
-      } else if ((name === "frozen" || name === "online" || name === "can-share" || name === "can-share-files" || name === "can-share-pictures" || name === "can-open-files" || name === "has-focus" || name === "iframe-partition") && (value === "true" || value === "false")) {
+      } else if ((name === "frozen" || name === "online" || name === "can-share" || name === "can-share-files" || name === "can-share-pictures" || name === "can-open-files" || name === "has-focus" || name === "iframe-partition" || name === "presented") && (value === "true" || value === "false")) {
         next[name] = value === "true";
       } else if (name === "root-font-size" && Number(value) > 0 && Number.isFinite(Number(value))) {
         next[name] = Number(value);
@@ -393,6 +401,7 @@ export function pageReporter(agent, platform = globalThis) {
   };
   return {
     bits,
+    screenReaderCode: () => ["unknown", "off", "on"].indexOf(read()["screen-reader"]),
     read: () => ({
       ...read(),
       "root-font-size": rootFontSize(),
@@ -407,7 +416,9 @@ export function pageReporter(agent, platform = globalThis) {
       if (!agent) {
         told = tier;
       }
-    }
+    },
+    // The present of the page's first picture; whether this changed it.
+    presentedNow: () => !agent && !seen && (seen = true)
   };
 }
 // The page launch owns its seed, a whole number below 2^32 on every host (LLP 1116.005 D5); a new runner during
@@ -415,7 +426,7 @@ export function pageReporter(agent, platform = globalThis) {
 export function placeReporter(params, platform = globalThis) {
   let seed;
   return () => {
-    if (AGENT_ADMITTED && params.has("agent")) {
+    if (AGENT_ADMITTED && ["", "1"].includes(params.get("agent"))) {
       const value = Number(params.get("seed") ?? 1);
       if (!Number.isSafeInteger(value) || value < 0 || value >= 2 ** 32) {
         throw new Error("seed: a whole number from 0 through 2^32 - 1 (4294967295)");
@@ -427,8 +438,10 @@ export function placeReporter(params, platform = globalThis) {
         params.get("formatLocale") ?? ""
       ].join("\0");
     }
+    // Take a render's seed, 0, as its time facts do (host/web-js/build.mjs `exactTime`), since a draw there would count
+    // as the page's own (LLP 1069.005 D2)
     if (seed === undefined) {
-      seed = platform.crypto.getRandomValues(new Uint32Array(1))[0];
+      seed = platform.__exactRender ? 0 : platform.crypto.getRandomValues(new Uint32Array(1))[0];
     }
     return [
       platform.navigator.language,
@@ -442,7 +455,7 @@ export function placeReporter(params, platform = globalThis) {
 // LLP 1027.000.000 D3: agent time starts at the drive epoch; clock movement updates the date and zone offset.
 export function timeReporter(params, platform = globalThis) {
   return (elapsed) => {
-    if (!(AGENT_ADMITTED && params.has("agent"))) {
+    if (!(AGENT_ADMITTED && ["", "1"].includes(params.get("agent")))) {
       return [platform.Date.now() - elapsed, -new platform.Date().getTimezoneOffset()];
     }
     const epoch = Number(params.get("epoch") ?? Date.UTC(2026, 0, 1));
@@ -465,11 +478,12 @@ export function timeReporter(params, platform = globalThis) {
     return [epoch, (Date.UTC(at.year, at.month - 1, at.day, at.hour, at.minute, at.second) - Math.floor((epoch + elapsed) / 1e3) * 1e3) / 6e4];
   };
 }
-// LLP 1038 D5: launch at the page path, query and fragment, excluding agent-only parameters.
-export function launchLocation(platform = globalThis) {
+// LLP 1038 D5: the platform's location as the launch reads it, its path, query and fragment, excluding agent-only
+// parameters where the launch is a drive. Agent mode is the launch's, so a later location's own `agent` is the app's query.
+export function launchLocation(platform = globalThis, launch = launchURL(platform)) {
   const { pathname, search, hash = "" } = platform.location, q = new URLSearchParams(search);
   // the fragment is the launch's too (LLP 1153 D5)
-  if (!(AGENT_ADMITTED && q.has("agent"))) {
+  if (!(AGENT_ADMITTED && ["", "1"].includes(launch.searchParams.get("agent")))) {
     return pathname + search + hash;
   }
   for (const k of agentParameters) {
@@ -479,17 +493,26 @@ export function launchLocation(platform = globalThis) {
   return pathname + (rest ? "?" + rest : "") + hash;
 }
 /** The locations of this document's history entries before the current one, oldest first, by the Navigation API: after
- * a reload, the visits Back returns to without loading a page (`NavigationHistoryEntry.sameDocument`). */
+ * a reload, the visits Back returns to without loading a page (`NavigationHistoryEntry.sameDocument`), each as the launch
+ * reads it. */
 export function launchVisits(platform = globalThis) {
   const entries = platform.navigation?.entries?.() ?? [], at = platform.navigation?.currentEntry?.index ?? -1;
   let from = at;
   while (from > 0 && entries[from - 1].sameDocument) {
     from--;
   }
-  return entries.slice(from, Math.max(at, 0)).map((entry) => launchLocation({ location: new URL(entry.url) }));
+  const visits = entries.slice(from, Math.max(at, 0));
+  // Read the launch only for a visit: without one the platform may have no location (a test's)
+  if (!visits.length) {
+    return [];
+  }
+  const launch = launchURL(platform);
+  return visits.map((entry) => launchLocation({ location: new URL(entry.url) }, launch));
 }
-// Drive facts use the launch URL after route changes too (storage-environment.js `launchHref`).
-const launched = () => new URL(globalThis.performance?.getEntriesByType?.("navigation")[0]?.name ?? location.href).searchParams;
+// The URL this document launched at, its navigation's, which history entries the app pushes leave as it was (Navigation
+// Timing): agent mode and a drive's facts are the launch's (storage-environment.js `launchHref`)
+const launchURL = (platform = globalThis) => new URL(platform.performance?.getEntriesByType?.("navigation")[0]?.name ?? platform.location.href);
+const launched = () => launchURL().searchParams;
 let pageTime;
 export const reportTime = (elapsed) => (pageTime ??= timeReporter(launched()))(elapsed);
 let pagePlace;

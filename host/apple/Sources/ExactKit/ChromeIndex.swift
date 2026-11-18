@@ -59,6 +59,13 @@ struct ChromeIndex {
             }
         }
     }
+    /// `forget` for many at once: each member set is read once, not once an id.
+    mutating func forget(all ids: Set<UInt32>) {
+        for id in ids { rename(id, nil) }
+        for index in byKey.indices where !byKey.values[index].isDisjoint(with: ids) {
+            if byKey.values[index].count < ids.count { byKey.values[index] = byKey.values[index].filter { !ids.contains($0) } } else { byKey.values[index].subtract(ids) }
+        }
+    }
     mutating func forget(_ id: UInt32) {
         rename(id, nil)
         // Only the member sets change; dictionary keys and indices stay fixed.

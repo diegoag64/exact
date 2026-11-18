@@ -8,6 +8,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// The host work these tests hand out (LLP 1047.001 D12).
+struct TestWork;
+impl exact_runner::HostWork for TestWork {}
+
 const UPDATE_COMPAT: &str = r#"{"id":"fixture00000000","inputs":{"app":"com.exact.fixture","keys":null,"trust":"development","store":{"L":"A"},"rustMode":"wasm"},"delivery":{"channel":"prod","origin":"https://updates.example"}}"#;
 /// Dev binaries check only a named origin; name the fixture's.
 const ORIGIN: &str = "https://updates.example";
@@ -111,6 +115,7 @@ fn selected_config(dir: &Path, baked: &[u8], client: Client) -> Config {
 
 fn selected_config_as(compat: &str, dir: &Path, baked: &[u8], client: Client) -> Config {
     let mut config = Config {
+        output_rotation: Default::default(),
         content_region: None,
         launch: "/".into(),
         plan: baked.to_vec().into(),
@@ -131,6 +136,7 @@ fn selected_config_as(compat: &str, dir: &Path, baked: &[u8], client: Client) ->
         explicit: false,
         entry: None,
         selected_assets: None,
+        selected_dir: None,
         module: Ok(None),
         updates: None,
         hatches: None,
@@ -182,6 +188,7 @@ fn a_fetched_plan_refused_at_boot_falls_back_to_baked() {
     foreign.app_id = "com.exact.foreign".into();
     let baked = contract::compile(source).unwrap().encode();
     let mut config = Config {
+        output_rotation: Default::default(),
         content_region: None,
         launch: "/".into(),
         plan: foreign.encode().into(),
@@ -202,6 +209,7 @@ fn a_fetched_plan_refused_at_boot_falls_back_to_baked() {
         explicit: true,
         entry: None,
         selected_assets: None,
+        selected_dir: None,
         module: Ok(None),
         updates: None,
         hatches: None,
@@ -257,6 +265,7 @@ fn a_partial_initial_dev_plan_falls_back_without_counting_the_store() {
     let record = client.dir().join("record.json");
     let updates = Updates::from_client(client).unwrap();
     let mut config = Config {
+        output_rotation: Default::default(),
         content_region: None,
         launch: "/".into(),
         plan: b"EXPL".to_vec().into(), // the compiler was interrupted mid-write
@@ -277,6 +286,7 @@ fn a_partial_initial_dev_plan_falls_back_without_counting_the_store() {
         explicit: true,
         entry: None,
         selected_assets: None,
+        selected_dir: None,
         module: Ok(None),
         updates: None,
         hatches: None,
@@ -1078,7 +1088,7 @@ fn failed_post_pixel_rust_activation_does_not_bless_the_selected_bundle() {
 }
 
 #[test]
-fn a_live_rust_swap_refuses_before_loading_while_a_request_is_pending() {
+fn a_live_rust_swap_waits_without_loading_while_a_request_is_pending() {
     use exact_runner::{Answer, Store};
     #[derive(Clone)]
     struct Held(Arc<std::sync::atomic::AtomicUsize>);
@@ -1120,13 +1130,104 @@ fn a_live_rust_swap_refuses_before_loading_while_a_request_is_pending() {
         receipt: String::new(),
         bytes: Vec::new(),
     };
-    let error = presenter
-        .reload_module(&plan, source, Some(module), false)
-        .unwrap_err();
-    assert!(
-        matches!(error, exact_painted::host::HostError::RequestsPending),
-        "{error}"
+    assert_eq!(
+        presenter
+            .reload_module(&plan, source, Some(module), false)
+            .unwrap(),
+        exact_painted::presenter::ReloadResult::Held("requests")
     );
     assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
     assert_eq!(presenter.host().runner().pending(), pending);
+}
+
+#[test]
+fn delivered_module_reads_wait_for_requests_and_all_assets_verify_before_commit() {
+    use exact_runner::{Answer, Store};
+    struct Held;
+    impl DataSource for Held {
+        fn query(&mut self, name: &str, _: &[Value]) -> Result<Value, DataError> {
+            Err(DataError::UnknownSource(name.into()))
+        }
+        fn answer(&mut self, _: &mut Store, _: &str, _: &[Value]) -> Result<Answer, DataError> {
+            Ok(Answer::Later(
+                exact_runner::Request::continuation::<TestWork>(1),
+            ))
+        }
+        fn replacement(&self, _: &[u8], _: &str, _: Vec<u8>) -> Result<Self, DataError> {
+            Ok(Self)
+        }
+    }
+    let plan = contract::compile("component App\n  mutation w as shape number\n  action start\n    send w = wait()\n  action cancel\n    w = none\n  view\n    column\n      button press=start testId=\"start\"\n        text \"Start\"\n      button press=cancel testId=\"cancel\"\n        text \"Cancel\"\n").unwrap().encode();
+    for (dir_name, file, receipt) in [
+        (
+            "rust",
+            "app.module.wasm",
+            br#"{"module":{"file":"app.module.wasm"}}"#.as_slice(),
+        ),
+        ("typescript", "app.hbc", b"{}".as_slice()),
+    ] {
+        let dir = crate::TempDir(std::env::temp_dir().join(format!(
+            "exact-delivery-lazy-assets-{}-{dir_name}",
+            std::process::id()
+        )));
+        std::fs::create_dir_all(&dir).unwrap();
+        let compat = UPDATE_COMPAT.replace(
+            "\"rustMode\":\"wasm\"",
+            "\"rustMode\":\"wasm\",\"executors\":[\"hermes\"]",
+        );
+        let module_path = format!("{dir_name}/{file}");
+        let mut client = checked_as(
+            &compat,
+            &dir,
+            &plan,
+            &plan,
+            &[
+                (&format!("{dir_name}/app.module.json"), receipt.to_vec()),
+                (&module_path, b"module".to_vec()),
+                ("assets/unused.txt", b"signed".to_vec()),
+            ],
+            true,
+        );
+        let candidate = client.prepare_activation().unwrap().unwrap();
+        let root = candidate.assets.root().to_path_buf();
+        let updates = Updates::from_client(client).unwrap();
+        let (mut presenter, error) =
+            exact_painted::Presenter::boot(&plan, Held, (390., 844.), 1., dir.to_path_buf())
+                .unwrap();
+        assert!(error.is_none(), "{error:?}");
+        presenter.set_delivery_from_compat(&compat);
+        presenter.set_updates(Some(Box::new(updates)));
+        let id = |p: &exact_painted::Presenter<Held>, name| {
+            let k = p.host().kernel();
+            k.node_by_key(k.find_by_test_id(name)[0]).unwrap().id
+        };
+        presenter.tap(id(&presenter, "start")).unwrap();
+        assert!(presenter.host().runner().has_pending());
+        // A missing executable makes any eager disk read fail, even one
+        // outside the presenter's resolver. Its signed roster stays intact.
+        std::fs::remove_file(root.join(&module_path)).unwrap();
+        let result = presenter.activate_update(Held);
+        assert!(
+            matches!(result, Err(exact_painted::host::HostError::RequestsPending)),
+            "{dir_name}: {result:?}"
+        );
+        assert_eq!(presenter.host().runner().delivery().seq, 0);
+        std::fs::write(root.join(&module_path), b"module").unwrap();
+        presenter.tap(id(&presenter, "cancel")).unwrap();
+        assert!(!presenter.host().runner().has_pending());
+        // Path-based readers can open an asset the plan never resolved.
+        // Full verification must still refuse it before the store commits.
+        std::fs::write(root.join("assets/unused.txt"), b"broken").unwrap();
+        let result = presenter.activate_update(Held);
+        assert!(
+            matches!(result, Err(exact_painted::host::HostError::Asset(_))),
+            "{dir_name}: {result:?}"
+        );
+        assert_eq!(presenter.host().runner().delivery().seq, 0);
+        assert!(presenter.host().runner().delivery().staged);
+        std::fs::write(root.join("assets/unused.txt"), b"signed").unwrap();
+        assert!(presenter.activate_update(Held).unwrap());
+        assert_eq!(presenter.host().runner().delivery().seq, 1);
+        assert!(!presenter.host().runner().delivery().staged);
+    }
 }

@@ -81,6 +81,49 @@ fn center_force_persists_until_cleared_and_replays() {
 }
 
 #[test]
+fn collider_saves_replace_defaults_and_patches_keep_omitted_fields() {
+    let changed = Collider {
+        bounce_combine: BounceCombine::Multiply,
+        extra: vec![ExtraShape {
+            shape: Shape::Sphere { radius: 0.25 },
+            ..ExtraShape::default()
+        }],
+        ..Collider::default()
+    };
+    for saved in [Collider::default(), changed.clone()] {
+        let initial = if saved == changed {
+            Collider::default()
+        } else {
+            changed.clone()
+        };
+        let mut decoded = initial.clone();
+        let text = json::to_string(&saved).unwrap();
+        json::read_into(&text, &mut decoded).unwrap();
+        assert_eq!(decoded, saved, "JSON save");
+        let mut decoded = initial;
+        bin::read_into(&bin::to_vec(&saved), &mut decoded).unwrap();
+        assert_eq!(decoded, saved, "binary save");
+    }
+    let mut patched = changed.clone();
+    json::read_into(r#"{"friction":0.25}"#, &mut patched).unwrap();
+    assert_eq!(
+        patched,
+        Collider {
+            friction: 0.25,
+            ..changed
+        }
+    );
+    json::read_into(r#"{"bounce_combine":{"Max":{}},"extra":[]}"#, &mut patched).unwrap();
+    assert_eq!(
+        patched,
+        Collider {
+            friction: 0.25,
+            ..Collider::default()
+        }
+    );
+}
+
+#[test]
 fn force_and_inertia_round_trip_and_survive_patches() {
     let set = Body {
         force: Vec3::new(1.0, 2.0, 3.0),
@@ -120,7 +163,7 @@ fn force_and_inertia_round_trip_and_survive_patches() {
         bounce_combine: BounceCombine::Average,
         ..Collider::default()
     };
-    assert!(!json::to_string(&Collider::default())
+    assert!(json::to_string(&Collider::default())
         .unwrap()
         .contains("bounce_combine"));
     assert!(json::to_string(&average)
@@ -307,7 +350,7 @@ fn extra_colliders_share_the_body_and_filter_by_their_own_layers() {
     }
     assert!(x(&w, die) > x(&w, other) + 0.5, "passed through");
     let json = exact_game::json::to_string(&*w.get::<Collider>(die).unwrap()).unwrap();
-    assert!(!json.contains("extra"), "{json}");
+    assert!(json.contains("\"extra\":[]"), "{json}");
 }
 
 #[test]

@@ -4,6 +4,10 @@ use exact_runner::Dispatch;
 use serde_json::json;
 use std::sync::Arc;
 
+/// The host work these tests hand out (LLP 1047.001 D12).
+struct TestWork;
+impl exact_runner::HostWork for TestWork {}
+
 struct Fixture;
 impl DataSource for Fixture {
     fn app_id(&self) -> &str {
@@ -37,7 +41,9 @@ impl DataSource for Fixture {
             panic!("a kept reply")
         };
         store.set_durable("token", std::str::from_utf8(&response.body).unwrap())?;
-        Ok(Some(exact_runner::Request::continuation(token + 1)))
+        Ok(Some(exact_runner::Request::continuation::<TestWork>(
+            token + 1,
+        )))
     }
 }
 
@@ -164,6 +170,53 @@ fn a_source_without_an_id_takes_the_manifests() {
         .unwrap();
     assert!(replaced.embedded.is_some());
     assert_eq!(replaced.app_id(), "com.example.unnamed");
+}
+
+/// Under a variant (LLP 1030.008 D2) a source naming none or naming the base
+/// app takes the variant's id, one naming another keeps its own (the runner's
+/// gate refuses it), and a replacement keeps the variant's id.
+#[test]
+fn a_variant_names_a_source_that_names_the_base_app() {
+    let variant = |source: Swappable<Fixture>| source.named_variant("test.logic.dev", "test.logic");
+    assert_eq!(variant(Swappable::wasm(Fixture)).app_id(), "test.logic.dev");
+    assert_eq!(
+        Swappable::wasm(Fixture)
+            .named_variant("com.other.dev", "com.other")
+            .app_id(),
+        "test.logic"
+    );
+    let native = variant(Swappable::wasm(Fixture).with_native("abc", || Fixture));
+    let mut plan = exact_plan::builder::PlanBuilder::new(0, 0)
+        .finish()
+        .unwrap();
+    plan.app_id = "test.logic.dev".into();
+    let plan = plan.encode();
+    let module = wasm("");
+    let mut meta: serde_json::Value = serde_json::from_str(&receipt(&plan, &module)).unwrap();
+    meta["appId"] = json!("test.logic.dev");
+    meta["grants"] = json!(Fixture.grants());
+    meta["source"] = json!("abc");
+    let replaced = native
+        .replacement(&plan, &meta.to_string(), module.clone())
+        .unwrap();
+    assert_eq!(replaced.app_id(), "test.logic.dev");
+    // A module's own crate names the base: its receipt and its metadata are
+    // admitted under the variant, and a third id is not.
+    meta["source"] = json!("def");
+    for (id, admitted) in [
+        ("test.logic", true),
+        ("test.logic.dev", true),
+        ("another", false),
+    ] {
+        meta["appId"] = json!(id);
+        let candidate =
+            variant(Swappable::wasm(Fixture)).replacement(&plan, &meta.to_string(), module.clone());
+        assert_eq!(candidate.is_ok(), admitted, "{id}");
+        if let Ok(mut candidate) = candidate {
+            candidate.activate_for_validation().unwrap();
+            assert_eq!(candidate.app_id(), "test.logic.dev");
+        }
+    }
 }
 
 fn encoded(op: u8, f: impl FnOnce(&mut Writer)) -> Vec<u8> {

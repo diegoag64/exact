@@ -24,6 +24,44 @@
 #if os(iOS) || os(tvOS)
 import UIKit
 
+/// A hidden tab bar's UIKit wrappers can remain visible to accessibility.
+/// Hide only its branch, stopping before any child controller's content.
+final class TabController: UITabBarController {
+    private weak var barGroup: UIView?
+    private var hidGroup = false
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        syncBarAccessibility()
+    }
+
+    func syncBarAccessibility() {
+        let hidden: Bool
+        if #available(iOS 18.0, tvOS 18.0, *) { hidden = isTabBarHidden } else { hidden = tabBar.isHidden }
+        guard hidden else { restoreBarAccessibility(); return }
+        var group: UIView = tabBar
+        while let parent = group.superview, parent !== view,
+              !children.contains(where: { $0.viewIfLoaded?.isDescendant(of: parent) == true }) {
+            group = parent
+        }
+        guard group !== tabBar else { restoreBarAccessibility(); return }
+        if barGroup !== group {
+            restoreBarAccessibility()
+            barGroup = group
+        }
+        if !group.accessibilityElementsHidden {
+            group.accessibilityElementsHidden = true
+            hidGroup = true
+        }
+    }
+
+    private func restoreBarAccessibility() {
+        if hidGroup { barGroup?.accessibilityElementsHidden = false }
+        barGroup = nil
+        hidGroup = false
+    }
+}
+
 extension NavigationHost {
     /// Whether the root's tabs are built from `UITab`s: on iOS 18 and later,
     /// five or fewer, which no width lists under More, of an iPad, or of a
@@ -105,7 +143,7 @@ extension NavigationHost {
     func followSidebar(_ p: Projection) {
         #if os(iOS)
         guard #available(iOS 18.0, tvOS 18.0, *), !builtTabs.isEmpty, UIDevice.current.userInterfaceIdiom == .pad, let container = tabController,
-              tabOwner === container, let tabs = p.tabs, let kernel = presenter.session?.runtime.rootTabs(p.root.id) else { return }
+              tabOwner === container, let tabs = p.tabs, let kernel = presenter.rootTabs[p.root.id] else { return }
         let mode: UITabBarController.Mode = sidebarAdapts(tabs, unsaid: kernel.unsaid) ? .tabSidebar : .tabBar
         guard container.mode != mode else { return }
         container.mode = mode
@@ -165,9 +203,9 @@ extension NavigationHost {
     /// tab, asked as UIKit asks it: by its `UITab` on a bar built from them.
     func appDeclinesTab(_ tabs: UITabBarController, _ controller: UIViewController) -> Bool {
         if #available(iOS 18.0, tvOS 18.0, *), let index = tabIndex(of: controller), builtTabs.indices.contains(index), let tab = builtTabs[index] as? UITab {
-            return tabProxy.app?.tabBarController?(tabs, shouldSelectTab: tab) == false
+            return tabProxy?.app?.tabBarController?(tabs, shouldSelectTab: tab) == false
         }
-        return tabProxy.app?.tabBarController?(tabs, shouldSelect: controller) == false
+        return tabProxy?.app?.tabBarController?(tabs, shouldSelect: controller) == false
     }
 
     /// UIKit's `didSelect` for a tap on the tab it shows, which selects
@@ -175,9 +213,9 @@ extension NavigationHost {
     /// it: by `UITab` on a bar built from them.
     func sendReselect(_ tabs: UITabBarController, _ controller: UIViewController) {
         if #available(iOS 18.0, tvOS 18.0, *), let index = tabIndex(of: controller), builtTabs.indices.contains(index), let tab = builtTabs[index] as? UITab {
-            return tabProxy.tabBarController(tabs, didSelectTab: tab, previousTab: tab)
+            return tabProxy?.tabBarController(tabs, didSelectTab: tab, previousTab: tab) ?? ()
         }
-        tabProxy.tabBarController(tabs, didSelect: controller)
+        tabProxy?.tabBarController(tabs, didSelect: controller)
     }
 
     /// The search tab activates its field on selection when its root route's
@@ -217,6 +255,7 @@ extension TabDelegateProxy {
 
     @available(iOS 18.0, tvOS 18.0, *)
     @objc func tabBarController(_ tabs: UITabBarController, didSelectTab tab: UITab, previousTab: UITab?) {
+        let app = self.app
         if let host, !host.builtTabs.isEmpty, tabs === host.tabController { host.followUIKit(tabs) }
         app?.tabBarController?(tabs, didSelectTab: tab, previousTab: previousTab)
     }
@@ -225,12 +264,14 @@ extension TabDelegateProxy {
     /// The sidebar's Edit hid or moved tabs, as More's Edit moves them (`syncNextTurn`).
     @available(iOS 18.0, tvOS 18.0, *)
     @objc func tabBarController(_ tabs: UITabBarController, displayOrderDidChangeFor group: UITabGroup) {
+        let app = self.app
         host?.syncNextTurn()
         app?.tabBarController?(tabs, displayOrderDidChangeFor: group)
     }
 
     @available(iOS 18.0, tvOS 18.0, *)
     @objc func tabBarController(_ tabs: UITabBarController, visibilityDidChangeFor changed: [UITab]) {
+        let app = self.app
         host?.syncNextTurn()
         app?.tabBarController?(tabs, visibilityDidChangeFor: changed)
     }

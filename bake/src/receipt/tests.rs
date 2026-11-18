@@ -214,6 +214,7 @@ fn plist_keys_ignore_translation_prose_and_keep_library_calls() {
         reach: Value::Null,
         painter: None,
         game: false,
+        host_work: false,
     };
     emit(
         &mut compat,
@@ -346,7 +347,8 @@ fn rust_plan_receipts_require_the_baked_wasmi_executor() {
         .unwrap();
         let manifest = Manifest::read(&root).unwrap();
         let compat =
-            crate::compat::compatibility_id(&root, "linux", target, &manifest, Some("")).unwrap();
+            crate::compat::compatibility_id(&root, "linux", target, &manifest, Some(""), false)
+                .unwrap();
         let graph = artifact_graph(&plan, &compat.inputs, &[], false, target).unwrap();
         assert_eq!(
             graph["artifacts"][0]["requires"]["executors"], expected,
@@ -498,6 +500,26 @@ fn a_plan_requires_the_typescript_runtime_its_inputs_carry() {
         json!(crate::compat::TYPESCRIPT_RUNTIME)
     );
     assert_eq!(requires(json!({})), Value::Null);
+}
+
+/// A plan requires the purposes and the languages the installed Info.plist
+/// names, so a bundle that changes either waits for a binary that has them.
+#[test]
+fn a_plan_requires_the_plist_strings_its_inputs_carry() {
+    let plan = exact_plan::builder::PlanBuilder::new(0, 0)
+        .finish()
+        .unwrap();
+    let requires = |inputs: Value| {
+        let graph = artifact_graph(&plan, &inputs, &[], false, "aarch64-apple-ios").unwrap();
+        graph["artifacts"][0]["requires"].clone()
+    };
+    let languages = json!({"base": "en", "locales": ["en", "fr"]});
+    let both = requires(json!({"grantPurposes": "ab", "localizations": languages}));
+    assert_eq!(both["grantPurposes"], "ab");
+    assert_eq!(both["localizations"], languages);
+    let neither = requires(json!({}));
+    assert_eq!(neither["grantPurposes"], Value::Null);
+    assert_eq!(neither["localizations"], Value::Null);
 }
 
 /// A TypeScript module pair requires exactly the binary's TypeScript grants
@@ -1141,6 +1163,7 @@ fn signed_fixture() -> (Compat, Value, Vec<u8>) {
         reach: Value::Null,
         painter: None,
         game: false,
+        host_work: false,
         embedded: json!({"seq":0,"genesis":true,"entryDigest":null,"plan":{"sha256":head.plan.sha256,"bytes":head.plan.bytes},"assets":assets}),
     };
     (
@@ -1319,4 +1342,26 @@ fn apple_raster_icons_include_literal_sources_and_nested_baked_values() {
     };
     baked.resources[0].initial = exact_plan::Bytes { offset: 0, len: 0 };
     assert_eq!(super::apple_icons(&baked).unwrap(), icons);
+}
+
+#[test]
+fn a_plan_requires_its_watch_policy_including_removal() {
+    let plan = exact_plan::builder::PlanBuilder::new(0, 0)
+        .finish()
+        .unwrap();
+    for policy in [
+        json!({"state":[],"secrets":[]}),
+        json!({"state":["liked"],"secrets":["seed"]}),
+        json!({"state":["liked"],"secrets":[],"types":{"liked":"Bool"}}),
+    ] {
+        let graph = artifact_graph(
+            &plan,
+            &json!({"watchSync": policy}),
+            &[],
+            false,
+            "aarch64-apple-ios",
+        )
+        .unwrap();
+        assert_eq!(graph["artifacts"][0]["requires"]["watchSync"], policy);
+    }
 }

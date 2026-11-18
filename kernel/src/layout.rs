@@ -103,6 +103,13 @@ fn from_available(space: AvailableSpace) -> AxisOffer {
 /// pass and repeated native measurement (LLP 1044 F6).
 const LEAF_OFFERS: usize = 16;
 
+/// Link the grid algorithm, which lays out a grid and a table, for the
+/// process (LLP 1047.001 D10): [`crate::Kernel::new`] does, and an Apple app
+/// does when its composition links `grid`.
+pub fn link_grid_layout() {
+    taffy::link_grid();
+}
+
 /// The engine tree. Measured leaves retain their height proof and bounded offers.
 /// A copy is a trial's (`Kernel::measure_block`): laid out and dropped.
 #[derive(Clone)]
@@ -352,11 +359,11 @@ impl LayoutTree {
         self.taffy.grid_origin(node)
     }
 
-    /// An empty tree.
+    /// An empty tree. It lays out a grid once [`link_grid_layout`] has run.
     pub fn new() -> Self {
         // Frames are CSS pixel geometry, not a host's raster grid. Rounding
         // here loses subpixel edits and snaps Retina views to whole points.
-        let mut taffy = TaffyTree::new();
+        let mut taffy = TaffyTree::by_use();
         taffy.disable_rounding();
         taffy.track_size_computations(cfg!(test));
         taffy.set_calc_resolver(crate::style::resolve_calc);
@@ -534,11 +541,14 @@ impl LayoutTree {
         if self.taffy.style(node).is_ok_and(|old| *old == style) {
             return;
         }
-        // A changed position changes which box contains which absolute one.
+        // A changed position changes which box contains which absolute one, and so does
+        // a box becoming or stopping being a bar (LLP 1123 D12), which is laid out
+        // `position: absolute` in its parent's slot and no containing block's
+        let placed = |s: &taffy::style::Style| (s.position, s.rare.bar.is_some());
         if self
             .taffy
             .style(node)
-            .map_or(true, |old| old.position != style.position)
+            .map_or(true, |old| placed(old) != placed(&style))
         {
             if style.position == taffy::Position::Absolute {
                 self.absolutes.insert(node);
@@ -1019,7 +1029,7 @@ impl LayoutTree {
             }) {
                 minima.insert(node, minimum);
                 adjusted = style.clone();
-                adjusted.min_size.height = taffy::LengthPercentageAuto::length(minimum);
+                adjusted.min_size.height = taffy::Dimension::length(minimum);
                 &adjusted
             } else {
                 style

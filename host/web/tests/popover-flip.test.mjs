@@ -93,6 +93,7 @@ beforeAll(async () => {
   if (process.platform === 'darwin') {
     const stub = `struct Style { var string: String?; func length(basis: CGFloat) -> CGFloat? { nil } }
 class NodeView { var style: [String:Style] = [:]; func number(_ name: String) -> CGFloat { 0 } }
+enum HostBlock { struct Tactic: Hashable { var sides: UInt32 = 228; static let none = Tactic() } }
 `;
     // The page is 1200 tall when scrolled; the viewport is the layer.
     const calls = cases.map(([area, fallback, x, y, w, h, m = [0, 0, 0, 0], [bw, bh] = [320, 120], position = 'absolute', dir = 'ltr', scroll = 0]) => `do {

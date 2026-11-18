@@ -32,17 +32,17 @@ const DRIVE = [
   ['--backend <url>', "select the backend for this build: app.ts needs one top-level const origin, a literal or import.meta.env.NAME ?? '<literal>', used in net.fetch ${origin}"],
   ['--storage <name>', 'a scratch store, kept on native hosts; Chrome\'s starts empty'],
   ['--keep-storage · --reset-storage', 'reopen a named store (Chrome, or a compare) · empty a named store first, on any host'],
-  ['--size <w>x<h>', 'the viewport (default 420x900; a simulator\'s own)'],
+  ['--size <w>x<h>', 'viewport; Linux: unrotated panel; 90/270 swap layout'],
   ['--scale <n>', 'screenshots at n pixels per point (exact.mjs agent on ios, macos: 1; an iPhone\'s own: 3)'],
   ['--chrome platform|agent', 'UIKit\'s bars (exact.mjs on iOS); agent paints the header'],
-  ['--live · --timing platform · --bind <extension>', 'Mac: normal scheduling and input · Apple: native transitions · use a module implementation'],
+  ['--live · --timing platform · --bind <extension>', 'macOS, iOS simulator: the wall clock and normal scheduling, input and reads only · Apple: native transitions · use a module implementation'],
   ['--touch platform', 'iOS simulator: every tap a real touch, through the XCTest runner'],
   ['--epoch <ISO|ms|now> · --login [hidden]', 'the date at the clock\'s zero (default 2026-01-01) · a launch the login item made, hidden: with no window'],
   ['--locale <tag> · --format-locale <tag> · --time-zone <zone> · --seed <n>', 'default en-US, the locale (the Region\'s format, exactTime().formatLocale), UTC, 1'],
   ['--fail-fetch <prefix> · --permission <name>=<state> · --notification <entry> · --wake <entry> · --call \'<tool> <json>\'', 'each fetch whose URL starts with it fails, from the first data load · a module\'s permission at the start (geolocation=granted) · a relaunch handed a listed entry, as state.notifications printed it · a cold wake for a registration, as state.backgroundSync printed it · a cold call of a tool, as a system\'s call that started the app'],
   ['--process <target>=<file>|script:<file.json>|real · --login-env NAME=value · --home <dir>', 'macOS, Linux: what a child process is (none runs unnamed; `all=real` runs every one), the login shell\'s variables, home:/ for the data code (LLP 1133.007 §7)'],
-  ['--url <url> · --browser chrome|firefox|webkit', 'web: drive a page already served (the dev loop\'s) instead of building · web (default chrome; bunx playwright@1.64.1 install firefox webkit)'],
-  ['--sim <udid|name>', 'iOS: which simulator (default: a booted one)'],
+  ['--url <url> · --browser chrome|firefox|webkit', 'web: drive a page already served (the dev loop\'s) instead of building · web (default chrome; bunx playwright@1.65.1 install firefox webkit)'],
+  ['--sim <udid|name> · --variant <name>', 'iOS: which simulator (default: booted) · which app variant'],
   ['--device · --phone <udid|name> · --reader · --headless', 'a connected iPhone (built with ios --device), and which · Android: the APK (an `exact new` app\'s default) · the Linux host under adb shell'],
   ['--plan <file>', 'a compiled plan (contract build -o) in place of the app\'s'],
   ['--world <file> · --open <file>', 'a game: a saved world to load · macOS: a document on its command line'],
@@ -57,7 +57,7 @@ const DRIVE_INTERNAL = ['--app <name>', '--session <label>', '--pid <pid>', '--o
 const NATIVE_PORTS = 'iOS simulator: a Unix socket; --device: a free TCP port; macOS, Linux, Android: stdio.';
 
 // host/apple/build.mjs's flags, which `ios` and `mac` both run: each documents its own, and takes the rest.
-const APPLE = ['--painted-benchmark', '--watchos', '--watch-sim <udid>', '--ios', '--tvos', '--device', '--run', '--no-install', '--prebuild', '--release', '--host', '--embed', '--bundle', '--distribution', '--unsigned', '--development', '--extensions <kinds>', '--test', '--only <Class,…>',
+const APPLE = ['--painted-benchmark', '--watchos', '--watch-sim <udid>', '--ios', '--tvos', '--device', '--run', '--no-install', '--prebuild', '--release', '--host', '--embed', '--bundle', '--distribution', '--appstore', '--ad-hoc', '--sandbox', '--unsigned', '--development', '--extensions <kinds>', '--test', '--only <Class,…>',
   '--archive <out.ipa>', '--sim <udid|name>', '--phone <udid|name>', '--url <url>', '--optimize <speed|size|balanced>', '--link <plan>', '--widget-gallery'];
 const appleRest = (documented) => APPLE.filter((spec) => !documented.some(([row]) => specs(row).some((d) => name(d) === name(spec))));
 const OPTIMIZE = ['--optimize speed|size|balanced', 'production Rust and ExactKit; default balanced on iOS/tvOS, size for embeds, speed on Mac; a game keeps speed and refuses size and balanced; app.json host.ios|macos.optimize overrides the default'];
@@ -86,7 +86,7 @@ export const HELP = {
   },
   status: {line:'the game\'s web and prove runs: phase and elapsed time', usage:'bun exact.mjs status', flags:[], body:'Lists the game\'s web and prove invocations with their phase, elapsed time, previous duration and exit status.', example:'bun exact.mjs status'},
   web: {
-    line: 'the web dev loop: serves the app, reloading the page on every save (foreground)',
+    line: 'serve the app and reload on save (foreground)',
     usage: 'bun exact.mjs web [--port <n>] [--lan] [--allow-host <name>]… [--wasm]',
     common: ['web [--port <n>]    for a person watching: its URL, rebuilt on save'],
     flags: [
@@ -114,7 +114,7 @@ export const HELP = {
     example: 'bun exact.mjs web --port 9000      # then open http://127.0.0.1:9000/',
   },
   'web-build': {
-    line: 'build the web app once (the page test web and agent web drive)',
+    line: 'build the web app once',
     usage: 'bun exact.mjs web-build [--out <dir>] [--render rust|js|none] [--json]',
     flags: [
       ['--out <dir>', 'a release build there (inside the app: dist), as deploy publishes, and how a static host serves it'],
@@ -169,7 +169,7 @@ Runs     to completion; nothing is left running; a test past 30 s says its line 
 Backend  start snapback4 dev on app.ts’s selected origin’s port first; checked before launch.
          A server this run did not start stays shared. EXACT_PORT is the page’s.
 Lines    tap, type, expect text|tree|state|disabled|refusal, clock data|settle|+<ms>|until state …, reload, back, fail|pass
-         fetch, request <METHOD> "/path" [json] [as <persona>] [expect <status>]: docs/recipes/tests.md;
+         fetch, answer fetch "<prefix>" with <status> [json], request: docs/recipes/tests.md;
          all: docs/contract-grammar.md "Authored tests".`,
     bodyAll: `A phone's build is ios --device's.
 Ports    --port <n> or EXACT_PORT chooses the page’s port; otherwise web: headless Chrome over a pipe; the page on 127.0.0.1, each test at a
@@ -204,7 +204,7 @@ Ports    web: --port/EXACT_PORT, else a named store’s port (20000-47999), else
     common: ['verify [ios] [--shots <dir>] [--sim <name>]    done when it says "verify: clean"'],
     flags: [
       DRIVE.find(([flag]) => flag === '--backend <url>'),
-      ['--sim <udid|name>', 'iOS: which simulator (else EXACT_SIM, a booted iPhone, or the newest Pro)'],
+      ['--sim <udid|name> · --variant <name>', 'iOS: which simulator (else EXACT_SIM, a booted iPhone, or the newest Pro) · which app.json variant (or EXACT_VARIANT)'],
       ['--shots <dir>', 'also copy every screenshot it captured there, named as in .exact/verify/ (a test\'s own `screenshot` steps too)'],
       ['--rescroll · --strict', 'ios: measure scrolling again though nothing it depends on changed · exit 1 on any counted problem (for CI)'],
       ['--json', 'the report as one JSON object (ios: `scrolling`, each finding\'s metric, value, UIKit\'s and remedy)'],
@@ -256,7 +256,7 @@ Ports    none to choose: test's and agent's (headless Chrome over a pipe; a simu
       ['--archive <out.ipa>', 'with --device: an .ipa to distribute (EXACT_IDENTITY, EXACT_PROFILE), no phone; production trust, so with an update store EXACT_UPDATE_RECEIPT or EXACT_UPDATE_GENESIS=1'],
       ['--unsigned', 'with --device: ad-hoc signed .app, no phone, profile, identity or install; no --run; --archive writes an .ipa for re-signing'],
       ['--development', 'with --archive --unsigned: the development build --run installs, as an .ipa (development trust, host-dev; no update store receipt)'],
-      ['--extensions <kinds>', 'which app extensions to package: all (the default), none, or a list of widgets,activities,intents,alarms,watch (the watch app a device build embeds); the bake still compiles every entry, and app code that reaches a missing one is refused, not crashed'],
+      ['--extensions <kinds>', 'which app extensions to package: all (the default), none, or a list of widgets,activities,intents,alarms,notifications,watch (the watch app a device build embeds); the bake still compiles every entry, and app code that reaches a missing one is refused, not crashed'],
       ['--tvos', 'an Apple TV simulator instead (with --device, an Apple TV)'],
       ['--url <url>', 'connect the client to that dev server (web\'s URL) for live reload'],
       OPTIMIZE,
@@ -285,22 +285,69 @@ Ports    none. Runs to completion (--run too); --prebuild returns at once, the b
     body: `Run it when the app is ready for a person to try on their phone, and send them the link
 (stdout's last line). They open it on their iPhone, and AppDrop installs the app with their
 own Apple ID. The first share makes the link; later ones publish a new version to it, and
-an installed copy offers the update. With the app's and exact2's trees clean and unchanged
+an installed copy offers the update. Each build is app.json's version, and the next build
+number past its buildNumber and the link's last build, which the share writes back to
+app.json to commit; AppDrop shows both. With the app's and exact2's trees clean and unchanged
 since the last share it rebuilds nothing and prints the same link. A share from another git
 branch than the last stops with code link_branch_mismatch: pass --new-link or --force.
 The link is kept in .exact/appdrop.json; the iPhone build takes minutes the first time.
 Ports    none. Runs to completion.`,
     example: 'bun exact.mjs share',
   },
+  deploy: {
+    line: 'classify a release; --yes publishes',
+    usage: 'bun exact.mjs deploy [--yes] [--origin <dir|url>] [--channel <name>] [--platform <p>] [--dirty] [--json]',
+    flags: [
+      ['--yes', 'publish the classified release; without it, print the table only'],
+      ['--origin <dir|url>', 'the update origin, else app.json deploy.channels.<channel>'],
+      ['--channel <name>', 'the channel, else app.json deploy.channel'],
+      ['--platform <p>', 'web, ios, macos, linux or android; repeat to select several'],
+      ['--only bundle|origin', 'only signed bundles, or only the web root'],
+      ['--dirty', 'capture uncommitted source too, marked dirty in the table'],
+      ['--json', 'the table as JSON'],
+    ],
+    more: [
+      ['--snapshot <sha>', 'require this complete source snapshot, as printed by the dry run'],
+      ['--release <id>', 'the release name; defaults to a timestamp and snapshot digest'],
+      ['--keys <dir>', 'signing keys; else EXACT_SIGNING_KEY_DIR or ~/.config/exact/keys'],
+      ['--variant <name>', "select app.json variants.<name> (or EXACT_VARIANT)"],
+    ],
+    body: `Captures the app and Exact source, builds and classifies what each installed binary can take.
+A native stream needs its production build receipt and the manifest's signing key.
+Generate a key with bun <exact2>/scripts/deploy.mjs keygen <id>.
+To publish a working-tree edit to installed release binaries, use bun exact.mjs push.
+Ports    none. Runs to completion.`,
+    example: 'bun exact.mjs deploy --origin ./origin',
+  },
+  push: {
+    line: 'publish an edit to installed release apps',
+    usage: 'bun exact.mjs push [--watch] [--origin <dir|url>] [--channel <name>]',
+    flags: [
+      ['--watch', 'keep the baker running and publish after each save'],
+      ['--origin <dir|url>', 'the update origin, else app.json deploy.channels.<channel>'],
+      ['--channel <name>', 'the channel, else app.json deploy.channel'],
+    ],
+    more: [
+      ['--keys <dir>', 'signing keys; else EXACT_SIGNING_KEY_DIR or ~/.config/exact/keys'],
+      ['--seq-above <n>', 'start above the old origin’s sequence when moving a stream'],
+      ['--variant <name>', "select app.json variants.<name> (or EXACT_VARIANT)"],
+    ],
+    body: `Publishes the working tree immediately, including uncommitted changes. There is no dry run.
+Needs a production build receipt or existing stream and the manifest's signing key.
+Refuses an edit that needs a new binary. Publishes no web root; deploy handles that.
+Ports    none. Runs to completion, or until Ctrl-C with --watch.`,
+    example: 'bun exact.mjs push --watch',
+  },
   mac: {
     line: 'build the macOS app (--run launches it here)',
-    usage: 'bun exact.mjs mac [--run|--prebuild] [--json] [--release] [--bundle] [--url <url>] [--optimize speed|size|balanced]',
+    usage: 'bun exact.mjs mac [--run|--prebuild] [--json] [--release] [--bundle] [--sandbox] [--url <url>] [--optimize speed|size|balanced]',
     flags: [
       ['--run', 'assemble the .app and launch it when built, in the foreground (its log here) until it quits'],
       jsonBuilt(', signing (an identity\'s SHA-1, or ad-hoc)', '; not with --run, --prebuild or --test'),
       PREBUILD,
       RELEASE,
       ['--bundle', 'assemble the .app bundle (the macOS default)'],
+      ['--sandbox', 'sign the App Sandbox the Mac App Store build signs, and refuse what it refuses; the agent drives it, its stores in ~/Library/Containers/<id>'],
       ['--painted-benchmark', 'build the app’s <macos-crate>-painted bin with ink; benchmark carrier only (LLP 1149 S1.1)'],
       ['--url <url>', 'connect the app to that dev server (web\'s URL) for live reload'],
       OPTIMIZE,
@@ -329,12 +376,13 @@ Ports    none. Runs to completion.`,
       ['--release', 'optimize the APK for speed; set EXACT_UPDATE_TRUST=production for distribution'],
       ['--bundle', 'build a production .aab with an upload key; implies --release and no install'],
       ['--headless', 'build the Linux host for Android instead (agent android --headless runs it under adb shell)'],
+      ['--abis <abis>', 'APK or bundle ABIs: arm64-v8a (default), x86_64, or both comma-separated; each needs its Rust target and Hermes bundle when used'],
       ['--write-locks', 'regenerate gradle.lockfile and gradle-verification.xml after graph changes; review and commit both'],
       jsonBuilt(', installed (the device\'s serial, or null with none ready)', '; printed after the install; not with --run'),
     ],
     // `--apk --install` are the verb's own.
     internal: ['--apk', '--install'],
-    body: `Builds android/ for aarch64-linux-android, packages it with exact2's Canvas reader
+    body: `Builds android/ for the selected ABIs (arm64-v8a by default), packages it with exact2's Canvas reader
 (host/android) into an APK under target/android/, prints its path and installs it on the
 device: ANDROID_SERIAL, else the one adb lists. Several entries must share a nonempty
 ro.serialno and secure android_id and contain at most one ip:port, one matching adb mDNS name and the USB serial
@@ -378,7 +426,7 @@ artifacts under game/target only. Ports none. Runs to completion.`,
   vocab [--json] [--all] [<name> …]       no name: the card, what an app writes, in one read (--all: every
                                           tag, attribute, CSS property and function); each name's entry in
                                           turn, a recipe whole, a pattern's summary; exit 1 if one is unknown
-  fmt [--check | --stdout] <file.contract> · fmt --uses <file.contract>
+  fmt [--check | --stdout | --stdin] <file.contract> · fmt --uses <file.contract>
   symbols <file.contract> [--name <name>] · sources <file.contract>
   build … --stdin · symbols … --stdin     the file's text is stdin's (an editor's unsaved buffer), read as
                                           if saved at <file.contract>; app.ts is not type-checked against it
@@ -410,10 +458,16 @@ Ports    none. Runs to completion.`,
     common: ['pattern [<name>]    a working, tested starter'],
     flags: [['--force', 'replace a file you edited (without it, it is refused, named)']],
     body: `With no name, lists the patterns. With one, writes its app.contract, app.ts and
-app.test.contract here (and what else it needs: rest's and site's server.ts, site's .env and
-app.json keys) with this app's id and name, then the types app.ts imports. A file still as exact
-new or a pattern wrote it is replaced; one you edited is refused unless --force. Each pattern
+app.test.contract in the selected app (and what else it needs: rest's and site's server.ts,
+site's .env and app.json keys), then the types app.ts imports. The wrapper selects its own app,
+even from another directory; the checkout CLI uses EXACT_APP_DIR or the working directory.
+The destination is printed before writing. The app must already have app.json and app.contract.
+An untouched exact new starter is replaced without --force; a file you edited, including a
+manually emptied app.contract, is refused unless --force. Each pattern
 passes its own tests and no-tells; rest's and site's run with test or verify, which run its server.
+To try a pattern in a separate app:
+  bun <exact2>/scripts/exact.mjs new ../pattern-scratch
+  bun ../pattern-scratch/exact.mjs pattern tabs
 Ports    none. Runs to completion.`,
     example: 'bun exact.mjs pattern list-detail && bun exact.mjs test web',
   },
@@ -458,12 +512,14 @@ completion.`,
     example: 'bun exact.mjs forma eval . --mode dark-style=dim',
   },
   add: {
-    line: 'a standard module (geolocation): its dependency in package.json, installed',
+    line: 'a standard module (geolocation) or another package: its dependency in package.json, installed',
     usage: 'bun exact.mjs add <module> [<app>]',
     flags: [['--no-install', 'write the dependency and install nothing']],
     body: `In an app, omit <app>; from the checkout, name it. <module> is one of exact2's
 (geolocation, or @exact/geolocation): a path into this checkout,
-so it compiles against the SDK the app uses. The app's package manager installs it:
+so it compiles against the SDK the app uses. Another package is a directory
+(../maplibre-exact, depended on as file:) or a registry name with its scope or version
+(@birkskyum/maplibre-exact), which needs the install. The app's package manager installs it:
 the packageManager the nearest package.json up to the repository names, else the one
 whose lockfile is nearest (pnpm, Yarn, npm), else Bun. Then name what you use; when the module
 has grants, add their line: docs/recipes/permissions.md.
@@ -536,11 +592,11 @@ Ports    none; send makes one HTTPS request. Runs to completion.`,
     example: 'bun exact.mjs shells',
   },
   lock: {
-    line: 'refresh the app or game Cargo.lock against this Exact checkout',
+    line: 'refresh Cargo.lock and the app’s Swift Package.resolved',
     usage: 'bun exact.mjs lock',
     flags: [],
     internal: ['--lock'],
-    body: 'Use after exact update reports app lock drift, after this checkout moves or after adding a dependency.\nApps preserve locked versions where possible, resolve offline first and fetch missing dependencies when needed; games fetch and recapture their lock. Builds never change the lock.\nPorts    none. Runs to completion.',
+    body: 'Use after exact update reports app lock drift, after this checkout moves or after adding a dependency.\nApps preserve locked versions where possible, resolve Cargo offline first and fetch missing dependencies when needed; games fetch and recapture their lock. Swift products declared by the app or its packages resolve into Package.resolved. Review and commit changed locks. Builds never change them.\nPorts    none. Runs to completion.',
     example: 'bun exact.mjs lock',
   },
   windows: {
@@ -603,7 +659,7 @@ Ports    none. Runs to completion.`,
 export function helpText(verb, { all = false } = {}) {
   const entry = HELP[verb];
   if (!entry) return null;
-  const rows = all ? [...entry.flags, ...(entry.more ?? [])] : entry.flags;
+  const rows = all ? [...documented(verb), ...VARIANT_VERBS.has(verb) && !knownFlags(verb).has('--variant') ? [VARIANT] : []] : entry.flags;
   const width = Math.min(22, Math.max(0, ...rows.map(([row]) => row.length)));
   const flags = rows.map(([row, what]) => `  ${row.padEnd(width)}  ${what}`).join('\n');
   const body = all && entry.bodyAll ? `${entry.body}\n${entry.bodyAll}` : entry.body;
@@ -640,6 +696,24 @@ export function printHelp(verb, { verbs, own = {}, all = process.argv.slice(2).i
   return 2;
 }
 
+// `--variant`, which every verb that builds or drives the app takes. `guardFlags` takes it out of the arguments before
+// the verb's script parses them, so it is no script's flag, and `--help all` names it.
+const VARIANT = ['--variant <name>', "app.json's variants.<name>: the app under that identity, installed beside the plain build (or EXACT_VARIANT; LLP 1030.008)"];
+const VARIANT_VERBS = new Set(['web', 'web-build', 'serve', 'test', 'agent', 'verify', 'ios', 'mac', 'linux', 'android']);
+/** Takes `--variant <name>` out of `args` (in place) and, when given, sets EXACT_VARIANT in `env` for this process and
+ * every one it starts, as `--sim` sets EXACT_SIM, so the flag wins over an exported value; the app the verb resolves
+ * then claims the selection (scripts/variants.mjs `claimVariant`). Returns `args`. Here, beside `guardFlags`, because
+ * copied SDKs carry this module alone. */
+export function takeVariant(args, env = process.env) {
+  for (let i = args.indexOf('--variant'); i !== -1; i = args.indexOf('--variant')) {
+    const name = args[i + 1];
+    if (name === undefined || name.startsWith('-')) throw new Error('--variant needs a name: one of app.json\'s "variants"');
+    env.EXACT_VARIANT = name;
+    delete env.EXACT_VARIANT_APP;
+    args.splice(i, 2);
+  }
+  return args;
+}
 /** The flags a verb's help documents, `--help all`'s included. */
 const documented = (verb) => [...HELP[verb].flags, ...(HELP[verb].more ?? [])];
 
@@ -671,6 +745,10 @@ export function appleBuildRefusal(args, env = process.env, platform = process.pl
  * is unknown (agent.mjs). */
 export function guardFlags(verb, argv, { parsed = false, say = console.log, fail = console.error, exit = process.exit } = {}) {
   if (argv.includes('--help') || argv.includes('-h')) { say(helpText(verb, { all: argv.includes('all') })); return exit(0); }
+  // The selection, for this process and every one it starts, before anything resolves the app (LLP 1030.008 D3).
+  if (VARIANT_VERBS.has(verb) && !knownFlags(verb).has('--variant') && (argv.includes('--variant') || process.argv.includes('--variant'))) {
+    try { takeVariant(process.argv); takeVariant(argv); } catch (error) { fail(`${verb}: ${error.message}`); return exit(2); }
+  }
   const known = knownFlags(verb), valued = new Map([...documented(verb).flatMap(([row]) => specs(row)), ...(HELP[verb].internal ?? [])].filter(takesValue).map((spec) => [name(spec), spec]));
   const unknown = [], valueless = [];
   for (let i = 0; i < argv.length; i++) {

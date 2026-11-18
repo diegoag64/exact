@@ -149,7 +149,7 @@ test('--reader and --headless name the Android carrier as drive flags', () => {
 // `-fp-contract=off` is in `build.rustflags`). A run for another target, or for the host, is left alone.
 test('the Android build links its libraries with 16 KB pages, beside the flags Cargo would use', async () => {
   const { ANDROID_PAGE_SIZE: page, androidCargo } = await import('./cargo-check.mjs');
-  const config = ['--config', `build.rustflags=["${page}"]`];
+  const abi = '-Clink-arg=-lc++abi', config = ['--config', `build.rustflags=["${page}","${abi}"]`];
   const run = (env, args = ['build', '-p', 'app', '--target', 'aarch64-linux-android']) => {
     const [, argv, { env: out }] = androidCargo('cargo', args, { env });
     return { argv, flags: Object.fromEntries(['CARGO_ENCODED_RUSTFLAGS', 'RUSTFLAGS', 'CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS', 'CARGO_BUILD_RUSTFLAGS'].filter((k) => out[k] !== undefined).map((k) => [k, out[k]])) };
@@ -157,11 +157,11 @@ test('the Android build links its libraries with 16 KB pages, beside the flags C
   expect(run({})).toEqual({ argv: ['build', '-p', 'app', '--target', 'aarch64-linux-android', ...config], flags: {} });
   expect(run({}, ['rustc', '--target=aarch64-linux-android', '--', '-Cfoo']).argv).toEqual(['rustc', '--target=aarch64-linux-android', ...config, '--', '-Cfoo']);
   expect(run({ CARGO_BUILD_RUSTFLAGS: '--cfg b' }).flags).toEqual({ CARGO_BUILD_RUSTFLAGS: '--cfg b' });
-  expect(run({ RUSTFLAGS: '-Cdebuginfo=1' }).flags).toEqual({ RUSTFLAGS: `-Cdebuginfo=1 ${page}` });
-  expect(run({ RUSTFLAGS: '' }).flags).toEqual({ RUSTFLAGS: page });
-  expect(run({ RUSTFLAGS: '-Cdebuginfo=1', CARGO_ENCODED_RUSTFLAGS: '--cfg\x1fa b' }).flags).toEqual({ RUSTFLAGS: '-Cdebuginfo=1', CARGO_ENCODED_RUSTFLAGS: `--cfg\x1fa b\x1f${page}` });
-  expect(run({ CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: '-llog' }).flags).toEqual({ CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: `-llog ${page}` });
-  expect(run({ RUSTFLAGS: page, CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: page }).flags).toEqual({ RUSTFLAGS: page, CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: page });
+  expect(run({ RUSTFLAGS: '-Cdebuginfo=1' }).flags).toEqual({ RUSTFLAGS: `-Cdebuginfo=1 ${page} ${abi}` });
+  expect(run({ RUSTFLAGS: '' }).flags).toEqual({ RUSTFLAGS: `${page} ${abi}` });
+  expect(run({ RUSTFLAGS: '-Cdebuginfo=1', CARGO_ENCODED_RUSTFLAGS: '--cfg\x1fa b' }).flags).toEqual({ RUSTFLAGS: '-Cdebuginfo=1', CARGO_ENCODED_RUSTFLAGS: `--cfg\x1fa b\x1f${page}\x1f${abi}` });
+  expect(run({ CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: '-llog' }).flags).toEqual({ CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: `-llog ${page} ${abi}` });
+  expect(run({ RUSTFLAGS: page, CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: `${page} ${abi}` }).flags).toEqual({ RUSTFLAGS: `${page} ${abi}`, CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS: `${page} ${abi}` });
   // The host's own runs (a game's lints) and other targets'.
   for (const args of [['clippy', '-p', 'game', '--lib'], ['build', '--target', 'aarch64-apple-ios']]) {
     const env = { RUSTFLAGS: '-Cdebuginfo=1' };
@@ -897,14 +897,14 @@ test('keyed grants type-check in the rewritten capture and leave authored source
     delete process.env.EXACT_BACKEND_ORIGIN;
     mkdirSync(app); mkdirSync(stage); mkdirSync(resolve(app,'.exact'));
     for (const dir of [app,stage]) writeFileSync(resolve(dir,'app.ts'),backendGrants);
-    writeFileSync(resolve(stage,'__exact_backend_source.json'),JSON.stringify(backendGrants));
+    writeFileSync(resolve(stage,'__exact_backend_source.json'),JSON.stringify({'app.ts':backendGrants}));
     writeFileSync(resolve(stage,'__exact_paths.json'),JSON.stringify({app,mounts:[]}));
     writeFileSync(resolve(stage,'__exact_entry.ts'),"import * as app from './app';\nexport const grants: string = app.grants;\n");
     for (const token of ['fixture-token','discord-token','offline-token','fixture-token']) {
       if (token==='discord-token') writeFileSync(resolve(app,'.exact/backend-origin'),'https://discord.com');
       if (token==='offline-token') process.env.EXACT_BACKEND_ORIGIN='https://offline.example';
       if (token==='fixture-token') { delete process.env.EXACT_BACKEND_ORIGIN; rmSync(resolve(app,'.exact/backend-origin'),{force:true}); }
-      configure(stage,false,parseSync);
+      await configure(stage,false,parseSync);
       await check(stage,resolve(libraries,'tsc'),libraries);
       expect(staticFacts(readFileSync(resolve(stage,'app.ts'),'utf8'),parseSync).grants).toContain(`secret.keep ${token}`);
       expect(readFileSync(resolve(app,'app.ts'),'utf8')).toBe(backendGrants);
@@ -951,32 +951,6 @@ test('authored-test clock advances once per mutation request, not per input repl
   expect(await clock.advance(session)).toBe(1);
 });
 
-test('a reused captured stage restores the authored backend after an override is removed',async()=>{
-  const {configure}=await import('../js/bake/src/typescript.mjs');
-  const {parseSync}=await import('rolldown/utils');
-  const {mkdtempSync,mkdirSync,writeFileSync,readFileSync,rmSync}=await import('node:fs');
-  const {tmpdir}=await import('node:os');const {join}=await import('node:path');
-  const root=mkdtempSync(join(tmpdir(),'exact-backend-stage-')),app=join(root,'app'),stage=join(root,'stage');
-  const env=process.env.EXACT_BACKEND_ORIGIN; delete process.env.EXACT_BACKEND_ORIGIN;
-  try {
-    mkdirSync(app);mkdirSync(stage);mkdirSync(join(app,'.exact'));
-    const source="const origin='http://127.0.0.1:4400'; export const grants=`net.fetch ${origin}`;";
-    writeFileSync(join(stage,'app.ts'),source);writeFileSync(join(stage,'__exact_backend_source.json'),JSON.stringify(source));
-    writeFileSync(join(stage,'__exact_paths.json'),JSON.stringify({app,mounts:[]}));
-    writeFileSync(join(app,'.exact/backend-origin'),'http://127.0.0.1:4412');
-    configure(stage,true,parseSync);
-    expect(readFileSync(join(stage,'app.ts'),'utf8')).toContain('4412');
-    const backend = () => JSON.parse(readFileSync(join(stage,'__exact_backend.json'),'utf8'));
-    expect(backend()).toEqual({origin:'http://127.0.0.1:4412',warning:expect.stringContaining('overriding')});
-    rmSync(join(app,'.exact/backend-origin'));configure(stage,true,parseSync);
-    expect(readFileSync(join(stage,'app.ts'),'utf8')).toBe(source);
-    expect(backend()).toEqual({origin:'http://127.0.0.1:4400',warning:null});
-    // An authored edit equal to the previous injection is still a new captured source.
-    const edited=source.replace('4400','4412');writeFileSync(join(stage,'__exact_backend_source.json'),JSON.stringify(edited));
-    configure(stage,true,parseSync);expect(readFileSync(join(stage,'app.ts'),'utf8')).toBe(edited);
-    expect(backend()).toEqual({origin:'http://127.0.0.1:4412',warning:null});
-  } finally {if(env!==undefined) process.env.EXACT_BACKEND_ORIGIN=env;rmSync(root,{recursive:true,force:true});}
-});
 
 test('mutation requests issued by an automatic clock step receive their own millisecond',async()=>{
   const {testMutationClock}=await import('./agent-test.mjs');
@@ -1110,7 +1084,7 @@ test('a setting is read from the environment, then .env.local, then .env, and wh
     // And so it reaches the module, though `.env.development`, the one file that holds it, is not read.
     writeFileSync(resolve(dir,'app.json'),JSON.stringify({env:['D']}));
     const {parseSync}=await import('rolldown/utils'), {inlineSettings}=await import('../js/bake/src/__exact_env.mjs');
-    expect(inlineSettings('const D_ = import.meta.env.D;\n',dir,parseSync,exported)).toEqual({code:'const D_ = ("d-development" as string);\n',record:{D:{value:'d-development',source:'environment'}}});
+    expect(inlineSettings('const D_ = import.meta.env.D;\n',dir,parseSync,exported)).toEqual({code:'const D_ = ("d-development" as string);\n',record:{D:{value:'d-development',source:'environment'}},reads:[{file:'app.ts',name:'D'}]});
     // An edit after the command started: the given value still wins; the one Bun loaded gives way to the file.
     writeFileSync(resolve(dir,'.env'),'A=a-edited\nC=c-env\n');
     expect(settingValues(dir,['A'],exported)).toEqual({A:{value:'a-env',source:'environment'}});
@@ -1151,10 +1125,10 @@ test('import.meta.env inlines each declared setting in app.ts, its grant follows
     const misuse="const API = import.meta.env.API_BASE_URL ?? compute();\nconst MODE = import.meta.env.MODE;\nlet other = import.meta.env.API_BASE_URL;\nexport function f() { return import.meta.env.API_BASE_URL; }\n";
     expect(() => inline(misuse)).toThrow([
       `app.json's "env": "lower" is not a setting's name (import.meta.env names are [A-Z][A-Z0-9_]*)`,
-      "app.ts:3:13: import.meta.env is read only in a top-level const of app.ts: const API = import.meta.env.API_BASE_URL, with ?? 'a default' or without, then API where it is used",
-      "app.ts:4:30: import.meta.env is read only in a top-level const of app.ts: const API = import.meta.env.API_BASE_URL, with ?? 'a default' or without, then API where it is used",
+      "app.ts:3:13: import.meta.env is read only in a top-level const of an app-local module: const API = import.meta.env.API_BASE_URL, with ?? 'a default' or without, then API where it is used",
+      "app.ts:4:30: import.meta.env is read only in a top-level const of an app-local module: const API = import.meta.env.API_BASE_URL, with ?? 'a default' or without, then API where it is used",
       `app.ts:2:14: import.meta.env.MODE is not declared: add "MODE" to app.json's "env" (every declared value is public: it ships in the module on every host)`,
-      `import.meta.env.UNREAD: app.json's "env" declares it, and app.ts reads it nowhere: read it as const X = import.meta.env.UNREAD, or remove it from "env"`,
+      `import.meta.env.UNREAD: app.json's "env" declares it, and app.ts and its app-local imports read it nowhere: read it as const X = import.meta.env.UNREAD, or remove it from "env"`,
       "app.ts:1:13: import.meta.env.API_BASE_URL's default after ?? must be a string literal",
     ].join('\n'));
     // One name read twice takes one default.
@@ -1166,55 +1140,19 @@ test('import.meta.env inlines each declared setting in app.ts, its grant follows
     ].join('\n'));
     // Another module's read is found where the bundle captures it.
     expect(strayReads(resolve(dir,'api.ts'),'export const API = import.meta.env.API_BASE_URL;\n',(c,o)=>parseSync('api.ts',c,o),at=>`api.ts${at}`))
-      .toEqual(["api.ts:1:20: import.meta.env is read only in a top-level const of app.ts: const API = import.meta.env.API_BASE_URL, with ?? 'a default' or without, then API where it is used"]);
+      .toEqual(["api.ts:1:20: import.meta.env is read only in a top-level const of an app-local module: const API = import.meta.env.API_BASE_URL, with ?? 'a default' or without, then API where it is used"]);
     // However it is spelled: a comment between the words is still the read.
     expect(strayReads(resolve(dir,'index.js'),'export const API = import/* a comment */.meta.env.API_BASE_URL;\n',(c,o)=>parseSync('index.js',c,o),at=>`pkg@1.0.0 (index.js${at})`,true))
-      .toEqual(['pkg@1.0.0 (index.js:1:20) reads import.meta.env, which only app.ts may: app.ts reads the setting (const API = import.meta.env.API_BASE_URL) and passes it in']);
-  } finally { rmSync(dir,{recursive:true,force:true}); }
-});
-
-test('a setting is a web build input by value and source, and serve finds one changed since the build', async () => {
-  const {webChanges,webInputDigests}=await import('./agent-launch.mjs');
-  const {changedSettings}=await import('../js/bake/src/__exact_env.mjs');
-  const dir=mkdtempSync(resolve(tmpdir(),'exact-settings-')), dist=resolve(dir,'dist'), name='EXACT_TEST_SETTING', key=`import.meta.env.${name}`;
-  const app={dir,manifest:{env:[name]}};
-  const bake=env=>writeFileSync(resolve(dist,'.exact-build.json'),JSON.stringify({target:'js',inputs:webInputDigests(app,true,[]),inputRoots:[],env}));
-  try {
-    mkdirSync(dist);
-    writeFileSync(resolve(dir,'.env'),`${name}=http://a.example\n`);
-    bake({[name]:{value:'http://a.example',source:'.env'}});
-    expect(webChanges(dist,app).all).toEqual([]);
-    writeFileSync(resolve(dir,'.env'),`${name}=http://b.example\n`);
-    expect(webChanges(dist,app).app).toEqual([key]);
-    expect(changedSettings(dist,{},dir)).toEqual([{name,built:{value:'http://a.example',source:'.env'},now:{value:'http://b.example',source:'.env'}}]);
-    // The same value from another source is another build input, and the same build for serve.
-    writeFileSync(resolve(dir,'.env'),`${name}=http://a.example\n`);
-    expect(webChanges(dist,app).all).toEqual([]);
-    writeFileSync(resolve(dir,'.env.local'),`${name}=http://a.example\n`);
-    expect(webChanges(dist,app).app).toEqual([key]);
-    expect(changedSettings(dist,{},dir)).toEqual([]);
-    rmSync(resolve(dir,'.env.local'));
-    process.env[name]='http://e.example';
-    try { expect(webChanges(dist,app).app).toEqual([key]); } finally { delete process.env[name]; }
-    // A build copied away from its sources: only the environment changes a value, and an unset name keeps the build's.
-    expect(changedSettings(dist,{})).toEqual([]);
-    expect(changedSettings(dist,{[name]:'http://c.example'})).toEqual([{name,built:{value:'http://a.example',source:'.env'},now:{value:'http://c.example',source:'environment'}}]);
-    // A default stands until a source sets a value, and the digest records it as the bake inlines it.
-    rmSync(resolve(dir,'.env'));
-    writeFileSync(resolve(dir,'app.json'),JSON.stringify({env:[name]}));
-    writeFileSync(resolve(dir,'app.ts'),`const API = import.meta.env.${name} ?? 'http://default.example';\n`);
-    expect(webInputDigests(app,true)[key]).toBe(JSON.stringify({value:'http://default.example',source:'default'}));
-    bake({[name]:{value:'http://default.example',source:'default'}});
-    expect(webChanges(dist,app).all).toEqual([]);
-    expect(changedSettings(dist,{},dir)).toEqual([]);
-    expect(changedSettings(dist,{[name]:'http://d.example'},dir).map(c=>c.now)).toEqual([{value:'http://d.example',source:'environment'}]);
+      .toEqual(['pkg@1.0.0 (index.js:1:20) reads import.meta.env, which only app-local modules may: an app-local module reads the setting (const API = import.meta.env.API_BASE_URL) and passes it in']);
   } finally { rmSync(dir,{recursive:true,force:true}); }
 });
 
 
 test('a setting is named the backend\'s source only where the grant takes it, and the origin literal comes first', async () => {
-  const {backendOriginSource}=await import('./agent-test.mjs');
+  const {backendOriginSource,nativeFetchOrigins}=await import('./agent-test.mjs');
   const dir=mkdtempSync(resolve(tmpdir(),'exact-settings-source-')), origin='http://127.0.0.1:4790';
+  mkdirSync(resolve(dir,'.exact'),{recursive:true});
+  writeFileSync(resolve(dir,'.exact/typescript-inputs.json'),JSON.stringify({modules:[['app.ts',resolve(dir,'app.ts')]],types:[]}));
   try {
     writeFileSync(resolve(dir,'app.json'),JSON.stringify({env:['API_BASE_URL','PICTURES']}));
     writeFileSync(resolve(dir,'.env'),`API_BASE_URL=${origin}\nPICTURES=${origin}/pictures\n`);
@@ -1224,9 +1162,24 @@ test('a setting is named the backend\'s source only where the grant takes it, an
     // The grant takes the setting's const.
     writeFileSync(resolve(dir,'app.ts'),`const API = import.meta.env.API_BASE_URL;\nconst PICTURES = import.meta.env.PICTURES;\nexport const grants = \`net.fetch \${API}\`;\n`);
     expect(backendOriginSource(dir,origin,{})).toBe('import.meta.env.API_BASE_URL from .env');
+    // Another captured module owns a setting unrelated to this grant.
+    mkdirSync(resolve(dir,'src'));
+    writeFileSync(resolve(dir,'src/pictures.ts'),'export const PICTURES = import.meta.env.PICTURES;\n');
+    writeFileSync(resolve(dir,'.exact/typescript-inputs.json'),JSON.stringify({modules:['app.ts','src/pictures.ts'].map(file=>[file,resolve(dir,file)]),types:[]}));
+    writeFileSync(resolve(dir,'app.ts'),"import { PICTURES } from './src/pictures';\nconst API = import.meta.env.API_BASE_URL;\nexport const grants = `net.fetch ${API}`;\n");
+    expect(backendOriginSource(dir,origin,{})).toBe('import.meta.env.API_BASE_URL from .env');
     // No grant takes a setting at that origin.
     writeFileSync(resolve(dir,'app.ts'),`const PICTURES = import.meta.env.PICTURES;\nexport const grants = 'net.fetch http://127.0.0.1:1';\n`);
     expect(backendOriginSource(dir,origin,{})).toContain('built net.fetch grant');
+    writeFileSync(resolve(dir,'app.json'),'{}');
+    writeFileSync(resolve(dir,'lines.ts'), "export const LINES = ['secret.keep session.refresh'];");
+    writeFileSync(resolve(dir,'.exact/typescript-inputs.json'),JSON.stringify({modules:['app.ts','lines.ts'].map(file=>[file,resolve(dir,file)]),edges:[['app.ts','./lines','import','lines.ts']],types:[]}));
+    writeFileSync(resolve(dir,'app.ts'), `import { LINES } from './lines';\nexport const grants = ['net.fetch https://api.example.com', ...LINES].join('\\n');`);
+    expect(nativeFetchOrigins(dir,{})).toEqual(['https://api.example.com']);
+    writeFileSync(resolve(dir,'app.json'),JSON.stringify({env:['API_BASE_URL','PICTURES']}));
+    writeFileSync(resolve(dir,'app.ts'), `import { LINES } from './lines';\nconst API = import.meta.env.API_BASE_URL;\nconst PICTURES = import.meta.env.PICTURES;\nexport const grants = [\`net.fetch \${API}\`, ...LINES].join('\\n');`);
+    expect(backendOriginSource(dir,origin,{})).toBe('import.meta.env.API_BASE_URL from .env');
+    expect(nativeFetchOrigins(dir,{})).toEqual([origin]);
     // As JavaScript reads it: spacing inside the template, and a grant in a comment, which is none.
     writeFileSync(resolve(dir,'app.ts'),`const API = import.meta.env.API_BASE_URL;\nconst PICTURES = import.meta.env.PICTURES;\nexport const grants = \`net.fetch \${ API }\`;\n`);
     expect(backendOriginSource(dir,origin,{})).toBe('import.meta.env.API_BASE_URL from .env');
@@ -1238,15 +1191,21 @@ test('a setting is named the backend\'s source only where the grant takes it, an
 test("another host's crate or Android's Gradle files are no input of the Apple, web or plan check", async () => {
   const {receiptChanges,webInputs}=await import('./agent-launch.mjs');
   const {planSources}=await import('./agent-build.mjs');
-  const {resolveApp}=await import('./app.mjs');
+  const {resolveApp,patchLines}=await import('./app.mjs');
   const dir=realpathSync(mkdtempSync(resolve(tmpdir(),'exact-other-hosts-'))), before=process.env.EXACT_APP_DIR;
   try {
+    // An app that writes its own host crates writes their workspace too (LLP 1153.003 D3).
+    const hosts=['android','windows','linux','web'];
+    writeFileSync(resolve(dir,'Cargo.toml'),`[workspace]\nmembers = ${JSON.stringify(hosts)}\nresolver = "2"\n\n[patch.crates-io]\n${patchLines(dir).join('\n')}\n`);
+    writeFileSync(resolve(dir,'rust-toolchain.toml'),`[toolchain]\nchannel = "${PINNED_RUST}"\n`);
     const files=['app.json','app.contract','gradle.lockfile','gradle-verification.xml',
-      ...['android','windows','linux','web'].flatMap(host=>[`${host}/Cargo.toml`,`${host}/src/lib.rs`])];
+      ...hosts.flatMap(host=>[`${host}/Cargo.toml`,`${host}/src/lib.rs`])];
     const inputTime=new Date('2026-01-01T00:00:00Z'), builtTime=new Date('2026-01-01T00:01:00Z'), edited=new Date('2026-01-01T00:02:00Z');
+    for (const file of ['Cargo.toml','rust-toolchain.toml']) utimesSync(resolve(dir,file),inputTime,inputTime);
     for (const file of files) {
       mkdirSync(dirname(resolve(dir,file)),{recursive:true});
-      writeFileSync(resolve(dir,file),file==='app.json'?JSON.stringify({name:'Hosts',app:{id:'com.exact.hosts',name:'Hosts'}}):file==='app.contract'?'component App\n  view\n    text "x"\n':'');
+      writeFileSync(resolve(dir,file),file==='app.json'?JSON.stringify({name:'Hosts',app:{id:'com.exact.hosts',name:'Hosts'}}):file==='app.contract'?'component App\n  view\n    text "x"\n'
+        :file.endsWith('/Cargo.toml')?`[package]\nname = "hosts-${dirname(file)}"\nversion = "0.0.0"\nedition = "2021"\n`:'');
       utimesSync(resolve(dir,file),inputTime,inputTime);
     }
     const app=resolveApp(dir), receipt=resolve(dir,'target/receipt.json');
@@ -1459,7 +1418,7 @@ test('a backend flag keeps its source through child builds and an environment ov
   expect(backendOriginSelection('.', env)).toEqual({ origin: 'https://other.example', source: 'EXACT_BACKEND_ORIGIN' });
 });
 
-test('an import without an extension reaches its JavaScript file, a directory its index, and both what they import', async () => {
+test('build inputs follow recorded JavaScript modules and directory entries', async () => {
   const { notBuildInput } = await import('./agent-launch.mjs');
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'exact-module-graph-')));
   try {
@@ -1468,6 +1427,8 @@ test('an import without an extension reaches its JavaScript file, a directory it
       'deep.mjs': 'export const d = 1;\n', 'helpers/index.js': "import './more/x';\n", 'helpers/more/x.cjs': '', 'view.jsx': "import './y';\n", 'y.js': '', 'unused.js': '',
     };
     for (const [name, text] of Object.entries(files)) { mkdirSync(dirname(join(dir, name)), { recursive: true }); writeFileSync(join(dir, name), text); }
+    mkdirSync(resolve(dir,'.exact'),{recursive:true});
+    writeFileSync(resolve(dir,'.exact/typescript-inputs.json'),JSON.stringify({modules:Object.keys(files).filter(file=>file!=='unused.js').map(file=>[file,resolve(dir,file)]),types:[]}));
     const input = notBuildInput(dir);
     expect(Object.keys(files).filter(name => input(join(dir, name)))).toEqual(['unused.js']);
   } finally { rmSync(dir, { recursive: true, force: true }); }

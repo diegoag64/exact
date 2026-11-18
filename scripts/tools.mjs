@@ -18,13 +18,14 @@
  */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { basename, dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { compilerPaths, cargoInputPaths } from './cargo-dep-info.mjs';
+import { compilerPaths, cargoInputPaths, crateDir, depInfoOf, freshCompiler } from './cargo-dep-info.mjs';
+export { freshCompiler } from './cargo-dep-info.mjs';
 import { cargoEnvironment, cargoOnPath } from './cargo-check.mjs';
-import { builtFilesystemHelper } from './filesystem.mjs';
+import { builtFilesystemHelper, offlineMiss } from './filesystem.mjs';
 import { digest, lockClosure, seen, workspaceManifest } from './kept.mjs';
 import { EXE, within } from './paths.mjs';
 
@@ -39,12 +40,12 @@ export const launch = (cmd, pre = [], done = () => {}, env = process.env) => ({ 
 /** The packages whose source roots the web build's receipt holds (host/web/build.mjs `webSourceRoots`). */
 export const WEB_CRATES = ['exact-web-js', 'exact-web', 'exact-js-bake', 'exact-markdown-editor', 'exact-web-js-motion', 'exact-textflow'];
 
-const TRIPLES = { 'darwin-arm64': 'aarch64-apple-darwin', 'darwin-x64': 'x86_64-apple-darwin', 'linux-x64': 'x86_64-unknown-linux-gnu', 'linux-arm64': 'aarch64-unknown-linux-gnu' };
+const TRIPLES = { 'darwin-arm64': 'aarch64-apple-darwin', 'darwin-x64': 'x86_64-apple-darwin', 'linux-x64': 'x86_64-unknown-linux-gnu', 'linux-arm64': 'aarch64-unknown-linux-gnu', 'win32-x64': 'x86_64-pc-windows-msvc', 'win32-arm64': 'aarch64-pc-windows-msvc' };
 /** This machine's target triple, as Rust names it, without asking rustc. */
 export const hostTriple = () => TRIPLES[`${process.platform}-${process.arch}`] ?? `${process.arch}-${process.platform}`;
 
 const sha = (bytes) => createHash('sha256').update(bytes).digest('hex');
-const home = (env) => env.HOME ?? homedir();
+const home = (env) => env.HOME ?? env.USERPROFILE ?? homedir();
 const cacheDir = (env = process.env) => resolve(home(env), '.cache/exact/tools', hostTriple());
 const pin = () => Bun.TOML.parse(readFileSync(resolve(ROOT, 'rust-toolchain.toml'), 'utf8')).toolchain.channel;
 const short = (commit) => commit?.slice(0, 12) ?? 'an unknown commit';
@@ -151,11 +152,12 @@ export const builtContract = () => { const path = existsSync(CONTRACT) ? CONTRAC
  * stderr, or as `--json`'s one diagnostic, at `file`).
  */
 export async function contractTool(cargo, { env = process.env, json = false, file = '' } = {}) {
-  const { freshCompiler } = await import('../host/web-js/module.mjs');
   const built = freshCompiler(CONTRACT) ? CONTRACT : fromSets('contract', env)?.path;
   if (built) return launch(built, [], undefined, env);
   if (rustMissing(env)) { new RustMissing('contract', env).say(json, file); return null; }
   if (!existsSync(CONTRACT)) console.error('exact contract: building the Contract compiler once (about a minute on a cold checkout; `exact new` starts it in the background)…');
+  // Built before and stale, as after a pull: Cargo runs quietly, so say why the wait (LLP 1156.006.000 D11).
+  else console.error('exact contract: rebuilding the Contract compiler, since its sources changed (about a minute)…');
   return cargo;
 }
 
@@ -164,7 +166,7 @@ export async function contractTool(cargo, { env = process.env, json = false, fil
  * own (`setMetadata`). */
 function recordMetadata() {
   const result = spawnSync('cargo', ['metadata', '--locked', '--offline', '--format-version', '1'], { cwd: ROOT, env: cargoEnvironment(), encoding: 'utf8', maxBuffer: 128 << 20 });
-  if (result.status !== 0) throw new Error(`cargo metadata: ${result.stderr}`);
+  if (result.status !== 0) throw new Error(`cargo metadata: ${result.stderr}${offlineMiss(result.stderr)}`);
   const metadata = JSON.parse(result.stdout), packages = new Map(metadata.packages.map(pkg => [pkg.id, pkg]));
   const nodes = new Map(metadata.resolve.nodes.map(node => [node.id, node])), seenIds = new Set();
   const pending = WEB_CRATES.map(name => metadata.packages.find(pkg => pkg.name === name).id);

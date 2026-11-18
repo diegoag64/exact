@@ -67,6 +67,7 @@ fn core_in(grants: &str, dir: &std::path::Path) -> (Core, Receiver<()>) {
 
 fn request(ticket: u64, body: serde_json::Value, stream: bool) -> RequestOut {
     RequestOut {
+        completion: None,
         class: exact_runner::RequestClass::Ordered,
         ticket,
         target: "server".into(),
@@ -169,6 +170,7 @@ fn a_real_child_reads_its_stdin_and_streams_its_output_in_order() {
     assert!(seen.contains(&"stderr oops\n".to_string()), "{seen:?}");
     assert!(seen.contains(&"exit 3 null".to_string()), "{seen:?}");
     assert_eq!(seen.last().unwrap(), "end 3 null true");
+    until_reaped(spawned_pid(&first));
 }
 
 #[test]
@@ -207,6 +209,116 @@ fn a_leader_that_exits_first_leaves_no_group_behind() {
 }
 
 #[test]
+fn release_retains_an_exited_leader_through_the_groups_escalation() {
+    retain_leader_after_exit("release");
+}
+
+#[test]
+fn kill_after_exit_reaches_descendants_without_releasing_the_leaders_identity() {
+    retain_leader_after_exit("kill");
+}
+
+#[test]
+fn quit_retains_an_exited_leader_through_the_groups_escalation() {
+    retain_leader_after_exit("quit");
+}
+
+fn retain_leader_after_exit(retirement: &str) {
+    let (_dir, core, woke) = core("process.spawn /bin/sh");
+    // The inherited disposition survives exec, so release must escalate
+    // after the leader exits. Its pipe keeps the incarnation open for kill.
+    let mut body = sh("trap '' TERM; sleep 120 & echo $!; exit 7");
+    body["forceKillAfter"] = 50.into();
+    body["drainTimeout"] = 60_000.into();
+    core.run(request(1, body, true), None).unwrap();
+    let out = collect(&core, &woke, |o| {
+        o.iter().any(|o| event(o) == "exit 7 null")
+    });
+    let leader = spawned_pid(&out);
+    let retained = os::observe_exit(leader).is_ok();
+    let unrelated = raw_sh("read line; exit 9", os::Stdio::Pipe);
+    let shared = core.shared.clone();
+    assert!(os::group_alive(leader), "its descendant still runs");
+    match retirement {
+        "kill" => {
+            write(&core, ProcessOp::Kill("SIGKILL".into()));
+            let rest = collect(&core, &woke, ended);
+            assert_eq!(event(rest.last().unwrap()), "end 7 null true");
+        }
+        "release" => core.forget(|_| false),
+        "quit" => drop(core),
+        _ => unreachable!(),
+    }
+    until_gone(leader, "the descendant outlived the group signal");
+    until_reaped(leader);
+    let untouched = os::group_alive(unrelated.pid);
+    drop(unrelated.stdin);
+    let unrelated_exit = os::wait(unrelated.pid).unwrap();
+    assert!(retained, "the exit event released the leader's identity");
+    assert!(untouched, "another group was signalled");
+    assert_eq!(unrelated_exit, os::Exit::Code(9));
+    assert!(!shared
+        .processes
+        .groups
+        .lock()
+        .unwrap()
+        .contains_key(&leader));
+}
+
+fn until_reaped(pid: i32) {
+    let deadline = Instant::now() + BOUND;
+    while matches!(os::try_observe_exit(pid), Ok(Some(_))) {
+        assert!(Instant::now() < deadline, "leader {pid} was never reaped");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn the_reaping_wait_does_not_block_on_a_live_reused_pid() {
+    let child = raw_sh("read line", os::Stdio::Pipe);
+    let (tx, rx) = channel();
+    let waiter = std::thread::spawn(move || {
+        until_reaped(child.pid);
+        tx.send(()).unwrap();
+    });
+    let returned = rx.recv_timeout(BOUND).is_ok();
+    drop(child.stdin);
+    os::wait(child.pid).unwrap();
+    waiter.join().unwrap();
+    assert!(returned, "a live reused pid blocked the reaping wait");
+}
+
+fn raw_sh(script: &str, stdin: os::Stdio) -> os::Child {
+    os::spawn(os::Command {
+        arg0: None,
+        program: std::path::Path::new("/bin/sh"),
+        args: &["-c".into(), script.into()],
+        env: &[],
+        cwd: std::path::Path::new("/"),
+        stdin,
+        stdout: os::Stdio::Null,
+        stderr: os::Stdio::Null,
+        session: false,
+    })
+    .unwrap()
+}
+
+#[test]
+fn the_last_group_owner_reaps_after_all_signallers_retire() {
+    let child = raw_sh("exit 7", os::Stdio::Null);
+    let group = super::super::groups::Group::new(child.pid, "SIGTERM", 5000.0);
+    assert_eq!(os::observe_exit(child.pid).unwrap(), os::Exit::Code(7));
+    let quit = group.clone();
+    drop(group);
+    assert_eq!(os::observe_exit(child.pid).unwrap(), os::Exit::Code(7));
+    super::super::groups::end(&quit);
+    assert_eq!(os::observe_exit(child.pid).unwrap(), os::Exit::Code(7));
+    drop(quit);
+    assert!(os::observe_exit(child.pid).is_err());
+    assert!(!os::group_alive(child.pid));
+}
+
+#[test]
 fn a_group_gone_after_its_signal_ends_the_stream() {
     group_gone_ends_stream(false);
 }
@@ -229,6 +341,7 @@ fn group_gone_ends_stream(check_latency: bool) {
     let took = start.elapsed();
     let leader = spawned_pid(&out);
     assert!(!os::group_alive(leader), "the group outlived the stream");
+    until_reaped(leader);
     if check_latency {
         assert!(
             took < Duration::from_secs(5),
@@ -471,16 +584,20 @@ fn text(v: &serde_json::Value) -> String {
 fn exec_file_ends_what_its_child_left_running() {
     let (_dir, core, woke) = core("process.spawn /bin/sh");
     let body = serde_json::json!({ "kind": "execFile", "program": "/bin/sh",
-        "args": ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"], "encoding": "utf8" });
+        "args": ["-c", "sleep 30 >/dev/null 2>&1 & echo $$ $!"], "encoding": "utf8" });
     core.run(request(1, body, false), None).unwrap();
     let out = collect(&core, &woke, |o| !o.is_empty());
     let Outcome::Response(r) = &out[0] else {
         panic!("{out:?}")
     };
     let reply: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
-    let grandchild: i32 = text(&reply["stdout"]).trim().parse().unwrap();
+    let output = text(&reply["stdout"]);
+    let mut pids = output.split_whitespace().map(|p| p.parse::<i32>().unwrap());
+    let leader = pids.next().unwrap();
+    let grandchild = pids.next().unwrap();
+    until_reaped(leader);
     assert!(
-        os::start_time(grandchild).is_none(),
+        !os::group_members(leader).contains(&grandchild),
         "its group ended before the answer"
     );
 }
@@ -700,12 +817,41 @@ fn the_login_shell_answers_the_named_variables_between_markers() {
     let started = Instant::now();
     let out = super::run(
         std::path::Path::new("/bin/sh"),
-        &["-c".into(), "echo hi; sleep 120 &".into()],
+        &["-c".into(), "echo hi; echo $$; sleep 120 &".into()],
         std::path::Path::new("/"),
         Duration::from_secs(60),
     );
-    assert_eq!(out.as_deref(), Some("hi\n"));
+    let out = out.unwrap();
+    let mut lines = out.lines();
+    assert_eq!(lines.next(), Some("hi"));
+    let leader = lines.next().unwrap().parse().unwrap();
+    until_gone(leader, "the login shell's group outlived its capture");
+    until_reaped(leader);
     assert!(started.elapsed() < BOUND, "{:?}", started.elapsed());
+}
+
+#[test]
+fn a_successful_login_capture_leaves_jobs_that_closed_the_pipe_running() {
+    let out = super::run(
+        std::path::Path::new("/bin/sh"),
+        &["-c".into(), "sleep 120 >/dev/null 2>&1 & echo $$ $!".into()],
+        std::path::Path::new("/"),
+        BOUND,
+    )
+    .unwrap();
+    let mut pids = out
+        .split_whitespace()
+        .map(|pid| pid.parse::<i32>().unwrap());
+    let leader = pids.next().unwrap();
+    let job = pids.next().unwrap();
+    let alive = os::group_members(leader).contains(&job);
+    let _ = os::signal_group(leader, os::SIGKILL);
+    until_gone(leader, "the test job outlived its cleanup");
+    until_reaped(leader);
+    assert!(
+        alive,
+        "a successful capture killed the shell's background job"
+    );
 }
 
 #[test]
@@ -768,6 +914,12 @@ fn a_child_whose_thread_cannot_start_fails_its_call() {
             message.contains("cannot start its thread"),
             "{role}: {message}"
         );
+        let records: Vec<serde_json::Value> =
+            serde_json::from_slice(&std::fs::read(dir.join("cache/exact-children.json")).unwrap())
+                .unwrap();
+        let pid = records.last().unwrap()["pgid"].as_i64().unwrap() as i32;
+        until_gone(pid, "the failed spawn left a running group");
+        until_reaped(pid);
         std::thread::sleep(Duration::from_millis(400));
         assert!(!mark.exists(), "{role}: the child ran on");
     }
@@ -810,4 +962,274 @@ fn an_exec_files_drain_runs_on_the_agents_clock() {
     };
     let reply: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
     assert_eq!(text(&reply["stdout"]), "left\n");
+}
+
+#[test]
+fn test_cores_keep_their_own_folder_roots() {
+    let (_first_dir, first, _) = core("fs.write pictures:/");
+    let dir = Dir::new("exact-isolated-folder-roots");
+    super::super::UNDER_AGENT.set(Some(super::super::AgentFacts {
+        processes: Vec::new(),
+        login_env: Vec::new(),
+        home: Some(dir.0.clone()),
+    }));
+    let (second, _) = core_in("fs.write pictures:/", &dir);
+    assert!(
+        !std::sync::Arc::ptr_eq(
+            &first.shared.processes.folder_roots,
+            &second.shared.processes.folder_roots
+        ),
+        "independent test cores shared their folder resolver"
+    );
+    let pictures = super::super::storage_roots(&second.shared.processes)
+        .resolve_known_folder("pictures:/")
+        .unwrap();
+    assert!(pictures.starts_with(std::fs::canonicalize(&dir.0).unwrap()));
+}
+
+#[test]
+fn a_known_folder_write_line_excludes_writable_path_programs() {
+    let dir = Dir::new("exact-known-process");
+    super::super::UNDER_AGENT.set(Some(super::super::AgentFacts {
+        processes: Vec::new(),
+        login_env: Vec::new(),
+        home: Some(dir.0.clone()),
+    }));
+    let (core, _) = core_in("process.spawn path:sh\nfs.write pictures:/", &dir);
+    let shared = &core.shared;
+    let pictures = super::super::storage_roots(&shared.processes)
+        .resolve_known_folder("pictures:/")
+        .unwrap();
+    assert!(
+        pictures.starts_with(std::fs::canonicalize(&dir.0).unwrap()),
+        "the test must never modify a folder outside its temporary home: {}",
+        pictures.display()
+    );
+    std::fs::copy("/bin/sh", pictures.join("sh")).unwrap();
+    let blocked = super::on_path(
+        shared,
+        "process.spawn path:sh
+fs.write pictures:/",
+        "sh",
+        pictures.to_str().unwrap(),
+    );
+    assert!(
+        matches!(blocked, Err(Outcome::Failed { message, .. }) if message.contains("where the app may write"))
+    );
+    assert!(super::on_path(
+        shared,
+        "process.spawn path:sh
+fs.write pictures:/",
+        "sh",
+        "/bin"
+    )
+    .is_ok());
+    std::fs::remove_file(pictures.join("sh")).unwrap();
+    std::fs::remove_dir(&pictures).unwrap();
+    std::fs::write(&pictures, b"not a directory").unwrap();
+    let unresolved = super::on_path(
+        shared,
+        "process.spawn path:sh\nfs.write pictures:/",
+        "sh",
+        "/bin",
+    );
+    assert!(
+        matches!(unresolved, Err(Outcome::Failed { message, .. }) if message.contains("names no directory here"))
+    );
+}
+
+#[test]
+fn sessions_share_folder_refusals_for_the_process_lifetime() {
+    use ibex2::stdlib::fs::Roots;
+    use std::sync::Arc;
+    let dir = Dir::new("exact-folder-sessions");
+    let home = dir.join("home");
+    let settings = home.join(".config/user-dirs.dirs");
+    let pictures = home.join("Pictures");
+    let outside = dir.join("outside");
+    for folder in [settings.parent().unwrap(), &pictures, &outside] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    std::fs::write(&settings, "XDG_PICTURES_DIR=\"$HOME/Pictures\"\n").unwrap();
+    std::fs::copy("/bin/sh", outside.join("sh")).unwrap();
+    let grants = "process.spawn path:sh\nfs.write pictures:/";
+    let made = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let make = || {
+        made.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let home = home.clone();
+        let settings = settings.clone();
+        let resolve_settings = settings.clone();
+        (
+            Roots {
+                home: Some(home.clone()),
+                known_folder: Some(Arc::new(move |name| {
+                    let dirs = std::fs::read_to_string(&resolve_settings)?;
+                    exact_data::known_folders::user_dir(&dirs, name, &home)
+                        .map(Into::into)
+                        .ok_or_else(|| std::io::Error::from_raw_os_error(2))
+                })),
+                ..Default::default()
+            },
+            vec![("pictures", settings)],
+        )
+    };
+    let first = Core::start(None, grants, Box::new(|| {}));
+    let first_storage = first.protected_storage_roots(make);
+    // Production cores share process-lifetime roots. Test cores are isolated;
+    // only these sessions share the same protection guard and resolver.
+    let protected = first.shared.processes.folder_roots.clone();
+    let share = |core: &Core| {
+        *core.shared.processes.folder_roots.lock().unwrap() = protected.lock().unwrap().clone();
+    };
+    assert!(Arc::ptr_eq(
+        &super::super::folder_roots(crate::WorkerBudget::Process),
+        &super::super::folder_roots(crate::WorkerBudget::Process)
+    ));
+    let expected = std::fs::canonicalize(&pictures).unwrap();
+    assert_eq!(
+        first_storage.resolve_known_folder("pictures:/").unwrap(),
+        expected
+    );
+    let wider = Core::start(
+        None,
+        &format!("{grants}\nfs.write home:/Pictures"),
+        Box::new(|| {}),
+    );
+    share(&wider);
+    let wider_storage = wider.protected_storage_roots(make);
+    std::fs::rename(&pictures, home.join("kept")).unwrap();
+    std::os::unix::fs::symlink(&outside, &pictures).unwrap();
+    for roots in [&first_storage, &wider_storage] {
+        assert!(
+            roots.resolve_known_folder("pictures:/").is_err(),
+            "a later session's write access must protect every session's resolver"
+        );
+    }
+    std::fs::remove_file(&pictures).unwrap();
+    std::fs::rename(home.join("kept"), &pictures).unwrap();
+    assert_eq!(
+        first_storage.resolve_known_folder("pictures:/").unwrap(),
+        expected
+    );
+    drop(wider);
+    let second = Core::start(
+        None,
+        &format!("{grants}\nfs.write home:/.config"),
+        Box::new(|| {}),
+    );
+    share(&second);
+    let second_storage = second.protected_storage_roots(make);
+    std::fs::write(
+        &settings,
+        format!("XDG_PICTURES_DIR=\"{}\"\n", outside.display()),
+    )
+    .unwrap();
+    assert!(second_storage.resolve_known_folder("pictures:/").is_err());
+    assert!(first_storage.resolve_known_folder("pictures:/").is_err());
+    for session in [&first, &second] {
+        assert!(super::super::storage_roots(&session.shared.processes)
+            .resolve_known_folder("pictures:/")
+            .is_err());
+        let result = super::on_path(&session.shared, grants, "sh", outside.to_str().unwrap());
+        assert!(
+            matches!(result, Err(Outcome::Failed { message, .. }) if message.contains("names no directory here"))
+        );
+    }
+    drop((first, second));
+    let third = Core::start(None, grants, Box::new(|| {}));
+    share(&third);
+    assert!(third
+        .protected_storage_roots(make)
+        .resolve_known_folder("pictures:/")
+        .is_err());
+    assert_eq!(made.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
+
+#[test]
+fn writable_folder_settings_remain_untrusted_after_relaunch() {
+    use ibex2::stdlib::fs::{run, set_roots, FsOp, Roots};
+    use std::sync::Arc;
+    const TEST: &str =
+        "process::real::tests::writable_folder_settings_remain_untrusted_after_relaunch";
+    const CHILD: &str = "EXACT_FOLDER_RELAUNCH";
+    let grants = "process.spawn path:sh\nfs.write home:/.config\nfs.write pictures:/";
+    if let Some(base) = std::env::var_os(CHILD) {
+        let base = std::path::PathBuf::from(base);
+        let home = base.join("home");
+        let settings = home.join(".config/user-dirs.dirs");
+        let outside = base.join("outside");
+        let core = Core::start(None, grants, Box::new(|| {}));
+        let roots = core.protected_storage_roots(|| {
+            let resolve_settings = settings.clone();
+            (
+                Roots {
+                    home: Some(home.clone()),
+                    known_folder: Some(Arc::new(move |name| {
+                        let dirs = std::fs::read_to_string(&resolve_settings)?;
+                        exact_data::known_folders::user_dir(&dirs, name, &home)
+                            .map(Into::into)
+                            .ok_or_else(|| std::io::Error::from_raw_os_error(2))
+                    })),
+                    ..Default::default()
+                },
+                vec![("pictures", settings)],
+            )
+        });
+        set_roots(roots);
+        let parsed = ibex2::grant::GrantSet::parse(&exact_runner::io_grants(grants)).unwrap();
+        if std::env::var("EXACT_FOLDER_RELAUNCH_PHASE").unwrap() == "rewrite" {
+            run(
+                &parsed,
+                None,
+                FsOp::WriteFile,
+                "home:/.config/user-dirs.dirs",
+                None,
+                Some(format!("XDG_PICTURES_DIR=\"{}\"\n", outside.display()).as_bytes()),
+            )
+            .unwrap();
+        } else {
+            let result = run(
+                &parsed,
+                None,
+                FsOp::WriteFile,
+                "pictures:/second.png",
+                None,
+                Some(b"png"),
+            );
+            assert!(
+                matches!(result, Err(ref e) if e.to_string().contains("os error 13")),
+                "a relaunch trusted app-written settings: {result:?}"
+            );
+            let result = super::on_path(&core.shared, grants, "sh", "/bin");
+            assert!(
+                matches!(result, Err(Outcome::Failed { message, .. }) if message.contains("names no directory here"))
+            );
+        }
+        return;
+    }
+    let base = Dir::new("exact-folder-relaunch");
+    let home = base.join("home");
+    std::fs::create_dir_all(home.join(".config")).unwrap();
+    std::fs::create_dir(home.join("Pictures")).unwrap();
+    std::fs::create_dir(base.join("outside")).unwrap();
+    std::fs::write(
+        home.join(".config/user-dirs.dirs"),
+        "XDG_PICTURES_DIR=\"$HOME/Pictures\"\n",
+    )
+    .unwrap();
+    for phase in ["rewrite", "relaunch"] {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([TEST, "--exact", "--nocapture"])
+            .env(CHILD, &base.0)
+            .env("EXACT_FOLDER_RELAUNCH_PHASE", phase)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{phase}: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    assert!(!base.join("outside/second.png").exists());
 }

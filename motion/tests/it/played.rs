@@ -127,6 +127,7 @@ fn an_unchanged_colour_target_keeps_a_transition_between_colour_spaces() {
 
 #[test]
 fn its_end_shows_the_animation_it_covered() {
+    exact_motion::link_animations();
     let fade = Keyframes::parse("from{opacity:0}to{opacity:1}").unwrap();
     let mut row = Animations::parse("fade 2s linear -1s paused").unwrap();
     row.resolve(|name| (name == "fade").then_some(&fade));

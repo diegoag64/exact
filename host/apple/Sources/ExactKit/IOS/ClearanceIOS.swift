@@ -3,7 +3,8 @@
 // already leaves out the route's padding above it, as if that padding cleared
 // the bar. Clearance adds to padding unless the padding reads the inset
 // itself, so the scroller's own `contentInset` makes up the rest: the
-// padding's points where it does not read the inset, up to the inset. An edge
+// route's padding's points where it does not read the inset, up to the
+// inset, and nothing for boxes laid out above the scroller. An edge
 // the route opts out of (`-exact-safe-area`) is not inset at all: the top as
 // under a transparent bar (`insetsNoTop`), the bottom by taking back what
 // UIKit adds there.
@@ -19,30 +20,26 @@ struct ClearanceInset {
 }
 
 extension NavigationHost {
-    /// The edges, as bits top 1, right 2, bottom 4 and left 8, whose
-    /// clearance `route` turns off (`-exact-safe-area`).
-    static func clearanceOff(_ route: NodeView) -> Int { Int(route.style["safe_area"]?.number ?? 0) & 0xf }
-
-    /// Whether UIKit insets nothing of `route`'s top scroller: under a
-    /// transparent bar, or where the route opts out of its top clearance.
-    static func insetsNoTop(_ route: NodeView) -> Bool { transparentBar(route) || clearanceOff(route) & 1 != 0 }
-
     /// What clearance adds to the scroller at each edge of `c` it takes
     /// (`collapseScroll` at the top, `edgeScroll` at the bottom) beyond what
     /// UIKit insets, and what it takes back on an edge the route opts out of.
     func clearanceExtra(_ c: RouteController, scroller node: NodeView, top: Bool) -> CGFloat {
         guard let sv = node.scrollView, c.surface.window != nil else { return 0 }
-        let off = Self.clearanceOff(c.node), credit = Int(c.node.style["inset_credit"]?.number ?? 0)
+        let off = RouteGeometry.clearanceOff(c.node), credit = Int(c.node.style["inset_credit"]?.number ?? 0)
         let local = c.surface.safeAreaInsets, box = node.convert(node.bounds, to: c.node)
         if top {
-            guard off & 1 == 0, credit & 1 == 0, !Self.transparentBar(c.node) else { return 0 }
+            guard off & 1 == 0, credit & 1 == 0, !RouteGeometry.transparentBar(c.node) else { return 0 }
             // The box is laid out under the top cover last reported, which the
             // kernel pads: a scroller taken under the bar in this report (a
             // reason above it gone) still sits below the cover it gives up,
             // and that room is UIKit's inset, not padding.
             var padded: CGFloat = 0
             if case .edges(let e)? = covers[c.node.id] { padded = e.top }
-            return min(local.top, max(0, box.minY - padded))
+            // Only the route's own padding above the cover is made up: a box
+            // between the cover and the scroller (a control bar) is content,
+            // which UIKit's inset never counts either
+            let own = max(0, (c.node.kernelPadding?.first ?? nil).map { $0 - padded } ?? 0)
+            return min(local.top, max(0, min(box.minY - padded, own)))
         }
         if off & 4 != 0 { return -sv.safeAreaInsets.bottom }
         guard credit & 4 == 0 else { return 0 }

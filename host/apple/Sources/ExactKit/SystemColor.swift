@@ -204,7 +204,7 @@ package enum SystemColor {
     /// scene's first; nil with no window. What the
     /// kernel resolves `AccentColor` by, never a view's own, so sessions
     /// under different tints never overwrite each other's report. On main.
-    static var appTint: PlatformColor? {
+    package static var appTint: PlatformColor? {
         #if os(iOS) || os(tvOS)
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let ordered = scenes.filter { $0.activationState == .foregroundActive } + scenes.filter { $0.activationState != .foregroundActive }
@@ -221,7 +221,7 @@ package enum SystemColor {
     /// (`appTint` for the report), since the owner thread that reports
     /// colours can read no window. `extended`: in extended sRGB, unclipped,
     /// so a Display P3 tint keeps its colour.
-    static func tintPair(_ color: PlatformColor?, extended: Bool = false) -> [[Double]]? {
+    package static func tintPair(_ color: PlatformColor?, extended: Bool = false) -> [[Double]]? {
         let color = color ?? {
             #if os(iOS) || os(tvOS)
             return defaultTint
@@ -250,7 +250,7 @@ extension SystemColor {
 extension BatchValue {
     /// Whether the value names the view's tint (`AccentColor`, `Highlight`)
     /// anywhere: a colour, a palette's, a shadow's.
-    var namesTint: Bool {
+    package var namesTint: Bool {
         switch self {
         case .object(let o): return o["sys"]?.string?.hasPrefix("@tint") == true || o.values.contains { $0.namesTint }
         case .array(let a): return a.contains { $0.namesTint }
@@ -260,7 +260,7 @@ extension BatchValue {
 
     /// The share of the tint a colour is when it is the tint (`AccentColor` 1, `Highlight` 0.2);
     /// nil for any other value
-    var tintAlpha: Double? {
+    package var tintAlpha: Double? {
         guard case .object(let o) = self, let name = o["sys"]?.string, name.hasPrefix("@tint") else { return nil }
         return SystemColor.tintShare(name)
     }
@@ -294,7 +294,7 @@ extension SystemColor {
     /// The tint at `alpha` as UIKit draws it (`UIColor.tintColor`): resolved by the tint of the view
     /// it is drawn in, so it follows that tint and dims with it. One object per alpha, so writing it
     /// again changes nothing.
-    static func tint(_ alpha: Double) -> UIColor {
+    package static func tint(_ alpha: Double) -> UIColor {
         if alpha >= 1 { return .tintColor }
         lock.lock(); defer { lock.unlock() }
         if let made = tints[alpha] { return made }
@@ -328,12 +328,12 @@ extension NodeView {
         tintPadBar()
         presenter?.controls.tintChanged(self)
         // An `svg`'s paints are resolved into its scene's layers.
-        if kind == "svg" { presenter?.svg.reappear(id, dark: drawsDark, clock: presenter?.session?.clock, tint: viewTint) }
+        if kind == "svg" { presenter?.svg?.reappear(id, dark: drawsDark, clock: presenter?.session?.clock, tint: viewTint) }
         guard style.values.contains(where: \.namesTint) || inlineText.contains(where: \.namesTint) else { return }
         paragraphOwner.invalidateText(); paragraphOwner.setNeedsDisplay()
         applyStyle(style)
         // The picture of a filtered box above it shows its colours
-        presenter?.boxFilters.changed(self)
+        presenter?.boxFilters?.changed(self)
         // The canvas, which shows the first root's background
         if superview === presenter?.root { presenter?.paintCanvas() }
     }
@@ -405,13 +405,13 @@ extension NodeView {
     }
 
     /// The colour of row `key` by `carriedTint`, in its own space
-    func carriedColor(_ key: String) -> UIColor? {
+    package func carriedColor(_ key: String) -> UIColor? {
         style[key].flatMap { $0.cgColor(dark: drawsDark, contrast: drawsHighContrast, elevated: drawsElevated, tint: $0.namesTint ? carriedTint : nil) }.map { UIColor(cgColor: $0) }
     }
 
     /// The node's `accent-color` by `carriedTint`, for a native button's configuration, which draws
     /// colours made from its value (`ButtonConfigurationIOS`)
-    var carriedAccent: UIColor? { carriedChannels("accent_color", dark: drawsDark).map { TextEngine.color($0) } }
+    package var carriedAccent: UIColor? { carriedChannels("accent_color", dark: drawsDark).map { TextEngine.color($0) } }
 
     /// The colour of row `key` for UIKit to draw, nil where it is unset: where it names the tint
     /// (`AccentColor`, `Highlight`), the tint as UIKit draws it (`SystemColor.tint`), which follows
@@ -423,7 +423,7 @@ extension NodeView {
     }
 
     /// `uiColor` of the colour this node's author wrote for row `key`; nil where the author wrote none
-    func ownUIColor(_ key: String) -> UIColor? { ownColor(key) == nil ? nil : uiColor(key) }
+    package func ownUIColor(_ key: String) -> UIColor? { ownColor(key) == nil ? nil : uiColor(key) }
 
     /// The node's `accent-color` for UIKit to draw, nil where it has none (or `auto`): the tint as
     /// UIKit draws it at the accent's share, since an authored accent is the node's tint
@@ -437,14 +437,14 @@ extension NodeView {
     /// checkbox): nil, so the view draws in the tint, which the accent is (`applyAccentTint`), but a
     /// share of the tint (`Highlight`) as UIKit's tint at that share, since UIKit follows no view's
     /// own tint made from the one above it
-    var accentShare: UIColor? {
+    package var accentShare: UIColor? {
         style["accent_color"]?.tintAlpha.flatMap { $0 < 1 ? SystemColor.tint($0) : nil }
     }
 
     /// The colour of row `key` as a UIKit view's own tint, nil where it is unset or the tint itself,
     /// which the view inherits; else as written, the tint in it by `carriedTint`, since UIKit follows
     /// no view's own tint made from the one above it
-    func ownTintColor(_ key: String) -> UIColor? {
+    package func ownTintColor(_ key: String) -> UIColor? {
         guard let row = style[key], row.tintAlpha != 1 else { return nil }
         return row.cgColor(dark: drawsDark, contrast: drawsHighContrast, elevated: drawsElevated, tint: row.namesTint ? carriedTint : nil).map { UIColor(cgColor: $0) }
     }

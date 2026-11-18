@@ -48,17 +48,17 @@
 import AppKit
 
 /// A sheet's window. Titled, which is what takes the keyboard.
-final class SheetWindow: NSWindow {}
+final class SheetWindow: ExactDrivenWindow {}
 
 /// A dialog's sheet: its window, the view that holds the dialog's subtree,
 /// and the window it is a sheet on. A modal route's sheet is the same, with
 /// its own title row and buttons round that view (`RouteChrome`, D7.4).
-final class DialogSheet {
+package final class DialogSheet {
     let window: SheetWindow
     let rootEdits = RootEdits()
     let content = BlockView(frame: .zero)
     /// A modal route's sheet: its rows round the content. Nil for a dialog's.
-    let chrome: RouteChrome?
+    let chrome: (any SheetChrome)?
     /// The page's window, or the sheet this one stands on.
     private(set) weak var over: NSWindow?
     var begun = false
@@ -67,7 +67,7 @@ final class DialogSheet {
     private var dim: NSView?
     /// The content's size as layout last returned it.
     private var used = CGSize.zero
-    init(over: NSWindow, size: CGSize, chrome: RouteChrome? = nil) {
+    init(over: NSWindow, size: CGSize, chrome: (any SheetChrome)? = nil) {
         self.over = over
         self.chrome = chrome
         window = SheetWindow(contentRect: NSRect(origin: .zero, size: size), styleMask: [.titled], backing: .buffered, defer: false)
@@ -148,7 +148,7 @@ extension NodeView {
     /// the window's ground are painted again, on the ground they now have.
     func sheetGroundChanged() {
         if groundIsTheWindows || hasGroupedCardFill { updateMaterial(); applyBoxLayer(); materialContent?.needsDisplay = true; needsDisplay = true }
-        for case let child as NodeView in container.subviews { child.sheetGroundChanged() }
+        for child in structuralChildren { child.sheetGroundChanged() }
     }
 }
 
@@ -188,7 +188,7 @@ extension NSView {
 extension Presenter {
     /// Whether `window` holds this session's nodes: its view's window, the
     /// sheet of one of its dialogs or alerts, or one of its popovers'.
-    func hosts(_ window: NSWindow?) -> Bool {
+    package func hosts(_ window: NSWindow?) -> Bool {
         guard let window else { return false }
         return window === viewport.window || window === alerts.sheet || dialogs.entries.contains { $0.sheet?.window === window } || menus.hosts(window)
     }
@@ -218,7 +218,7 @@ extension Presenter {
     /// presentation the runner keeps live with what is above it, and the
     /// rest inert (LLP 1123 D2).
     package var openTopLayer: TopLayerGeometry {
-        navigation.split.samplePlacement()
+        navigation.stackSplit.samplePlacement()
         let sheets = dialogs.presented, popovers = menus.presented
         func depth(_ view: NodeView) -> Int {
             if view.window !== viewport.window {
@@ -269,12 +269,12 @@ extension DialogHost {
         // sheet on one window back until the first has gone.
         var over = front
         while let top = over.attachedSheet { over = top }
-        let sheet = DialogSheet(over: over, size: entry.frame.size, chrome: entry.route ? RouteChrome() : nil)
+        let sheet = DialogSheet(over: over, size: entry.frame.size, chrome: entry.route ? presenter.navigation.makeRouteChrome() : nil)
         sheet.rootEdits.presenter = presenter
         sheet.rootEdits.join(sheet.window)
         sheet.content.pointerTracking = { [weak presenter] in presenter?.trackPointer($0) }
         entry.sheet = sheet
-        if entry.route { adopt(entry, sheet) }
+        if entry.route { presenter.navigation.adoptRouteSheet(entry, sheet) }
         guard let block = block(of: entry) else { return }
         presenter.blocks.show(entry.dialog, in: sheet.content, block: block) { [weak sheet] size in sheet?.fit(size) }
         entry.dialog.sheetGroundChanged()
@@ -308,7 +308,7 @@ extension DialogHost {
         sheet.paintDim(nil, shown: false)
         if let over, over.sheets.contains(sheet.window) { over.endSheet(sheet.window) }
         sheet.window.orderOut(nil)
-        if entry.route { release(entry) }
+        if entry.route { presenter?.navigation.releaseRouteSheet(entry) }
         if live(dialog) { dialog.frame = entry.frame }
         presenter?.blocks.release(dialog)
         if live(dialog) { dialog.sheetGroundChanged() }

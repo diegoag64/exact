@@ -18,7 +18,7 @@ fn game_wheel_is_one_relative_sample_without_focus_or_contact_changes() {
         (
             3,
             1,
-            json!({"t":"wheel","dx":-2.5,"dy":17.25,"x":25.,"y":75.,"at":25.})
+            json!({"t":"wheel","dx":-2.5,"dy":17.25,"x":25.,"y":75.,"at":25.,"shiftKey":false,"ctrlKey":false,"altKey":false,"metaKey":false})
         )
     );
     assert_eq!(p.focus, Some(editor));

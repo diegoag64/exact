@@ -33,14 +33,20 @@ impl Primitives {
         parent_changed: bool,
     ) -> Result<(), RenderError> {
         self.hz = w.hz();
+        let poses = crate::world::scene::PoseRows::new(w);
+        let materials = w.components::<Material>();
+        let tints = w.components::<exact_game::Tint>();
+        let glows = w.components::<Glow>();
+        let viewmodels = w.components::<exact_game::ViewModel>();
         feed_with_pose(
             w,
+            &poses,
             &mut self.meshes,
             initial,
             next_tick,
             parent_changed,
             true,
-            crate::world::scene::primitive_pose,
+            |e| poses.primitive_pose(e),
         );
         self.items.retain(|_, p| {
             self.meshes
@@ -49,15 +55,16 @@ impl Primitives {
                     self.meshes[i].entity == p.entity
                         && !matches!(self.meshes[i].value, Mesh::Asset(_))
                 })
-                && w.get::<Material>(p.entity)
+                && materials
+                    .get(p.entity)
                     .is_some_and(|m| (0.0..1.0).contains(&m.color[3]))
         });
         for item in &self.meshes {
             if matches!(item.value, Mesh::Asset(_)) {
                 continue;
             }
-            let Some(material) = w
-                .get::<Material>(item.entity)
+            let Some(material) = materials
+                .get(item.entity)
                 .filter(|m| (0.0..1.0).contains(&m.color[3]))
             else {
                 continue;
@@ -99,10 +106,10 @@ impl Primitives {
                 p.triangles = triangles();
                 p.mesh.clone_from(&item.value);
             }
-            p.viewmodel = w.has::<exact_game::ViewModel>(item.entity);
+            p.viewmodel = viewmodels.has(item.entity);
             p.poses = item.poses;
             p.material = *material;
-            if let Some(tint) = w.get::<exact_game::Tint>(item.entity) {
+            if let Some(tint) = tints.get(item.entity) {
                 for i in 0..4 {
                     p.material.color[i] *= tint.color.0[i];
                 }
@@ -110,7 +117,7 @@ impl Primitives {
                     p.material.emissive[i] += tint.emissive[i];
                 }
             }
-            p.glow = w.get::<Glow>(item.entity).map(|g| g.clone());
+            p.glow = glows.get(item.entity).map(|g| g.clone());
             p.opacity = w.drawn(item.entity).map_or(1., |d| d.opacity);
         }
         Ok(())

@@ -315,9 +315,16 @@ pub(super) fn native_collections(
     if count > limits.collections * 2 || rows > limits.collection_rows * 2 {
         return Err("selected/live collection union capacity".into());
     }
+    let roots = selected
+        .iter()
+        .chain(outside)
+        .flat_map(|c| &c.fixed)
+        .try_fold(0usize, |n, f| n.checked_add(f.roots.len()))
+        .ok_or("native collection fixed roots overflow")?;
     let bound = count
         .checked_mul(1024)
         .and_then(|n| rows.checked_mul(1024).and_then(|r| n.checked_add(r)))
+        .and_then(|n| roots.checked_mul(12).and_then(|r| n.checked_add(r)))
         .and_then(|n| n.checked_add(2))
         .ok_or("native collection wire overflow")?;
     if bound > limits.diff_wire_bound {

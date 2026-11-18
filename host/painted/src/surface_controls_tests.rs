@@ -1,5 +1,7 @@
 use super::tests::Probe;
 use super::*;
+#[path = "surface_controls_tests/contextmenu.rs"]
+mod contextmenu;
 #[path = "surface_controls_tests/escape.rs"]
 mod escape;
 #[path = "surface_controls_tests/focus.rs"]

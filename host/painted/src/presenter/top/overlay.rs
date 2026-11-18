@@ -57,7 +57,7 @@ impl<D: DataSource> Presenter<D> {
             return false;
         };
         let [left, top, ..] = open.frame.map(|v| v as f32 / open.scale);
-        if open.layout.content_contains(x - left, y - top) {
+        if !open.detached && open.layout.content_contains(x - left, y - top) {
             self.overlay_scroll(delta);
         }
         true
@@ -112,7 +112,8 @@ impl<D: DataSource> Presenter<D> {
         if !self.top.overlay.enabled {
             return;
         }
-        let Some(open) = self.top.open.as_ref() else {
+        // A status item's menu is painted into its own window (`status.rs`).
+        let Some(open) = self.top.open.as_ref().filter(|open| !open.detached) else {
             self.top.overlay.pixels = None;
             self.top.overlay.shadow = None;
             self.brush.set_top_surface(None);
@@ -177,7 +178,8 @@ impl<D: DataSource> Presenter<D> {
         }));
     }
 
-    /// Capture the whole click, including the release after an outside dismissal.
+    /// Capture the whole click, including the release after an outside
+    /// dismissal. The page's whole window is outside a status item's menu.
     pub(in crate::presenter) fn overlay_pointer(
         &mut self,
         phase: i32,
@@ -188,6 +190,17 @@ impl<D: DataSource> Presenter<D> {
         if !self.top.overlay.enabled {
             return false;
         }
+        if self.top.open.as_ref().is_some_and(|open| open.detached) {
+            if phase == 0 {
+                self.top_takes_pointer(now);
+            }
+            return true;
+        }
+        self.menu_pointer(phase, x, y, now)
+    }
+
+    /// A pointer at (`x`, `y`) in the space the open surface's frame is in.
+    pub(super) fn menu_pointer(&mut self, phase: i32, x: f32, y: f32, now: f64) -> bool {
         if phase == 0 {
             self.overlay_input(false);
         }

@@ -6,11 +6,11 @@
 import ObjectiveC
 #if os(iOS) || os(tvOS)
 import UIKit
-typealias SymbolImage = UIImage
+package typealias SymbolImage = UIImage
 typealias SymbolConfig = UIImage.SymbolConfiguration
 #else
 import AppKit
-typealias SymbolImage = NSImage
+package typealias SymbolImage = NSImage
 typealias SymbolConfig = NSImage.SymbolConfiguration
 #endif
 
@@ -140,7 +140,7 @@ extension NodeView {
     }
 
     /// A native control configures its own image in the control tint.
-    var faceImage: SymbolImage? {
+    package var faceImage: SymbolImage? {
         guard props["symbolPath"] == nil, let name = props["symbolName"], !name.isEmpty else { return image }
         let points = number("font_size", PageFacts.defaultRootFontSize), weight = number("font_weight", 400)
         return points > 0 ? symbolImage(name, symbolConfiguration(SymbolMeasure.configuration(points: points, weight: weight), face: true)) : nil

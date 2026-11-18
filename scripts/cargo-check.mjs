@@ -11,12 +11,27 @@ const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
 
 /** Add rustup's tools when a non-interactive shell omitted them from PATH. */
 export function cargoOnPath(env = process.env, home = homedir()) {
-  const dirs = (env.PATH ?? '').split(delimiter).filter(Boolean);
-  if (dirs.some(dir => existsSync(resolve(dir, 'cargo')))) return true;
+  const windows = process.platform === 'win32', separator = windows ? ';' : delimiter;
+  const key = windows ? Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'PATH' : 'PATH';
+  const dirs = (env[key] ?? '').split(separator).filter(Boolean);
+  const names = windows ? ['cargo.exe', 'cargo'] : ['cargo'];
+  const hasCargo = dir => names.some(name => Bun.which(resolve(dir, name)));
+  if (dirs.some(hasCargo)) return true;
   const rustup = resolve(env.CARGO_HOME ?? resolve(home, '.cargo'), 'bin');
-  if (!existsSync(resolve(rustup, 'cargo'))) return false;
-  env.PATH = [rustup, ...dirs].join(delimiter);
+  if (!hasCargo(rustup)) return false;
+  env[key] = [rustup, ...dirs].join(separator);
   return true;
+}
+
+/** What ships to an Apple device or an Android phone is optimized as one module: fat LTO
+ * makes the stripped binary smaller than thin — 4.8% on Apple, no slower to boot, for 16 s
+ * of a production build (LLP 1036.000 §8); 6.4% for Caltrain's Android library (16.6 →
+ * 15.6 MB), whose release build takes about a minute longer. Said on the command line and
+ * not in `[profile.release]`, which every developer tool builds with. Cargo's fingerprints
+ * keep thin and fat apart: a target directory used both ways (a macOS and a Linux bake on a
+ * Mac) recompiles, and never reuses the other's artifacts. */
+export function wholeProgram(kind, profile) {
+  return ['apple','ios','macos','tvos','android'].includes(kind) && profile === 'release' ? ['--config','profile.release.lto="fat"'] : [];
 }
 
 /** Every Cargo process Exact starts refuses implicit Hermes acquisition. */
@@ -145,6 +160,7 @@ const outsideChecks = new Map();
  * (`outsideWorkspaceProblems` holds the workspace's to them); and each path package's manifest `cargo metadata` listed,
  * with each `Cargo.toml` above it, where the workspace it inherits from is. */
 function cargoInputs(dir, manifests, workspace, packages) {
+  dir = realpathSync(dir);
   const above = [], configs = [];
   for (let at = dirname(dir); at !== dirname(at); at = dirname(at)) above.push(resolve(at, 'Cargo.toml'));
   for (let at = workspace; ; at = dirname(at)) { configs.push(resolve(at, '.cargo/config.toml'), resolve(at, '.cargo/config')); if (at === dirname(at)) break; }
@@ -195,11 +211,12 @@ export function rememberWorkspace(dir, outside, manifests, workspace, check) {
  * would each read the other's build as its own changed inputs, and each be refused as busy while the other builds. An
  * app whose directory is gone has given its names up. */
 export function claimTargetCrates(target, name, dir) {
+  dir = realpathSync(dir);
   const record = resolve(target, '.exact-crates', name);
   let holder = null;
   try { holder = readFileSync(record, 'utf8').trim(); } catch { /* unclaimed */ }
   if (holder === dir) return;
-  if (holder && existsSync(resolve(holder, 'app.contract'))) {
+  if (holder && existsSync(resolve(holder, 'app.contract')) && realpathSync(holder) !== dir) {
     throw new Error(`${target} (CARGO_TARGET_DIR) holds the crates ${name}-* of the app in ${holder}, and the app in ${dir} names its crates the same: each build would overwrite the other's. Give each app its own CARGO_TARGET_DIR, or unset it to build in each app's target/.`);
   }
   mkdirSync(dirname(record), { recursive: true });
@@ -244,7 +261,7 @@ export function declaredWorkspace(dir, memberDirs) {
     const owner = existsSync(path) ? Bun.TOML.parse(readFileSync(path, 'utf8')).package?.workspace : undefined;
     if (owner === undefined) return [];
     const at = resolve(member, owner);
-    return [generated.includes(at) ? at : realpathSync(at)];
+    return [generated.includes(at) ? at : realpathSync(resolve(realpathSync(member), owner))];
   }))];
   const authored = declared.filter(at => !generated.includes(at));
   if (authored.length > 1 || authored.length && authored.length < declared.length) throw new Error(`${dir}: app crates declare different Cargo workspaces: ${declared.join(', ')}${authored.length < declared.length ? `. An app's own crates join ${generated.map(at => relative(dir, at)).join(' or ')}, or all name the app's authored workspace` : ''}`);
@@ -294,6 +311,7 @@ function owns(root, workspace, path) {
  * (LLP 1153.003 D1.1): its workspace is generated (scripts/app-shells.mjs). An enclosing workspace that does not
  * list the app (another repository the app sits in) is not the app's. */
 export function authoredWorkspace(dir) {
+  dir = realpathSync(dir);
   const own = readToml(resolve(dir, 'Cargo.toml'));
   if (own?.workspace !== undefined) return dir;
   if (own?.package?.workspace) return resolve(dir, own.package.workspace);
@@ -410,20 +428,25 @@ export function appleCargo(command, arguments_, options = {}) {
  * before r28 align to 4 KB. */
 export const ANDROID_PAGE_SIZE = '-Clink-arg=-Wl,-z,max-page-size=16384';
 
-/** A Cargo run for `aarch64-linux-android` with ANDROID_PAGE_SIZE added to every rustflags source it may use, and none
- * made: CARGO_ENCODED_RUSTFLAGS or RUSTFLAGS when set, the target's own variable when set, and `build.rustflags`
+/** C++ exception support for C++ that a build script compiles (`CXXSTDLIB_aarch64_linux_android`, `androidToolchainEnv`):
+ * the NDK's libc++_static.a leaves `__cxa_throw` and the `std` exceptions' typeinfo to libc++abi.a, and a shared library
+ * links with them undefined, so the device refuses to load it. An archive, so a library without C++ takes nothing. */
+const ANDROID_CXXABI = '-Clink-arg=-lc++abi';
+
+/** A Cargo run for an Android target with ANDROID_PAGE_SIZE and ANDROID_CXXABI added to every rustflags source
+ * it may use, and none made: CARGO_ENCODED_RUSTFLAGS or RUSTFLAGS when set, the target's own variable when set, and `build.rustflags`
  * through `--config`, which Cargo joins with the configuration's array and CARGO_BUILD_RUSTFLAGS. A new target source
  * would displace `build.rustflags` (a game's `-fp-contract=off`), and a variable would reach the host Cargo runs that
  * build scripts start, whose linker refuses the argument. Other runs pass through. */
 export function androidCargo(command, arguments_, options = {}) {
-  const android = command === 'cargo' && arguments_.some((value, index) => value === '--target=aarch64-linux-android' || value === 'aarch64-linux-android' && arguments_[index - 1] === '--target');
-  if (!android) return [command, arguments_, options];
+  const target = arguments_.find((value, index) => value.startsWith('--target=') || arguments_[index - 1] === '--target')?.replace(/^--target=/, '');
+  if (command !== 'cargo' || !target?.endsWith('-linux-android')) return [command, arguments_, options];
   const environment = { ...(options.env ?? process.env) };
-  const add = (value, separator) => value.split(separator).includes(ANDROID_PAGE_SIZE) ? value : [value, ANDROID_PAGE_SIZE].filter(Boolean).join(separator);
+  const add = (value, separator) => [value, ...[ANDROID_PAGE_SIZE, ANDROID_CXXABI].filter((flag) => !value.split(separator).includes(flag))].filter(Boolean).join(separator);
   if (environment.CARGO_ENCODED_RUSTFLAGS !== undefined) environment.CARGO_ENCODED_RUSTFLAGS = add(environment.CARGO_ENCODED_RUSTFLAGS, '\x1f');
   else if (environment.RUSTFLAGS !== undefined) environment.RUSTFLAGS = add(environment.RUSTFLAGS.trim(), ' ');
-  const own = 'CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS';
+  const own = `CARGO_TARGET_${target.toUpperCase().replaceAll('-', '_')}_RUSTFLAGS`;
   if (environment[own] !== undefined) environment[own] = add(environment[own].trim(), ' ');
   const separator = arguments_.indexOf('--'), at = separator < 0 ? arguments_.length : separator;
-  return [command, [...arguments_.slice(0, at), '--config', `build.rustflags=${JSON.stringify([ANDROID_PAGE_SIZE])}`, ...arguments_.slice(at)], { ...options, env: environment }];
+  return [command, [...arguments_.slice(0, at), '--config', `build.rustflags=${JSON.stringify([ANDROID_PAGE_SIZE, ANDROID_CXXABI])}`, ...arguments_.slice(at)], { ...options, env: environment }];
 }

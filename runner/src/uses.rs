@@ -14,6 +14,11 @@ use exact_kernel::{PropId, StyleId};
 use exact_plan::{BindingKind, EventKind, Opcode, Plan, Stdlib, StrId};
 use std::fmt;
 
+mod apple;
+pub use apple::{
+    apple_grant_uses, apple_uses, data_url, image_sources, lays_out_grid, ImageSource,
+};
+
 /// A capability beyond the core, linked into an artifact only when its plan
 /// uses it (LLP 1047 §4's roster, as each one moves behind its seam).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,13 +69,16 @@ pub enum Capability {
     Effects,
     /// CSS animations (LLP 1055 D5): the `animation` shorthand's and
     /// `@keyframes`' grammars, for a plan that declares keyframes or binds
-    /// `animation` or `-exact-exit-animation`.
+    /// `animation`, `-exact-exit-animation` or a route's
+    /// `::view-transition-new` or `::view-transition-old`.
     Animations,
     /// Gradient grammars (LLP 1066, LLP 1077 D2), for a plan that binds
     /// `background-image` or `mask-image`.
     Gradients,
     /// CSS grid's track, placement and keyword grammars, for a plan that
-    /// binds any of the six grid rows.
+    /// binds any of the six grid rows. On Apple, the grammars and the grid
+    /// algorithm together, for a plan that binds one or whose layout can
+    /// reach the algorithm ([`apple_uses`]).
     Grid,
     /// `frame` and `measure` (LLP 1051.000): a plan whose actions read
     /// geometry. Native hosts answer from the kernel; the web links a
@@ -143,11 +151,68 @@ pub enum Capability {
     /// Locked secrets (LLP 1133.010 D16), selected by `secret.keep` grants
     /// with a presence policy, including names whose protection is optional.
     Presence,
+    /// A package's native modules, views and events (LLP 1047.001 D10,
+    /// D11): a plan whose `modules`, `views` or `module_events` table is not
+    /// empty. Native only ([`apple_uses`]); the web loads its packages
+    /// itself.
+    Modules,
+    /// Tool calls (LLP 1111; LLP 1047.001 D11): a plan whose `tools` table
+    /// is not empty. Native only ([`apple_uses`]).
+    Tools,
+    /// SVG decoding (LLP 1047.001 D10): an SVG element, or an image whose
+    /// file can be an SVG, which the host tells by its bytes. Native only.
+    Svg,
+    /// Loading and showing image files: an `image` whose source can be a
+    /// file, or a Markdown atom's icon. Native only.
+    Images,
+    /// The app module's native views and hatches (LLP 1024, LLP
+    /// 1075.003.000): a module tag, a `hatch`, or a package's view, and an
+    /// app whose module artifact connects the app-level hatches, which the
+    /// bake reads. Native only.
+    NativeViews,
+    /// Content regions (long documents): never set by a plan, since the
+    /// entry registers the region. An entry that registers one requires it
+    /// in its set, so a manifest's `link` names it. Native only.
+    ContentRegions,
+    /// Trace recording: a plan that runs `startTrace_EXPERIMENTAL` or
+    /// `stopTrace_EXPERIMENTAL`, or a manifest's `link` for an embedder that
+    /// calls the public API. Native only.
+    Traces,
+    /// The optional native controls: switches, checkboxes, radios, sliders,
+    /// pop-up selects, date pickers, progress and segmented controls. A
+    /// plain button and a number field's stepper are the core's. Native
+    /// only.
+    Controls,
+    /// Shared-element flights (LLP 1013.000): a plan that binds
+    /// `sharedElement`, the name a flight follows from a leaving view to an
+    /// arriving one. Native only.
+    Flights,
+    /// `position: sticky` (LLP 1083 D4): a plan whose `position` can be
+    /// `sticky`. Native only.
+    Sticky,
+    /// Notifications: posting, the delegate that shows one in front and
+    /// opens a click, declared actions and push registration. Selected by a
+    /// `device.notifications` grant, which push needs too. Native only.
+    Notifications,
+    /// Host events (LLP 1133.001.000 D2): a system call on the app's or the
+    /// scene's delegate that a package takes, held until it does. Selected
+    /// by a grant a listed event needs signed (`device.cloudkit`). Native
+    /// only.
+    HostEvents,
+    /// Live Activities: a plan that starts, updates or ends one, or reads
+    /// them (`exactActivities`). Native only.
+    Activities,
+    /// Wakes, background transfers and monitored regions (LLP 1133.017,
+    /// LLP 1133.021 D14), which can launch the app with no scene. Selected by
+    /// a background grant (`device.background-sync`,
+    /// `device.periodic-background-sync`, `device.geolocation-background`)
+    /// or a background transfer's or a geofence's names. Native only.
+    Wakes,
 }
 
 impl Capability {
     /// Every capability, in bit order.
-    pub const ALL: [Capability; 37] = [
+    pub const ALL: [Capability; 51] = [
         Capability::Markdown,
         Capability::Motion,
         Capability::Collections,
@@ -185,6 +250,20 @@ impl Capability {
         Capability::TextStroke,
         Capability::SymbolPalette,
         Capability::Presence,
+        Capability::Modules,
+        Capability::Tools,
+        Capability::Svg,
+        Capability::Images,
+        Capability::NativeViews,
+        Capability::ContentRegions,
+        Capability::Traces,
+        Capability::Controls,
+        Capability::Flights,
+        Capability::Sticky,
+        Capability::Notifications,
+        Capability::HostEvents,
+        Capability::Activities,
+        Capability::Wakes,
     ];
 
     /// The name an entry, a refusal and a report use.
@@ -227,6 +306,20 @@ impl Capability {
             Capability::TextStroke => "text_stroke",
             Capability::SymbolPalette => "symbol_palette",
             Capability::Presence => "presence",
+            Capability::Modules => "modules",
+            Capability::Tools => "tools",
+            Capability::Svg => "svg",
+            Capability::Images => "images",
+            Capability::NativeViews => "native_views",
+            Capability::ContentRegions => "content_regions",
+            Capability::Traces => "traces",
+            Capability::Controls => "controls",
+            Capability::Flights => "flights",
+            Capability::Sticky => "sticky",
+            Capability::Notifications => "notifications",
+            Capability::HostEvents => "host_events",
+            Capability::Activities => "activities",
+            Capability::Wakes => "wakes",
         }
     }
 
@@ -248,6 +341,25 @@ pub struct Uses(u64);
 impl Uses {
     /// The core alone.
     pub const NONE: Uses = Uses(0);
+
+    /// The native roster's entries (LLP 1047.001 D10), which only an Apple
+    /// set names: [`apple_uses`] and the Apple bake select them, and no other
+    /// host links anything for them.
+    pub const NATIVE: Uses = Uses::NONE
+        .with(Capability::Modules)
+        .with(Capability::Tools)
+        .with(Capability::Svg)
+        .with(Capability::Images)
+        .with(Capability::NativeViews)
+        .with(Capability::ContentRegions)
+        .with(Capability::Traces)
+        .with(Capability::Controls)
+        .with(Capability::Flights)
+        .with(Capability::Sticky)
+        .with(Capability::Notifications)
+        .with(Capability::HostEvents)
+        .with(Capability::Activities)
+        .with(Capability::Wakes);
 
     /// This set and `capability`.
     pub const fn with(self, capability: Capability) -> Uses {
@@ -275,9 +387,17 @@ impl Uses {
             if exact_grants::line_presence(line).is_some() {
                 uses = uses.with(Capability::Presence);
             }
+            // The listener's and the data executor's own lines, outside the
+            // I/O grammar, admit work the executor runs.
+            if exact_grants::process::is_process_line(line.trim()) {
+                uses = uses.with(Capability::Io);
+            }
             uses = match line.split_whitespace().next() {
                 Some("sqlite.open") => uses.with(Capability::Sqlite),
-                Some("auth.session") => uses.with(Capability::AuthSession),
+                // The sign-in sheet's answer reaches its source through the
+                // executor's pump.
+                Some("auth.session") => uses.with(Capability::AuthSession).with(Capability::Io),
+                Some("net.listen" | "env.launch") => uses.with(Capability::Io),
                 _ => uses,
             };
         }
@@ -316,6 +436,20 @@ impl fmt::Display for Uses {
 /// The capabilities `plan` uses (LLP 1047 D2).
 pub fn uses(plan: &Plan) -> Uses {
     let mut uses = Uses::NONE;
+    if plan.tools.iter().any(|t| {
+        serde_json::from_str::<serde_json::Value>(plan.str(t.face)).is_ok_and(|face| {
+            face["doors"]
+                .as_array()
+                .is_some_and(|doors| doors.iter().any(|d| d == "apple"))
+                && face["parameters"].as_object().is_some_and(|params| {
+                    params
+                        .values()
+                        .any(|p| p.get("type").is_some_and(|t| t == "file"))
+                })
+        })
+    }) {
+        uses = uses.with(Capability::Picker);
+    }
     if !plan.keyframes.is_empty() {
         uses = uses.with(Capability::Animations);
     }
@@ -324,7 +458,10 @@ pub fn uses(plan: &Plan) -> Uses {
     }
     // Kept answers and surface records both need the host's store, and a
     // declared source its network (LLP 1162.001 D3).
-    if plan.resources.iter().any(|r| r.reader || r.keep) || !plan.fetches.is_empty() {
+    if plan.resources.iter().any(|r| r.reader || r.keep)
+        || !plan.fetches.is_empty()
+        || plan.slots.iter().any(|s| s.persist)
+    {
         uses = uses.with(Capability::Io);
     }
     // A segment length is a value, not a row: any string of the plan's
@@ -364,26 +501,10 @@ pub fn uses(plan: &Plan) -> Uses {
                 }
                 Some(PropId::BackgroundMaterial) => uses = uses.with(Capability::Materials),
                 Some(PropId::DecorationStyles) => {
-                    // The compiler puts decoration rows in a literal JSON table
-                    // rather than style bindings (LLP 1114.007 D1).
-                    if let Some(serde_json::Value::Object(table)) =
-                        constant_str(plan, plan.code(binding.expr))
-                            .and_then(|json| serde_json::from_str(json).ok())
+                    for style in
+                        decoration_rows(plan, &binding).unwrap_or_else(|| StyleId::ALL.to_vec())
                     {
-                        for row in table
-                            .values()
-                            .filter_map(serde_json::Value::as_array)
-                            .flatten()
-                        {
-                            if let Some(style) = row
-                                .get(0)
-                                .and_then(serde_json::Value::as_u64)
-                                .and_then(|id| u32::try_from(id).ok())
-                                .and_then(StyleId::from_bit)
-                            {
-                                uses = uses.with_style(style);
-                            }
-                        }
+                        uses = uses.with_style(style);
                     }
                 }
                 Some(PropId::ListStyle) => uses = uses.with(Capability::GroupedLists),
@@ -432,36 +553,6 @@ pub fn uses(plan: &Plan) -> Uses {
                 }
                 if StyleId::from_bit(u32::from(binding.id)) == Some(StyleId::ContentTransition) {
                     uses = uses.with(Capability::Numerals);
-                }
-                if matches!(
-                    StyleId::from_bit(u32::from(binding.id)),
-                    Some(StyleId::Filter | StyleId::ClipPath)
-                ) {
-                    uses = uses.with(Capability::Effects);
-                }
-                if matches!(
-                    StyleId::from_bit(u32::from(binding.id)),
-                    Some(
-                        StyleId::Animation
-                            | StyleId::ExitAnimation
-                            | StyleId::ViewTransitionNew
-                            | StyleId::ViewTransitionOld
-                    )
-                ) {
-                    uses = uses.with(Capability::Animations);
-                }
-                if matches!(
-                    StyleId::from_bit(u32::from(binding.id)),
-                    Some(
-                        StyleId::GridTemplateColumns
-                            | StyleId::GridTemplateRows
-                            | StyleId::GridColumn
-                            | StyleId::GridRow
-                            | StyleId::GridAutoFlow
-                            | StyleId::JustifyItems
-                    )
-                ) {
-                    uses = uses.with(Capability::Grid);
                 }
                 if StyleId::from_bit(u32::from(binding.id)) == Some(StyleId::Transition)
                     && can_be(&binding, &|v| v.contains("spring"))
@@ -570,6 +661,28 @@ fn shows_media_picker(plan: &Plan) -> bool {
         file && prop(PropId::Accept)
             .is_some_and(|b| constant_str(plan, plan.code(b.expr)).is_none_or(media))
     })
+}
+
+/// Whether node `node` is a zoomable scroller (LLP 1057.001.000 D1): either
+/// range row written, literal or bound. The web loads its zoom module, and the
+/// wasm host names its absence, only for a plan with one.
+pub fn zoomable(plan: &Plan, node: exact_plan::NodesId) -> bool {
+    plan.node(node)
+        .bindings
+        .iter()
+        .map(|b| plan.binding(b))
+        .any(|b| {
+            b.kind == BindingKind::Style
+                && matches!(
+                    StyleId::from_bit(b.id as u32),
+                    Some(StyleId::MinZoom | StyleId::MaxZoom)
+                )
+        })
+}
+
+/// Whether `plan` has a zoomable scroller.
+pub fn zooms(plan: &Plan) -> bool {
+    (0..plan.nodes.len()).any(|i| zoomable(plan, exact_plan::NodesId(i as u32)))
 }
 
 /// Whether `plan` can show an SVG island (LLP 1055.000 D10, D14): a `mask`
@@ -682,6 +795,22 @@ pub fn uses_picture_in_picture(plan: &Plan) -> bool {
     runs_command(plan, &["requestPictureInPicture"])
 }
 
+/// Whether an image's, a media element's or a frame's source can be remote:
+/// an `http:` or `https:` literal, or one computed at run time, which this
+/// cannot read. The Mac App Store sandbox loads such a source only with
+/// `network.client` (LLP 1030.005 D2).
+pub fn sources_can_be_remote(plan: &Plan) -> bool {
+    plan.bindings.iter().any(|binding| {
+        binding.kind == BindingKind::Prop
+            && matches!(
+                PropId::from_wire(binding.id),
+                Some(PropId::Src | PropId::ImageSource)
+            )
+            && constant_str(plan, plan.code(binding.expr))
+                .is_none_or(|src| src.starts_with("http:") || src.starts_with("https:"))
+    })
+}
+
 /// Whether the runner keeps a MIDI queue the agent shows (`state.midi`):
 /// for a plan that [`uses_midi`] or declares a sequence, whose notes and
 /// clock go on it. The JS target bundles midi.js then.
@@ -731,6 +860,33 @@ fn constant_bool(plan: &Plan, code: &[u8]) -> Option<bool> {
 
 /// The string a binding always evaluates to, when its code is one constant:
 /// `Str`, then `Return`.
+/// The style rows a decoration table binding names (LLP 1114.007 D1): the
+/// compiler writes the table as a literal JSON string, and a table that is
+/// not a literal can name any row, so it is `None`.
+pub(super) fn decoration_rows(
+    plan: &Plan,
+    binding: &exact_plan::BindingsRow,
+) -> Option<Vec<StyleId>> {
+    let json = constant_str(plan, plan.code(binding.expr))?;
+    let Ok(serde_json::Value::Object(table)) = serde_json::from_str(json) else {
+        // The host refuses a table that does not decode, parsing no row.
+        return Some(Vec::new());
+    };
+    Some(
+        table
+            .values()
+            .filter_map(serde_json::Value::as_array)
+            .flatten()
+            .filter_map(|row| {
+                row.get(0)
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|id| u32::try_from(id).ok())
+                    .and_then(StyleId::from_bit)
+            })
+            .collect(),
+    )
+}
+
 fn constant_str<'a>(plan: &'a Plan, code: &[u8]) -> Option<&'a str> {
     match plan.read_code(code).0 {
         [op, a, b, c, d, ret] if *op == Opcode::Str as u8 && *ret == Opcode::Return as u8 => {
@@ -775,6 +931,33 @@ mod grant_tests {
     }
 
     #[test]
+    fn persisted_slots_link_storage_without_resources() {
+        use exact_plan::{asm::Asm, builder::PlanBuilder, TypeKind};
+        for persist in [false, true] {
+            let mut b = PlanBuilder::new(exact_kernel::SCHEMA_DIGEST, 1);
+            let boolean = b.primitive(TypeKind::Bool);
+            let mut initial = Asm::new();
+            initial.bool(false);
+            let initial = b.code(initial);
+            let slot = b.slot("liked", boolean, initial);
+            b.set_slot_persist(slot, persist);
+            b.node(
+                exact_kernel::NodeType::View as u8,
+                None,
+                None,
+                0,
+                &[],
+                &[],
+                None,
+            );
+            assert_eq!(
+                super::uses(&b.finish().unwrap()).has(Capability::Io),
+                persist
+            );
+        }
+    }
+
+    #[test]
     fn kept_surfaces_link_storage_without_a_data_reader() {
         use exact_plan::{asm::Asm, builder::PlanBuilder, TypeKind};
 
@@ -805,6 +988,20 @@ mod grant_tests {
             let uses = super::uses(&plan);
             assert!(uses.has(Capability::Surfaces));
             assert_eq!(uses.has(Capability::Io), keep);
+        }
+    }
+
+    #[test]
+    fn the_listener_the_processes_and_the_sign_in_sheet_link_io() {
+        for grants in [
+            "net.listen unix:/tmp/exact-listen-fixture",
+            "process.spawn /usr/bin/git",
+            "auth.session https://example.test",
+        ] {
+            assert!(
+                Uses::NONE.with_grants(grants).has(Capability::Io),
+                "{grants}"
+            );
         }
     }
 

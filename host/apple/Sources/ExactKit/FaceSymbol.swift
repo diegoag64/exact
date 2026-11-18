@@ -157,7 +157,7 @@ package enum FaceSymbol {
 extension NodeView {
     /// The glyph this image shows on a control: an SF name, template path
     /// or raster asset token; nil when none is available.
-    var faceSymbol: String? {
+    package var faceSymbol: String? {
         if let name = props["symbolName"], !name.isEmpty { return name }
         if let asset = FaceSymbol.assetToken(props["symbolAsset"], multicolor: style["symbol_rendering"]?.string == "multicolor") { return asset }
         return FaceSymbol.token(path: props["symbolPath"], viewBox: props["symbolViewBox"], rule: props["symbolFillRule"])

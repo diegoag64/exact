@@ -115,7 +115,8 @@ style         = "style" IDENT block(style-line | part) ;
 decoration    = "decoration" IDENT ( style-line | block(style-line) ) ;
 atom          = "atom" IDENT style-line [ block(style-line | state) ] ;
 style-line    = { FIELD "=" style-literal } NL ;
-part          = "::" "placeholder" NL block(style-line) ;
+part          = "::" ( "placeholder" | "backdrop" | "view-transition-new"
+                     | "view-transition-old" ) NL block(style-line) ;
 style-literal = STRING | NUMBER | "-" NUMBER | "true" | "false" ;
 keyframes     = "keyframes" IDENT block(keyframe-line) ;
 keyframe-line = selector { "," selector } { FIELD "=" frame-value } NL ;
@@ -143,24 +144,43 @@ declares the same shape (`type-source-declared`).
 A font face's weight is a whole number in 1–1000. Keyframe percentages are in
 0–100; `from` and `to` are 0% and 100%. Lowering checks whether keyframe properties
 are animatable and constant-call values can be evaluated at compilation.
+Constant calls use the runtime's pure operations: list literals, `.at()`, option
+`match` expressions, templates and pure built-ins such as `toFixed` and
+`formatDecimal`. Only executed branches are evaluated. Reading
+state, resources, props, the clock, the locale or a host capability is refused
+by name; evaluation and expansion limits produce compile errors.
 Styles accept literal style attributes and explicitly styleable props (currently
 `backgroundMaterial`, `glassGroup` and `buttonStyle`), not arbitrary expressions
 or event props. In a conditional class, each prop must be set in both styles or
 neither, unless the node supplies its own value. Each arm's literal is checked
 as a direct attribute would be.
 
-A part is CSS's pseudo-element as a block: `::placeholder` or `::backdrop`,
-then its declarations indented beneath it, in a `style` (literal) or under its
-element before its children (where a value may compute, as the element's own
-attributes do). `::placeholder`, under an `input` or `textarea`, admits `color`
-alone (CSS `::placeholder { color }`, LLP 1104 D3); `::backdrop`, under a
-`dialog`, admits `background-color` alone (CSS `::backdrop { background-color
-}`, LLP 1035.001 D11: what lies over the page beneath the modal dialog, fading
-in and out with it). Each colour's alpha is its own; the element's own block
-wins over its class's, and without one the platform's colour or dim stays.
-Another property in it is `lower-unknown-attr`; on another element
-`lower-attr-tag`; `::before` and `::after` are `syntax-part` (Contract has no
-generated box: write a child), as is any other part. `placeholder-color` and
+A part is CSS's pseudo-element as a block: `::placeholder`, `::backdrop`,
+`::view-transition-new` or `::view-transition-old`, then its declarations
+indented beneath it, in a `style` (literal) or under its element before its
+children (where a value may compute, as the element's own attributes do).
+`::placeholder`, under an `input` or `textarea`, admits `color` alone (CSS
+`::placeholder { color }`, LLP 1104 D3); `::backdrop`, under a `dialog`, admits
+`background-color` alone (CSS `::backdrop { background-color }`, LLP 1035.001
+D11: what lies over the page beneath the modal dialog, fading in and out with
+it). Each colour's alpha is its own; the element's own block wins over its
+class's, and without one the platform's colour or dim stays. Another property
+in either is `lower-unknown-attr`; on another element `lower-attr-tag`.
+
+On a route (an element with `navigationKey`), `::view-transition-new` is its
+entrance, when a push or a full-screen presentation adds it, and
+`::view-transition-old` its exit, when a pop or the dismissal removes it (CSS
+View Transitions' pseudo-elements, LLP 1013.001 D1). Each admits the
+`animation` shorthand alone, naming keyframes that move only `opacity`,
+`translate`, `scale` and `rotate`; it must end (not `infinite` or `paused`),
+and each arm of a computed value is a literal. `none` cuts, and a part left
+unset keeps the platform's transition. A sheet's route, a route with a literal
+`navigationSource`, and an element that is no route refuse them
+(`lower-route-part`); the other `::view-transition-*` parts have nothing to
+style.
+
+`::before` and `::after` are `syntax-part` (Contract has no generated box:
+write a child), as is any other part. `placeholder-color` and
 `-exact-placeholder-color` are refused with the block to write.
 
 A state part is a block of one state's rows (LLP 1121 D8): `:active`, `:hover`,
@@ -171,10 +191,12 @@ combined (`syntax-state`). `:disabled` and `:checked` (when `checked`,
 `aria-checked`, `aria-selected` or `aria-pressed` is true) take
 `background-color`, `color`, `border-color` (each side), `opacity`, `box-shadow`
 and `-exact-tint-color`, and fold into the node's own rows, `:checked` under
-`:disabled`; `:active` takes `background-color`, `color`, `opacity` and
+`:disabled`; `:active` takes `background-color`, `color`, `opacity`, `translate` and
 `-exact-press-scale` and lowers to the press paint (LLP 1061 D7: its `opacity` an
-absolute target), `:hover` and `:focus-visible` take `background-color`,
-`color`, `border-color`, `opacity`, `box-shadow` and `scale` (which stands in for the
+absolute target, its `translate` a 2D offset added to the node’s own translation
+without changing layout; the web hit area moves with the paint, while native
+hosts keep the unpressed hit area). `:hover` and `:focus-visible`
+take `background-color`, `color`, `border-color`, `opacity`, `box-shadow` and `scale` (which stands in for the
 node's and moves on its `transition`). Active targets may compute or clear
 with `none`; hover and focus targets are literals (`lower-state-literal`; a
 token's name is one). Another row is `lower-state-row`;
@@ -368,14 +390,30 @@ calls (a shape, a `fn`, a component) comes from its own `use` lines or is
 declared in it, beside the block; another file, the root among them, names
 such a declaration on a `use` line. The
 component's rules hold for its members wherever they are written: a child's
-members file declares no resource.
+members file may declare resources, mutations and tasks at bounded uses.
 
 There is one `props`, `inject`, `provide`, `slot`, and `view` section at most in
-a component. Only the root may own resources, mutations, and tasks, except that
-any component may read the device's facts, `exactViewport()` and `exactPage()`
-with no arguments (`EmptyState` reads `accessibilityTextSize`): they open no
-request, and every instance reads the root's one answer. A task's
-body has exactly one schedule. A gated task (`when cond`, LLP 1092) has its
+a component. Any component may own resources, mutations and tasks (LLP 1035.005.004): each instance of a child asks for its own
+resources, after the render that makes it, and lets go when the render destroys
+it. Each instance sends its own mutations: its own `pending`, failure, queue and
+answer, and its `then` runs in that instance, where it may call an action prop.
+A child's `refreshes` names its own resources. A send in flight when the render
+destroys the instance stays sent, but its answer changes nothing and its `then`
+does not run, and its waiting sends are dropped. A child's resource is not a
+resource over a list, and a child that owns requests or tasks is used where its instances
+are bounded: outside every region, under `if` and `match`, or in a row of
+`stack(nav)`, `t.stack` or `nav.tabs`, never under another `for` or in a
+virtualized list (`type-child-resource`). Its state initializers do not read its
+own resources (`type-state-reads-request`). The device's facts are sources a
+component declares, the root or a child: `resource v = exactViewport() as shape
+V` (or `exactPage()`), with no arguments and no `else`, opens no request, and
+every instance reads the root's one answer (`EmptyState` reads
+`accessibilityTextSize`). A `derive` reads the resource's field (`v.width`), never
+`exactViewport().width`. A task's body has exactly one schedule. Each child's task starts with
+its instance, stops when the instance is destroyed and runs its action in that
+instance's frame. A hidden tab or covered screen can remain alive: gate its
+work on activity. Frame tasks are allowed, with one action per armed instance
+per frame. Reload restarts timers over the carried state. A gated task (`when cond`, LLP 1092) has its
 timer only while `cond` holds, armed from the commit that made it true; `key=`
 re-arms it from the commit that changed the key (compared as a `for` key),
 and `key=` alone is `when true key=…`. The gate is a bool (`type-task-gate`), the
@@ -482,18 +520,45 @@ new shape cannot update or end an older instance with incompatible state. A
 compatibility-changing binary update follows LLP 1126.001 §5 Q6’s device gate.
 
 `resource activities = exactActivities() as shape Activities` reads a record
-whose fields are `activities: Activity[]`, `frequentPushesEnabled: bool` and
-`linked: bool` (the host packaged its arm).
+whose fields are `activities: Activity[]`, `frequentPushesEnabled: bool`,
+`linked: bool` (the host packaged its arm), `pushToStartToken:
+option<string>` and `pushToStartActivities: PushStartActivity[]`.
 An activity has `id`, `kind`, `state` (a JSON string), `activityState`
 (`pending`, `active`, `stale`, `ended`, `dismissed`) and `token: option<string>`.
-Readers may name only the fields they need. Off iOS the list is empty and
-frequent pushes are false. A first demand enumerates existing activities,
-including after a relaunch without a send; later token, state and content
-updates re-answer the source. A token is absent until ActivityKit supplies
-it, and exists only for an entry declaring `push: true`. The data module
-sends it to its own backend. Push-to-start and the `remote-notification`
-background mode stay refused; an app with activities registers for remote
-notifications only when it grants `device.push`.
+A push-start activity has `kind`, `generation` and `shape`, all strings.
+Readers may name only the fields they need. Off iOS the lists are empty, the
+push-to-start token is absent and frequent pushes are false. A first demand
+enumerates existing activities, including after a relaunch without a send;
+later token, state and content updates re-answer the source. A token is absent
+until ActivityKit supplies it, and exists only for an entry declaring
+`push: true`. The data module sends it to its own backend. The
+`remote-notification` background mode stays refused; an app with activities
+registers for remote notifications only when it grants `device.push`.
+
+Push-to-start (iOS 17.2 and later) lets the app's backend start an activity
+while the app is not running (LLP 1126 D9). `pushToStartToken` is
+ActivityKit's push-to-start token, read only when an entry declares
+`push: true`; it is absent until ActivityKit supplies one, which it does
+once Live Activities are allowed, and the source answers again when it
+rotates. `pushToStartActivities` lists the entries declaring `push: true`, each
+with the `generation` the app runs and its state `shape` digest; it is empty
+until the app has published that generation, just after it starts. The backend
+sends APNs a `start` event with `attributes-type` `ExactActivityAttributes`,
+`attributes` `{"kind", "generation", "shape"}` from that list, and
+`content-state` `{"shape", "state"}`, the same shape digest and a state in
+the entry's declared shape
+([Apple: starting a Live Activity with a push](https://developer.apple.com/documentation/activitykit/starting-and-updating-live-activities-with-activitykit-push-notifications)).
+It sends the values the app last reported, since a delivered update changes
+the generation; a generation from before a compatibility-changing binary
+update no longer renders.
+
+No app code runs when the start arrives. iOS may launch the app in the
+background for it, and the host boots no session for that launch. The started
+activity, with its update `token`, appears in `activities` the next time a
+session reads `exactActivities()`: at once in a session already reading it,
+otherwise at the app's next launch. Until then the backend has no update token
+for the activity, so it cannot update or end it. The app can update and end
+it as it does an activity it started.
 
 ### MIDI: `exactMIDI`, `sendMIDI`, `midimessage`
 
@@ -764,6 +829,8 @@ step          = "tap" "midi" STRING ( HEX { HEX } | "clock" NUMBER NUMBER ) NL
                   | "copy" | "cut" | "paste" STRING ) NL
               | "pick" STRING ( STRING { STRING } | "cancel" ) NL
               | "authorize" [ "cancel" ] NL           (* the held sign-in, against the app's server (oauth recipe) *)
+              | "presence" ( "allow" | "cancel" | "fail" | "lockout" | "invalidated" ) NL
+                                                     (* answer the pending user-presence prompt, as tap @presence *)
               | "clock" ( "settle" | "data" | "+" NUMBER [ "real" ] | NUMBER ) NL
               | "clock" "held" { IDENT } [ NUMBER ( "s" | "ms" ) ] NL
                                                      (* real time, the clock frozen, until held requests reply *)
@@ -776,6 +843,7 @@ step          = "tap" "midi" STRING ( HEX { HEX } | "clock" NUMBER NUMBER ) NL
               | "reload" NL
               | "fail" "fetch" STRING [ "times" NUMBER ] NL (* later fetches whose URL starts with it fail *)
               | "pass" "fetch" STRING NL             (* it stops failing *)
+              | "drop" "stream" STRING NL           (* ends open streams whose URL starts with it *)
               | "prefer" IDENT STRING NL             (* quoted media preference or root-font-size *)
               | "request" METHOD STRING [ json ] [ "as" ( IDENT | STRING ) ] [ "expect" NUMBER ] NL
                                                      (* the driver writes through the app's server *)
@@ -789,10 +857,14 @@ step          = "tap" "midi" STRING ( HEX { HEX } | "clock" NUMBER NUMBER ) NL
               | "expect" "tree" ( "has" | "missing" ) STRING NL
               | "expect" ( "disabled" | "enabled" ) STRING NL  (* a control's `disabled` (LLP 1116.010 D3) *)
               | "expect" "focused" STRING NL         (* the node that holds the keyboard focus *)
+              | "expect" "layout" STRING ( "width" | "height" ) ( "==" | "<=" | ">=" ) NUMBER NL
+                                                     (* its laid-out size, in points *)
               | "expect" "refusal" STRING NL          (* one observed refusal of the named mutation slot *)
               | "expect" "text" STRING "==" STRING NL
-              | "expect" "state" IDENT { "." ( IDENT | NUMBER ) }
-                  ( "==" test-value | ( ">=" | "<=" ) [ "-" ] NUMBER | "in" test-value { test-value } ) NL
+              | "expect" "state" state-path
+                  ( ( "==" | "!=" ) ( state-literal | "state" state-path )
+                  | ( ">=" | "<=" ) ( [ "-" ] NUMBER | "state" state-path )
+                  | "in" ( state-literal { state-literal } | "state" state-path ) ) NL
               | "expect" "sound" ( "has" | "missing" ) STRING
                   [ "at" NUMBER ] [ "gain" NUMBER ] [ "ends" NUMBER ]
                   [ "playbackRate" NUMBER ] [ "pan" [ "-" ] NUMBER ] [ "by" IDENT ] NL
@@ -803,6 +875,11 @@ step          = "tap" "midi" STRING ( HEX { HEX } | "clock" NUMBER NUMBER ) NL
 midi-fact     = "midi.state" ( "prompt" | "granted" | "denied" | "unavailable" )
               | ( "midi.inputs" | "midi.outputs" ) STRING ;  (* names, comma-separated *)
 HEX           = HEXDIGIT HEXDIGIT ;                  (* one byte, as in 90 3c 64 *)
+state-path    = IDENT { "." ( IDENT | NUMBER ) } ;   (* indexes are whole numbers from 0 *)
+state-literal = [ "-" ] NUMBER | STRING | "true" | "false" | "none"
+              | "some" "(" state-literal ")"
+              | "[" [ state-literal { "," state-literal } [ "," ] ] "]"
+              | IDENT "(" [ IDENT "=" state-literal { "," IDENT "=" state-literal } [ "," ] ] ")" ;
 test-value    = [ "-" ] NUMBER | STRING | "true" | "false" | "none" | "[" "]" ;
 scalar        = [ "-" ] NUMBER | STRING | "true" | "false" | "null" ;
 METHOD        = "GET" | "POST" | "PUT" | "PATCH" | "DELETE" ;
@@ -824,6 +901,14 @@ block in a run under platform timing. `query` and `built` read the same on every
 `evaluated` is each runtime's own, so a test that compares it names one host. The development
 source map names components; a host without one says so. A drive's `perf <target> during "…"`
 shows the same counts while a test is being written.
+
+`presence <answer>` waits as `clock data` does, with the virtual clock frozen, then
+answers the pending user-presence prompt through the driver's `tap @presence`.
+It fails if no prompt is pending, several match, or the data wait expires.
+It answers both a presence secret's unlock and `@exact/local-auth`'s `authenticate`;
+`invalidated` applies only to unlock. Use `prefer permission.local-auth granted`
+to handle the separate permission prompt, and `clock data` after the answer before
+checking its result. Scope tests with `on` to hosts that support the operation.
 
 `expect no failures` fails when, since the test launched or its last `expect no failures`, a
 resource was refused while no `fail fetch` fired, a send failed that no `expect refusal` names,
@@ -919,7 +1004,17 @@ Targets are driver test ids. `expect disabled "send"` (`enabled`) reads the cont
 does nothing, and fails its step on every host, `send is disabled`: say what the app refuses
 with `expect disabled`, then `expect enabled` once what enables it has happened. `expect
 focused "picker"` passes when that node holds the keyboard focus, as every host's tree marks it
-(`[focused]` in `agent <host> tree`): after a key moves the focus, or a dialog returns it. Each test is a session of its own, opened with its
+(`[focused]` in `agent <host> tree`): after a key moves the focus, or a dialog returns it.
+
+`expect layout "status-mark" height <= 24` bounds a node's laid-out `width` or `height` with
+`==`, `<=` or `>=`. The size is that of the box `agent <host> layout <target>` prints as `space
+viewport`: points (CSS pixels on the web) at two decimals, with a presentation transform folded
+in (LLP 1012). A failure names the size and the box, so an image a column stretched to its own
+width fails its test: `height of "status-mark" is 310, expected <= 24 (its box is 420×310)`.
+A size that comes from text, a platform control or the window differs by host: bound it, and
+keep `==` for a size the app sets.
+
+Each test is a session of its own, opened with its
 launch lines: `size 1200x800`, `epoch "2026-09-21T12:00:00Z"`, `time-zone
 "America/New_York"`, `locale "fr-FR"` and `seed 7` are the driver's `--size`,
 `--epoch`, `--time-zone`, `--locale` and `--seed`, so they lead the test's steps,
@@ -961,7 +1056,47 @@ prefix itself. A counted fault that matched no fetch by the test's end (or
 before it is armed again) fails the test at the line that armed it, and
 `reload` relaunches with the table as it is then. Each HTTP attempt of a long
 poll (`exactStream` with `exactLongPoll`) takes a matching fault and retries as
-a network failure. Event streams, byte streams and WebSockets are not matched.
+a network failure. Event streams, byte streams and WebSockets use
+`drop stream "<prefix>"`. This step ends every open matching stream and
+releases its connection. The mapper receives a terminal `error` of kind
+`"Network"` (Rust receives `Failed { kind: Network }`). Frames waiting behind
+an unfinished mapper are discarded. If no open stream matches, the step
+fails at its line. Wait for a value that confirms the stream is open before
+dropping it. Long polls use `fail fetch` on their individual HTTP attempts
+because their transport repeats buffered requests. Upload progress streams
+and local listeners are outside this step's scope. The web's wasm host
+opens event streams and WebSockets. It reads byte streams as buffered replies.
+`answer fetch "<prefix>" with <status> [header "<name>" "<value>"]… [<body>]`
+supplies an immediate HTTP response, with no request to the service. It may lead
+a test or the file, like `fail fetch`, so the first resource load receives it.
+A later line replaces the current answer or failure at that prefix. A test's
+leading answer or failure overrides the file's entry for the same prefix.
+JSON bodies are sent as `application/json`; a quoted string is sent as
+`text/plain; charset=utf-8`, and an omitted body is empty. An explicit
+`content-type` header overrides that default. The status is 200 through 599,
+excluding redirects 301, 302, 303, 307 and 308. Statuses 204, 205 and 304
+require an empty body. A response has at most 1,024 headers and a body of at most
+64 KiB; the complete encoded fixture table must also fit 64 KiB, including headers
+and URL prefixes. An answer that exceeds a limit is refused before arming. `set-cookie` and `set-cookie2` headers are
+refused because browsers hide them. Request validation, grants, file-body
+preparation, aborts, deadlines and response-size limits still apply. A refused fixture records no hit
+or answered journal line.
+
+Answers use the same longest-live-prefix rule as failures. `fail fetch` replaces
+an answer, and `pass fetch` clears either at that prefix; a shorter live prefix
+may then match. Long polls ignore answer entries when choosing a failure, so
+a longer answer prefix does not hide a shorter failure. Otherwise the request
+goes to the network. Each test starts with its own table; `reload` keeps the
+current answers and cleared entries. On the web, only the top-level document on
+the original app origin receives the table; child frames and other origins do not.
+Development render servers apply the table before fetching request-time data.
+A web launch revalidates only matching checkpoint answers through the real source;
+unrelated rendered answers stay settled.
+The real source parses the response, so an HTTP error status is a response,
+where `fail fetch` is a rejected connection. These fixtures cover buffered HTTP
+requests, including a worker's; streams, long polls, redirects, `exactBodyTo`,
+delays and response files are not supported.
+
 `request POST "/polls/1/votes" {"option": 2} as bob`
 (LLP 1116.006 D8) is the driver, not the app, writing through the app's server as
 another person: a method, a path in quotes under the server URL app.ts calls (its
@@ -999,7 +1134,20 @@ is down, after the move and before the hold. `press` and `hold` advance the
 virtual clock by those milliseconds (a game's ticks), except under
 `--timing platform`, where the platform's own clock owns the gesture.
 `tap "id" pinch <scale> [at x y]` is the driver's pinch: `scale` greater than 0,
-about the node's middle or about `at` in its box.
+about the node's middle or about `at` in its box. A canvas that takes raw input
+receives it as a real pinch arrives there: two touch contacts on the web and iOS,
+a Control-held wheel on macOS. A zoomable scroll (`-exact-max-zoom`, LLP
+1057.001.000) is left zoomed as the platform's pinch leaves it at rest, its
+`scrollZoom` times `scale` within its range; the iOS agent's `--touch platform`
+plays it as two real fingers, which UIKit's own recognizer reads. On Android and
+Windows it is the pinch the reader's recognizer or the second contact tells the
+presenter, in steps about the point; Linux answers it unsupported. The agent's
+`tap <t> dblclick touch` is a finger's double tap rather than a mouse's: on iOS,
+the web, Android and Windows it zooms a zoomable scroll where no `dblclick`
+handler takes it (two real taps under `--touch platform`, two touch points in
+Chrome, two touch contacts on Android and Windows), and macOS and Linux answer it
+unsupported. On the web, Android, Windows and Linux, `tap <t> wheel 0 <dy>
+modifiers Control` is a trackpad's pinch, as the platform delivers one.
 `tap "id" wheel <dx> <dy>` is the driver's wheel (the agent's `tap <t> wheel
 dx dy`) at the node's middle, in points (CSS pixels on the web): a positive `dy`
 scrolls on toward the content's end, so its offset grows, and a negative one back
@@ -1014,7 +1162,11 @@ report unsupported. Scope these tests with `on web`.
 list's row into view by its key, so a row outside the rendered window can be
 tapped by its own id on the next step. `type "id" "text"` sets the field's
 value, as Playwright's `fill`; `append` adds the text after the value the tree
-shows (a prefilled reply). `type "id" key "Name"` presses the key;
+shows (a prefilled reply). `type "id" key "Name"` presses the key (on iOS,
+ArrowRight or ArrowLeft at an `input type="range"` that shows its `UISlider`
+is the slider's accessibility increment or decrement, the call VoiceOver's
+swipe makes; its halves are that step's keydown with the move, then its
+keyup, and a held key's repeats move it again);
 `down` and `up` are the two halves, and `for <ms>` holds it that long on the
 virtual clock (`down` or `up` together with `for` is refused). `reload` restarts the app on the store it had: the
 web page reloads its current URL in the same profile, keeping Back and Forward
@@ -1071,8 +1223,19 @@ to a motion's end.
 value, not its options), else its descendants' text in order (a button's label),
 else a field's value. `expect state name.field` reads a field of a record at any
 depth, and `name.0` a list index (a whole number from 0); a missing field fails
-naming the fields there. The value is a number, including a negative (`== -3`),
-a string, a bool, `none`, or `[]` — not an expression (`-1 + 2` is refused).
+naming the fields there. The expected value uses the expression grammar's literals:
+numbers, including negatives (`== -3`), strings, bools, `none`, `some(literal)`,
+lists (`["a", "b"]`, `[[1, -2], []]`), and shapes with literal fields
+(`Point(x=1, y=-2)`). Lists and shapes may span lines and keep a trailing comma.
+`==` and `!=` compare structurally, without type coercion. Numeric bounds use
+`>=` or `<=`; `in` checks membership in space-separated literal alternatives.
+Every operator also accepts `state <path>` on the right: `expect state pinned == state locked`,
+`expect state offset >= state minimum`, or `expect state mode in state allowedModes`.
+Bounds require two numbers; membership requires a list on the right whose element
+type matches the left. Incompatible path types fail compilation with both types
+named. Both paths read one state reply; a missing path fails even with `!=`, while
+a present `none` compares as a value. A mismatch prints both values and, for a state
+operand, its path. Computed expressions (`-1 + 2`, `[count]`) are refused.
 `expect wakelock held` and `expect wakelock released` compare `state.wakelock.held`.
 This is the runner's holder record: displayed elements requesting the lock, not
 whether the OS or browser granted it. A failure names the holding view ids and
@@ -1176,7 +1339,7 @@ says. Every roster function has a row and an example, and each example written
 | `encodeRouteSegment(text)` | String; routing's checked segment encoding | `encodeRouteSegment("a b")` is `"a%20b"` |
 | `open(router, location)` | Router | `top(open(nav, "/item/7")).name` is `"item"` |
 | `push(router, location)` | Router; same top URL does not add a visit | `depth(push(nav, "/item/7"))` is `2` |
-| `replace(router, location)` | Router; the top visit takes the location and keeps its id. A stack's first visit keeps its root route: a location matching another route is refused and the router is unchanged (a first-launch screen: docs/recipes/first-launch.md) | `top(replace(push(nav, "/item/7"), "/item/8")).url` is `"/item/8"` |
+| `replace(router, location)` | Router; the top visit takes the location and keeps its id. One at another path is a new page, whose scrollers start over (at `scrollTop=`, else at their start) | `top(replace(push(nav, "/item/7"), "/item/8")).url` is `"/item/8"` |
 | `back(router)` | Router | `depth(back(push(nav, "/item/7")))` is `1` |
 | `select(router, tabName)` | Router | `nav = select(nav, "search")`, in an action, shows the `search` tab |
 | `go(router, location)` | Router; the top, a pop to it on the selected stack, another tab whose top it is, or else a push onto the selected stack, whatever tab declares its route (into the route's declared tab: `open`) | `top(go(nav, "/item/7")).name` is `"item"` |
@@ -1185,8 +1348,8 @@ says. Every roster function has a row and an example, and each example written
 | `depth(router)` | Number | `depth(nav)` is `1` |
 | `params(router, parameterName)` | `string[]`: that parameter's non-empty values over the selected stack, bottom first, duplicates kept (one entry's own value is `entry.params.<name>`, `""` where its route does not bind it; the name must be a parameter of some route) | `params(push(nav, "/item/7"), "id")` is `["7"]` |
 | `searchParam(entry, name)` | String | `searchParam(top(push(nav, "/item/7?tab=notes")), "tab")` is `"notes"` |
-| `fragment(entry)` | String: what the entry's location had after `#`, fragment-encoded as the browser's `hash` is, `""` when none. It is no part of the screen: `/item/7#moves` is the visit to `/item/7`, and a `push`, `replace` or `go` that changes only the fragment changes it on that visit. Written as `path("item", id) + "#moves"`, or `href="#moves"` on a `link` to the screen shown. Once the route's content has arrived, each host scrolls to the element with that `id` in the entry's route, as a browser scrolls to a fragment (`top`, or no such element: the route's top) (LLP 1153 D5) | `fragment(top(push(nav, "/item/7#moves")))` is `"moves"` |
-| `sharedFiles(entry, name)` | `SharedFiles`: `{files: Picked[], dropped, pending}`, the files a received share carried, by the token in the entry's `name` parameter; `pending` counts those still being copied, and a token the host did not set this launch answers no files (LLP 1133.024 D3) | `sharedFiles(top(nav), "files").files.length` is the count of shared files that have landed |
+| `fragment(entry)` | String: what the entry's location had after `#`, fragment-encoded as the browser's `hash` is, `""` when none. It is no part of the screen: `/item/7#moves` is the visit to `/item/7`, and a `push`, `replace` or `go` that changes only the fragment changes it on that visit. Written as `path("item", id) + "#moves"`, or `href="#moves"` on a `link` to the screen shown. Once the route's content has arrived, each host scrolls to the element with that `id` in the entry's route, as a browser scrolls to a fragment (`top`, or no such element: the route's top) (LLP 1153 D5). A visit given another path with none, a page swapped in by `replace`, starts each of its scrollers over instead: at its `scrollTop=`, at the end of a list with `scroll-start="end"`, else at its start; `scroll-restoration="manual"` keeps one where it was (D5.1) | `fragment(top(push(nav, "/item/7#moves")))` is `"moves"` |
+| `sharedFiles(entry, name)` | `SharedFiles`: `{files: Picked[], dropped, pending}`, the files a received share carried, by the token in the entry's `name` parameter; `pending` counts those still being copied, and a token the host did not set this launch answers no files (LLP 1133.024 D3; [`share_target`](reference.md#shares-from-other-apps-share_target)) | `sharedFiles(top(nav), "files").files.length` is the count of shared files that have landed |
 | `t("key", name=value, …)` | Localized string; validates tables/placeholders | `t("greeting", name=user.name)` is the `greeting` string of the app's locale with `{name}` filled |
 | `frame(id)` | `Geometry`, actions only; last layout where the viewer sees it, as `getBoundingClientRect`: in the viewport, every scroll offset and transform applied | `frame("card").height`, in an action, is the card's height as drawn |
 | `rangeFrame(id, start, end)` | `Geometry`, actions only; a textarea's UTF-16 range as `Range.getBoundingClientRect()` (on a `text markup="markdown"`, the union of the atom pills the range meets, [inline atoms](#inline-atoms-atom-atoms-atomfaces-atompress)): collapsed, the caret's rectangle; unavailable past the text, while composing, or with no host reader ([decorations](#plain-textarea-decorations), LLP 1114.007) | `rangeFrame("composer", caret, caret)`, in an action, is where a mention popover goes |
@@ -1414,8 +1577,8 @@ CSS hyphens are part of the authored name. `testId` and admitted host-specific
 props retain their declared spelling.
 `text-wrap-style="balance"` and its `text-wrap="balance"` shorthand are
 inherited; `auto` restores ordinary greedy wrapping. `pretty` and `stable` are refused with the supported values, `auto | balance`. Every host balances the
-lines before a paragraph's first forced break, up to six, at the narrowest
-width that keeps their count, as Chrome does (LLP 1001 §6).
+lines before a paragraph's first forced break, up to six, where Chrome
+breaks them (LLP 1001 §6).
 `-webkit-font-smoothing` takes `auto` or `antialiased` and is inherited; `none`
 and `subpixel-antialiased` are refused. It changes how glyphs paint, never how
 text measures (LLP 1019 D12).
@@ -1604,9 +1767,10 @@ makes no network requests.
 - `textarea id="editor" value=draft input=edit markup="markdown"` is the editor:
   on the web, Markdown shown as it reads, with the syntax hidden away from the
   caret; on macOS and iOS, the platform's text view with the syntax dimmed and
-  each link's `](destination)` hidden, as the web hides it. Linux
-  edits it as a plain textarea. Without `markup` the same source is a plain
-  textarea: the source mode.
+  each link's `](destination)` hidden, as the web hides it. Linux, Windows and
+  Android edit it as a plain textarea of the source, and `format` changes
+  nothing there. Without `markup` the same source is a plain textarea: the
+  source mode.
 - A thematic break (`---`) is drawn in the colour of the text around it,
   dimmed, so that it reads on a dark ground as on a light one: on the web a
   line across the field, as dim as the syntax shown at the caret; on macOS
@@ -1945,7 +2109,8 @@ recently started playing owns the session (else the latest mounted).
 `scroll` appends left then top offsets, and to an action that takes one more
 parameter a `ScrollEvent`: the scroller's own `scrollLeft`, `scrollTop`,
 `scrollWidth`, `scrollHeight`, `clientWidth` and `clientHeight` as the event
-fires, what a web handler reads off `event.target`. "At the end" is the web's
+fires, what a web handler reads off `event.target`, and `scrollZoom`, a
+zoomable scroller's zoom (1 on any other; LLP 1057.001.000). "At the end" is the web's
 arithmetic, on every host and on a virtualized list too (chat F4, a
 jump-to-latest pill); a native host's `scrollHeight` is its port plus the range
 it clamps to:
@@ -2666,6 +2831,13 @@ macOS, iOS and iPadOS with a hardware keyboard, Linux):
   Tab moves the focus, arrows move the caret; on the web arrows, Space and
   the page keys also scroll the page or the focus's scroller (a native
   scroller does not scroll by key, so there is nothing there to prevent).
+  On a native host a screen reader's step of an `input type="range"`
+  (VoiceOver's swipe up or down; the increment and decrement macOS and
+  Windows offer; Android's scroll forward and backward) is its arrow keydown
+  first, ArrowRight to raise and ArrowLeft to lower (swapped where its
+  `direction` is `rtl`): a handler that calls `preventDefault()` makes the
+  move itself, as it does for a keyboard's arrow on the web, and otherwise
+  the host steps the range.
   Where Exact paints the group (on the web, Linux, Windows and Android's
   reader always; on the Mac and iOS where no segmented control, sidebar,
   toolbar or tab bar stands in for it), a
@@ -2789,9 +2961,9 @@ the virtual clock).
   same button. Help retains the system search field; the standard menus, and
   Develop in a development build, remain unless removed. Other hosts keep the ordinary button
   and ignore this Mac presentation hint. On a top-level root,
-  `-exact-menu-remove="show-tab-bar autofill close-all"` suppresses the named
+  `-exact-menu-remove="show-tab-bar close-all"` suppresses the named
   standard items and their menu equivalents. The literal whitespace-separated
-  ids are `close-all`, `autofill`, `show-tab-bar`, `show-all-tabs`,
+  ids are `close-all`, `show-tab-bar`, `show-all-tabs`,
   `enter-full-screen`, `minimize`, `zoom`, `bring-all-to-front`,
   `show-previous-tab`, `show-next-tab`, `move-tab-to-new-window`,
   `merge-all-windows`, `back` (Go ▸ Back), `forward` (Go ▸ Forward), `develop` (the Develop menu),
@@ -2827,25 +2999,26 @@ the virtual clock).
   fails `lower-menu-status`) and presents the button as the app's
   `NSStatusItem` on macOS, taking its place in the page; its `popovertarget`
   menu is the item's menu. A click opens the menu when there is one and runs
-  `press` when there is none. Windows' notification-area icon is accepted and
-  not built (LLP 1133.025 §14): there, as on every other host, the button
-  stays an ordinary button in the window. With
+  `press` when there is none. On Windows the button is a notification-area
+  icon and likewise leaves the page: a left click or a keyboard
+  selection runs `press`, or opens the menu when there is none, and a right
+  click opens the menu, which ends with Exit unless `status-quit` is removed.
+  Every other host keeps the button an ordinary button in the window. With
   `host.macos.activationPolicy: "accessory"` the app has no Dock tile and
   opens no window at launch. Bare `focus()` is the window's, as the web's
   `window.focus()`: on macOS and Windows it shows the session's window if
   hidden, brings it forward and activates the app; Linux brings no window
   forward and logs it as unsupported. `focus(id)` stays an element's.
   `hideWindow()` puts the session's window away as the person's close does
-  while a status item is placed or under `keepRunning`, and the app keeps
-  running; the next `focus()` shows it.
+  under `keepRunning`, or on macOS while a status item is placed, and the
+  app keeps running; the next `focus()` shows it.
   On Windows `host.windows.window.keepRunning: true` makes closing the window
   hide it, as on the Mac, and a login item registered `hidden` opens no
   window at that launch. A Windows app is one process: launching it again
   shows the window it has, and a location on that command line (a
-  jump-list task) opens in it. Windows' notification-area icon is not built
-  (LLP 1133.025 §14), so an app that keeps running there gives the person
-  its own way back (a global shortcut whose action calls `focus()`) and its
-  own way out (a button whose action calls `close()`).
+  jump-list task) opens in it. A placed status item does not make the close
+  hide the window there, as Windows' guidelines advise; it is a way back to a
+  window `keepRunning` hid, and its menu's Exit a way out.
 
   `@exact/global-shortcuts` on Windows accepts `PrintScreen` and modified
   chords such as `Control+PrintScreen`. Bare `PrintScreen` answers
@@ -2983,6 +3156,7 @@ argument validation. Use the working implementation when selecting arguments:
 | `showOpenFilePicker(id[, multiple])` | [file-picker corpus](../contract/corpus/file-pickers.contract) |
 | `showDirectoryPicker(id)` | Same corpus |
 | `showSaveFilePicker(id, suggestedName)` | Same corpus |
+| `startIn=` on the three pickers and `saveFile`: where the panel opens, the File System Access API's option. A well-known folder, `"desktop"`, `"documents"`, `"downloads"`, `"music"`, `"pictures"`, `"videos"` or `"screenshots"`, or a `doc:/` path the person chose earlier (its folder, or a chosen file's folder). A literal outside the names fails the build (`type-file-picker-argument`, `type-save-file-argument`); at run time a value that is neither, or a handle the session does not hold, is journalled (`<command>: startIn: refused: …`) and the panel opens where it would. macOS opens the folder each time, Linux's portal and Chromium likewise (Chromium's `screenshots` is `pictures`), and iOS opens a handle's folder and ignores a name (LLP 1173 D2) | Same corpus, [picker tests](../contract/cli/tests/it/picker.rs) |
 | `requestPermission(id, path, mode)`: a kept document's access asked for again, `mode` `"read"` or `"readwrite"`, from a press (the web asks the browser under its activation; a native host answers `granted` for a document that resolves); `change` at `id` hears `granted` or `denied` ([documents kept across launches](reference.md#documents-the-person-chose-doc)) | No app fixture; [the web's kept documents test](../host/web/documents-kept.test.mjs) |
 | `scrollIntoView(id, block=, inline=, behavior=)`: `Element.scrollIntoView()` on any element by its `id` (a string, dynamic as `focus`'s): every scroll container above it, innermost first, then the page, align it by the web's `ScrollIntoViewOptions` (`block` default `start`, `inline` `nearest`). `scrollIntoView("list-id", key, …, row=, offset=)`: a virtualized list's row by key, built and measured first (LLP 1070.000). macOS, iOS and tvOS animate the element form with the platform's scroll animation unless `behavior="instant"` (LLP 1115.000 D8.4), landing immediately under reduced motion; `scrollend` comes once the animation ends. Linux and Android glide the element form the same way while the display owns the clock, and land it at once under the agent's (LLP 1070.000 §14). Either form owns its scrollers until it settles: `scrollFollowEnd` moves nothing meanwhile, and follows afterwards only where it rests at the end (LLP 1070.000 §15) | [collection tests](../contract/cli/tests/it/collection_into_view.rs) |
 | `scrollBy(id, x, y)`: `Element.scrollBy(x, y)` on a scroll container by its `id`, in pixels (a terminal's row is 16, its column 8), clamped to its travel; an element that does not scroll does not move. A reader's `j` and `k`. The terminal, Linux and the web's JS target take it; Apple and the wasm web host do not yet | [the LLP terminal reader](../apps/llp/terminal.contract), [`reading.rs`](../host/terminal/tests/it/reading.rs) |
@@ -3057,7 +3231,7 @@ Presentation probe readings remain diagnostic until qualified on a physical devi
 | `screenLate` | ms a frame reached the screen after UIKit expected it (`UIUpdateInfo.estimatedPresentationTime`), when over half a period, as the presentation probe saw it: with UI updates, a recording keeps two transparent one-point Metal layers and, as each update for which a drawable of either is ready (cleared off the main thread) begins its commit, presents that drawable on its own; its `presentedTime` is when the composite holding it reached the screen. The simulator's Metal has no `presentedTime`: there the probe presents and hears nothing |
 | `unshown` | a frame whose probe drawable was never shown (a `presentedTime` of 0, as for a frame the render server skipped for a later one), so the frame before stayed on screen in its place; in a total, how many |
 | `probed` | in a total, the frames the probe reported, late or not |
-| `render` | on iOS and tvOS, what in the window costs the render server work of its own each frame it composites it, read once as the recording stops (`ms`, how long that took): `layers`, the visible layers; `rows` under `columns`, one per `kind`, `place` and `node` (the Exact node's test id, else `#` and its id, else `node` and its number), with the `top` and `height` its layers span and their `count`; a kind more than four nodes have in one place is one row, its `node` how many. A `kind` is `backdrop` (a `CABackdropLayer`, which UIKit's blur and glass use: it renders what lies behind it first), `portal` (another part of the tree rendered again), `filter`, `blend`, `mask`, `shadow` (without a `shadowPath`), `group` (group opacity) or `rasterize`, each an offscreen pass, or `metal` (a Metal layer, as MapKit's map, which the GPU draws itself). A `content` row is in the followed scroller's content coordinates, so a late frame's `offset` to `offset` plus the viewport's height is what was on screen; a `fixed` row (bars, overlays) is in the window's. The `fixed` rows come first. A list that builds its rows as they scroll in has only those near the viewport then. The compact copy keeps the rows that fit after its 12 worst late frames, and `shown` counts them |
+| `render` | on iOS and tvOS, what in the window costs the render server work of its own each frame it composites it, read once as the recording stops (`ms`, how long that took): `layers`, the visible layers; `rows` under `columns`, one per `kind`, `place` and `node` (the Exact node's test id, else `#` and its id, else `node` and its number), with the `top` and `height` its layers span and their `count`; a kind more than four nodes have in one place is one row, its `node` how many. A `kind` is `backdrop` (a `CABackdropLayer`, which UIKit's blur and glass use: it renders what lies behind it first), `portal` (another part of the tree rendered again), `filter`, `blend`, `mask`, `shadow` (without a `shadowPath`), `group` (group opacity) or `rasterize`, each an offscreen pass, or `metal` (a Metal layer, as MapKit's map, which the GPU draws itself). `backdrop` and `portal` are Core Animation's private classes, told by name only in a development build: a production build names none (LLP 1035.003), so there a backdrop's blur is a `filter` and a portal is not reported. A `content` row is in the followed scroller's content coordinates, so a late frame's `offset` to `offset` plus the viewport's height is what was on screen; a `fixed` row (bars, overlays) is in the window's. The `fixed` rows come first. A list that builds its rows as they scroll in has only those near the viewport then. The compact copy keeps the rows that fit after its 12 worst late frames, and `shown` counts them |
 | `scrolledPt` | a segment's distance, from where its first interval began; none for the first segment of a scroller taken as it moved |
 | `droppedFrames` | frames after the first 36,000 (five minutes at 120 Hz), which a recording does not keep |
 | `lateShown`, `shown` | how many late frames (and in the compact copy, scroll segments) the trace reports of all there were. The full report keeps up to 200 late frames in time order, those late the longest by `hitchMs` when there are more; the compact copy lists the ones that fit, those late the longest first, and leaves out the segments at rest |
@@ -3078,9 +3252,11 @@ Syntax is only the first layer. In particular:
   called `name(x)`, as it is declared) but not take a declared shape's constructor name.
 - Action reads see the starting snapshot. Writes land together. Locals are
   immutable and cannot shadow visible names or escape their block.
-- Resources/mutations/tasks are root-owned, but a child may read the device's
-  facts (`exactViewport()`, `exactPage()`, no arguments). A child may own
-  ordinary state, derives, and actions. An action writes only its own admitted slots.
+- A child may own ordinary state, derives and actions, and, at bounded uses,
+  resources, mutations and tasks (`type-child-resource`). Each instance owns its
+  work; its task runs in that instance's frame until destruction. Hidden instances
+  stay alive, so a task that should stop while hidden needs a `when` gate.
+  An action writes only its own admitted slots.
 - A `then` handler takes no parameters and must not send its own mutation.
 - A state's initializer reads only props, injects and the states above it; a
   resource, derive, mutation, action or later state it names is

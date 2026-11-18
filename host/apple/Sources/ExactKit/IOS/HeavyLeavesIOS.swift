@@ -88,6 +88,7 @@ final class HeavyLeaves: NSObject, UIGestureRecognizerDelegate {
     }
     /// The list moved: a held leaf may have come near, a made one gone far.
     func scrolled() {
+        guard !pending.isEmpty || presenter.session?.natives.isEmpty == false else { return }
         hideFar()
         if !pending.isEmpty { start() }
     }
@@ -115,7 +116,7 @@ final class HeavyLeaves: NSObject, UIGestureRecognizerDelegate {
     }
     private func make(_ node: NodeView) {
         guard node.kind == "video" || node.kind == "iframe" else { node.embedPlatformView(presenter); return }
-        if node.kind == "video" { node.video = VideoView(owner: node); return }
+        if node.kind == "video" { node.video = MediaLink.makeVideo?(node); return }
         let started = CACurrentMediaTime()
         node.embedPlatformView(presenter)
         Self.record(node.kind, CACurrentMediaTime() - started)

@@ -10,7 +10,12 @@ use std::io::{Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+/// The host work these tests hand out (LLP 1047.001 D12).
+struct TestWork;
+impl exact_runner::HostWork for TestWork {}
+
 mod boot;
+mod build;
 mod checkpoints;
 mod direct;
 mod each;
@@ -83,7 +88,9 @@ impl DataSource for Blog {
                 let private = (held || kept).then(|| Value::str("private"));
                 Answer::Now(Value::list(private.into_iter().collect()))
             }
-            ("post", Post::Soon | Post::Never) => Answer::Later(Request::continuation(1)),
+            ("post", Post::Soon | Post::Never) => {
+                Answer::Later(Request::continuation::<TestWork>(1))
+            }
             ("post", Post::Overrun) => {
                 return Err(DataError::Overrun(
                     "took 180.0 ms, over the 100 ms budget for one turn".into(),
@@ -338,6 +345,16 @@ fn a_fetch_runs_through_the_native_executor() {
         Ok(line)
     });
     let r = at(Post::Local(port), bound);
+    let checkpoint = exact_web::document::read_checkpoint(&r.checkpoint).unwrap();
+    let post = checkpoint
+        .answers
+        .iter()
+        .position(|a| a.0 == "post")
+        .unwrap();
+    assert_eq!(
+        checkpoint.urls[post],
+        [format!("http://127.0.0.1:{port}/post/7")]
+    );
     let request = server.join().expect("the test server panicked");
     assert_eq!(request.as_deref(), Ok("GET /post/7 HTTP/1.1"));
     assert_eq!(r.settled, Settled::Complete);
@@ -351,6 +368,16 @@ fn a_fetch_runs_through_the_native_executor() {
     let port = closed.local_addr().unwrap().port();
     drop(closed);
     let r = at(Post::Local(port), bound);
+    let checkpoint = exact_web::document::read_checkpoint(&r.checkpoint).unwrap();
+    let post = checkpoint
+        .answers
+        .iter()
+        .position(|a| a.0 == "post")
+        .unwrap();
+    assert_eq!(
+        checkpoint.urls[post],
+        [format!("http://127.0.0.1:{port}/post/7")]
+    );
     assert_eq!(r.settled, Settled::Complete);
     assert!(r.document.root.contains(">failed: "), "{}", r.document.root);
 }
@@ -395,6 +422,16 @@ fn a_keep_alive_answer_ends_at_its_framing_not_at_the_close() {
             let _ = hold.recv_timeout(Duration::from_secs(30));
         });
         let r = at(Post::Local(port), bound);
+        let checkpoint = exact_web::document::read_checkpoint(&r.checkpoint).unwrap();
+        let post = checkpoint
+            .answers
+            .iter()
+            .position(|a| a.0 == "post")
+            .unwrap();
+        assert_eq!(
+            checkpoint.urls[post],
+            [format!("http://127.0.0.1:{port}/post/7")]
+        );
         let done = Instant::now();
         let sent = when.recv_timeout(bound).expect("the server never answered");
         release.send(()).unwrap();
@@ -581,7 +618,7 @@ fn a_javascript_page_preloads_its_runtime_and_runs_it_after_first_paint(mut r: R
     // @ref LLP 1071 D6
     r.activate = exact_plan::ActivatePolicy::Inferred;
     // The shell as host/web-js/build.mjs writes it.
-    let shell = "<!doctype html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n<base href=\"/\">\n<title>Blog</title>\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<link rel=\"modulepreload\" href=\"./app.js\">\n<link rel=\"modulepreload\" href=\"./shared-1.js\">\n<style>p{margin:0}</style>\n<div id=\"exact-root\"></div>\n<script type=\"module\" src=\"./app.js\"></script>\n";
+    let shell = "<!doctype html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n<base href=\"/\">\n<title>Blog</title>\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<link rel=\"modulepreload\" href=\"./app.js\">\n<link rel=\"modulepreload\" href=\"./shared-1.js\">\n<style>p{margin:0}</style>\n<div id=\"exact-root\"></div>\n<script type=\"module\" data-entry src=\"./app.js\"></script>\n";
     let html = exact_render::page(shell, &r).unwrap();
     // Undeclared is eager: the runtime downloads from the head, before the
     // stylesheet and the document, while the page streams, at low priority:
@@ -609,7 +646,7 @@ fn a_javascript_page_preloads_its_runtime_and_runs_it_after_first_paint(mut r: R
     let root = strip_view_ids(&r.document.root);
     assert!(r.document.root.contains(" data-view=\""));
     assert!(html.ends_with(&format!(
-        "<div id=\"exact-root\">{root}</div>\n<script type=\"application/vnd.exact.checkpoint\" data-digest=\"{}\" data-activate=\"eager\">{}</script>\n",
+        "<div id=\"exact-root\">{root}</div>\n<script type=\"application/vnd.exact.checkpoint\" data-digest=\"{}\" data-activate=\"eager\" data-entry=\"./app.js\">{}</script>\n",
         r.digest, r.checkpoint
     )), "{html}");
     // The head goes first, as a server flushes it before the render: the
@@ -653,7 +690,7 @@ fn a_javascript_page_preloads_its_runtime_and_runs_it_after_first_paint(mut r: R
         assert!(tag.contains(" data-view"), "{tag}");
     }
     for part in [
-        "import(\"./app.js\")",
+        "import(c().dataset.entry)",
         "observe({type:\"paint\",buffered:!0})",
         "DOMContentLoaded",
         "requestIdleCallback",
@@ -670,7 +707,11 @@ fn a_javascript_page_preloads_its_runtime_and_runs_it_after_first_paint(mut r: R
     r.activate = exact_plan::ActivatePolicy::Interaction;
     let html = exact_render::page(shell, &r).unwrap();
     assert!(html.contains("data-activate=\"interaction\""));
-    assert!(!html.replace(capture, "").contains(".js"), "{html}");
+    // The checkpoint names the entry, which nothing fetches yet.
+    let fetched = html
+        .replace(capture, "")
+        .replace(" data-entry=\"./app.js\"", "");
+    assert!(!fetched.contains(".js"), "{html}");
     audio_policy_precedes_runtime(shell, &r);
     // A shell that declares the plan's fonts (their faces with
     // `font-display`, their preloads early in the head) keeps its own: the
@@ -724,7 +765,7 @@ fn a_route_lists_its_pages_with_its_source() {
         ) -> Result<Answer, DataError> {
             assert_eq!((source, args), ("posts", &[Value::str("public")][..]));
             Ok(if self.later {
-                Answer::Later(Request::continuation(9))
+                Answer::Later(Request::continuation::<TestWork>(9))
             } else {
                 Answer::Now(Value::list(vec![Value::str("1"), Value::str("two words")]))
             })
@@ -773,6 +814,34 @@ fn a_route_lists_its_pages_with_its_source() {
     );
 }
 
+/// A worker-placed source (a lone `Placed`, one ordered set, LLP 1027.002
+/// Change 2) lists its pages too: the enumerator parses each turn's reply
+/// before it dispatches the next, so it never meets `Dispatch::Held`.
+#[test]
+fn a_worker_placed_pages_source_is_never_held() {
+    struct Listed;
+    impl DataSource for Listed {
+        fn query(&mut self, source: &str, _: &[Value]) -> Result<Value, DataError> {
+            Err(DataError::UnknownSource(source.into()))
+        }
+        fn answer(&mut self, _: &mut Store, _: &str, _: &[Value]) -> Result<Answer, DataError> {
+            Ok(Answer::Now(Value::list(vec![Value::str("1")])))
+        }
+    }
+    let plan = contract::compile(
+        "routes nav\n  tab home \"/\" render=build\n    post \"/post/:post\" render=build pages=posts(\"public\")\ncomponent A\n  view\n    text \"a\"\n",
+    )
+    .unwrap();
+    let row = plan
+        .routes
+        .iter()
+        .find(|r| plan.str(r.name) == "post")
+        .unwrap();
+    let worker = exact_data::Placed::new(Listed, exact_runner::Placement::Worker);
+    let listed = exact_render::pages(&plan, worker, row, Duration::from_secs(5));
+    assert_eq!(listed.unwrap(), ["/post/1"]);
+}
+
 /// A `pages=` source that is re-asked without end (`Dispatch::Again` gets
 /// its outcome at once, every time) still meets the enumerator's deadline
 /// (Astra, code review round 1: the loop checked it only after a drain came
@@ -785,7 +854,7 @@ fn a_pages_source_re_asked_without_end_meets_the_deadline() {
             Err(DataError::UnknownSource(source.into()))
         }
         fn answer(&mut self, _: &mut Store, _: &str, _: &[Value]) -> Result<Answer, DataError> {
-            Ok(Answer::Later(Request::continuation(1)))
+            Ok(Answer::Later(Request::continuation::<TestWork>(1)))
         }
         fn dispatch(&mut self, _: u64, _: &Store) -> exact_runner::Dispatch {
             exact_runner::Dispatch::Again
@@ -797,7 +866,7 @@ fn a_pages_source_re_asked_without_end_meets_the_deadline() {
             _: &[Value],
             _: Outcome,
         ) -> Result<Answer, DataError> {
-            Ok(Answer::Later(Request::continuation(1)))
+            Ok(Answer::Later(Request::continuation::<TestWork>(1)))
         }
     }
     let plan = contract::compile(
@@ -873,7 +942,7 @@ fn rendered_document_sets_html_language_and_direction() {
     // rule (LLP 1048.003 D4), on either runtime's shell; a JavaScript page
     // sent whole needs no script for it.
     rendered.document.scroll_document = true;
-    let js = "<!doctype html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n<base href=\"/\">\n<title>Blog</title>\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<link rel=\"modulepreload\" href=\"./app.js\">\n<style>p{margin:0}</style>\n<div id=\"exact-root\"></div>\n<script type=\"module\" src=\"./app.js\"></script>\n";
+    let js = "<!doctype html>\n<html lang=\"en\">\n<meta charset=\"utf-8\">\n<base href=\"/\">\n<title>Blog</title>\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<link rel=\"modulepreload\" href=\"./app.js\">\n<style>p{margin:0}</style>\n<div id=\"exact-root\"></div>\n<script type=\"module\" data-entry src=\"./app.js\"></script>\n";
     for shell in [shell.as_str(), js] {
         let html = exact_render::page(shell, &rendered).unwrap();
         assert!(

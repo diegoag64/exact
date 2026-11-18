@@ -52,9 +52,11 @@ pub(super) mod look;
 mod overlay;
 mod select;
 pub(crate) mod shape;
+mod status;
 pub use look::Target;
 use look::{Inputs, Layout};
 pub use shape::{Entry, Plan, Row};
+pub use status::{StatusItem, StatusMenu, EXIT};
 
 /// What a shell's windows are drawn from: it records what `paint` draws
 /// for a surface of `size` points at `scale` pixels a point, and returns
@@ -178,6 +180,8 @@ struct Open {
     hovered: Option<usize>,
     /// The kernel epoch its plan was read at.
     epoch: u64,
+    /// A status item's menu, in its host's window of its own, not the page's.
+    detached: bool,
 }
 
 impl Open {
@@ -207,6 +211,10 @@ pub(super) struct State {
     /// How many long presses a node has taken ([`Presenter::long_press`]):
     /// a reader that compares it across a contact knows whether its own was.
     long_presses: u32,
+    /// The status item's menu that is open or opening (`top/status.rs`).
+    status: Option<status::Menu>,
+    /// Its Exit was chosen, and the host has not yet taken it.
+    exited: bool,
 }
 
 /// The open surface, for a driver and a test.
@@ -296,6 +304,7 @@ impl<D: DataSource> Presenter<D> {
         self.alert = None;
         self.brush.alert = None;
         self.host.top_layer(self.has_windows());
+        self.top.status = None;
         if self.top.open.take().is_some() {
             self.surface_changed();
         }
@@ -317,14 +326,14 @@ impl<D: DataSource> Presenter<D> {
 
     /// What `pop` is to the top layer, shown modally or as a popover: an
     /// alert, a menu, or nothing it shows. A select is its options' menu.
-    fn surface_plan(&self, pop: ViewId, modal: bool) -> Option<Plan> {
+    pub(in crate::presenter) fn surface_plan(&self, pop: ViewId, modal: bool) -> Option<Plan> {
         if self.is_select(pop) {
             return self.select_plan(pop);
         }
         let runner = self.host.runner();
         let pressed = |id: ViewId| runner.handlers_of(id).contains(&EventKind::Press);
         let kernel = self.host.kernel();
-        shape::alert(kernel, pop, &pressed, modal).or_else(|| {
+        let plan = shape::alert(kernel, pop, &pressed, modal).or_else(|| {
             if self.top.overlay.enabled {
                 let role = kernel.node(pop)?.props.str(PropId::AccessibilityRole);
                 let menu = role == Some("menu")
@@ -337,12 +346,16 @@ impl<D: DataSource> Presenter<D> {
                 }
             }
             shape::menu(kernel, pop, &pressed)
-        })
+        });
+        self.with_exit(pop, plan)
     }
 
     /// The window the shell told, and how far a menu keeps from its top and
     /// bottom: Material's 48, or the system's bars where they are taller.
     fn surface_window(&self) -> ((f32, f32), (f32, f32)) {
+        if let Some(status) = &self.top.status {
+            return (status.room, (0.0, 0.0));
+        }
         if self.top.overlay.enabled {
             return (self.viewport, (4.0, 4.0));
         }
@@ -387,6 +400,10 @@ impl<D: DataSource> Presenter<D> {
             Layout::of
         };
         let mut layout = measure(&mut self.text.borrow_mut(), plan, pop, inputs);
+        // A status menu's window is the system's to round, border and shadow.
+        if self.top.status.is_some() {
+            layout.radius = 0.0;
+        }
         if let Some(width) = self.select_width(pop) {
             layout.widen(
                 width.min(inputs.window.0),
@@ -554,6 +571,7 @@ impl<D: DataSource> Presenter<D> {
             focused: None,
             hovered: None,
             epoch: self.host.kernel().epoch(),
+            detached: self.top.status.is_some(),
         });
         let anchor = self.surface_anchor();
         if let Some(open) = self.top.open.as_mut() {
@@ -585,6 +603,9 @@ impl<D: DataSource> Presenter<D> {
         let Some(open) = self.top.open.take() else {
             return;
         };
+        if open.detached {
+            self.top.status = None;
+        }
         self.report_top_layer();
         self.queue_surface_closed(open.key, open.modal);
         let back = open.restore.filter(|id| {
@@ -663,6 +684,8 @@ impl<D: DataSource> Presenter<D> {
             return;
         };
         let (invoker, point, menu) = (open.invoker, open.point, open.key);
+        let status = self.top.status.clone().filter(|_| open.detached);
+        self.top.exited |= status.is_some() && row.node == EXIT;
         let key = self.host.kernel().node(row.node).map(|node| node.key);
         self.close_surface(now_ms);
         if self
@@ -694,7 +717,15 @@ impl<D: DataSource> Presenter<D> {
         if let Some(i) = opens {
             let name = self.name_of(i.target);
             let modal = i.action == Action::ShowModal;
+            // A status menu's submenu takes its place in its window.
+            self.top.status = status.filter(|_| !modal).map(|mut status| {
+                status.parents.push((menu, row.node));
+                status
+            });
             self.present(Some(i.target), &name, invoker, point, modal, now_ms);
+            if self.top.open.as_ref().is_none_or(|open| !open.detached) {
+                self.top.status = None;
+            }
         }
     }
 
@@ -768,7 +799,6 @@ impl<D: DataSource> Presenter<D> {
         self.alert_takes_back() || self.top.open.is_some()
     }
 
-    #[cfg(windows)]
     pub(super) fn desktop_surface_access(&self) -> Option<(Option<ViewId>, (f32, f32))> {
         let open = self.top.open.as_ref()?;
         let focused = open
@@ -778,8 +808,16 @@ impl<D: DataSource> Presenter<D> {
         Some((
             focused,
             (
-                open.frame[0] as f32 / open.scale,
-                open.frame[1] as f32 / open.scale,
+                if open.detached {
+                    0.
+                } else {
+                    open.frame[0] as f32 / open.scale
+                },
+                if open.detached {
+                    0.
+                } else {
+                    open.frame[1] as f32 / open.scale
+                },
             ),
         ))
     }
@@ -811,6 +849,9 @@ impl<D: DataSource> Presenter<D> {
         if let Some(taken) = self.select_surface_key(name, now_ms) {
             return taken;
         }
+        if self.surface_type_ahead(name, now_ms) {
+            return true;
+        }
         match name {
             "Escape" => {
                 self.dismiss_surface(now_ms);
@@ -822,7 +863,7 @@ impl<D: DataSource> Presenter<D> {
             "Home" | "End" if self.top.overlay.enabled => self.surface_edge(name == "End"),
             "Enter" | " " => {
                 if let Some(index) = self.top.open.as_ref().and_then(|open| open.focused) {
-                    self.choose(index, now_ms, None);
+                    self.choose_with_keyboard(index, now_ms);
                 }
             }
             _ => {}
@@ -830,7 +871,8 @@ impl<D: DataSource> Presenter<D> {
         true
     }
 
-    /// A submenu replaces its parent, so Left has no parent to return to.
+    /// Move between alert buttons, or open a submenu to the right.
+    /// Detached status menus keep their parent in `status.rs`.
     fn surface_horizontal(&mut self, backward: bool, now_ms: f64) {
         let Some(open) = self.top.open.as_ref() else {
             return;
@@ -847,17 +889,21 @@ impl<D: DataSource> Presenter<D> {
                     .is_some_and(|row| row.enabled && row.opens.is_some())
             });
             if let Some(index) = index {
-                let serial = open.serial;
-                self.choose(index, now_ms, None);
-                if self
-                    .top
-                    .open
-                    .as_ref()
-                    .is_some_and(|open| open.serial != serial && open.focused.is_none())
-                {
-                    self.surface_step(false);
-                }
+                self.choose_with_keyboard(index, now_ms);
             }
+        }
+    }
+
+    fn choose_with_keyboard(&mut self, index: usize, now_ms: f64) {
+        let serial = self.top.last;
+        self.choose(index, now_ms, None);
+        if self
+            .top
+            .open
+            .as_ref()
+            .is_some_and(|open| open.serial != serial && open.focused.is_none())
+        {
+            self.surface_step(false);
         }
     }
 
@@ -914,6 +960,52 @@ impl<D: DataSource> Presenter<D> {
             open.revision += 1;
             self.executor.notify();
         }
+    }
+
+    /// A printable key in a menu focuses the row it starts, by the kernel's
+    /// type-ahead (`Kernel::role_type_ahead`), from the focused row or, with
+    /// none, from the first. Whether a row took it: one that starts none, or
+    /// Space with no search under way, goes on to the menu's other keys.
+    fn surface_type_ahead(&mut self, name: &str, now_ms: f64) -> bool {
+        let held = self.modifiers();
+        let Some(open) = self
+            .top
+            .open
+            .as_ref()
+            .filter(|open| open.kind == SurfaceKind::Menu)
+        else {
+            return false;
+        };
+        if held.ctrl || held.alt || held.meta {
+            return false;
+        }
+        let from = open
+            .focused
+            .map_or(open.node, |i| open.layout.targets[i].node);
+        let mut typed = std::mem::take(&mut self.type_ahead);
+        let step = self
+            .host
+            .kernel()
+            .role_type_ahead(from, name, now_ms, &mut typed);
+        self.type_ahead = typed;
+        let (Some(step), Some(open)) = (step, self.top.open.as_mut()) else {
+            return false;
+        };
+        let targets = &open.layout.targets;
+        let Some(next) = step.order.iter().find_map(|id| {
+            targets
+                .iter()
+                .position(|row| row.node == *id && row.enabled)
+        }) else {
+            return false;
+        };
+        let revealed = open.layout.reveal_menu_target(next);
+        if open.focused != Some(next) || revealed {
+            open.focused = Some(next);
+            open.revision += 1;
+            self.executor.notify();
+        }
+        true
     }
 
     fn surface_edge(&mut self, last: bool) {
@@ -1136,6 +1228,7 @@ impl<D: DataSource> Presenter<D> {
                 0,
             ),
             SurfaceKind::Alert => ((0.0, 0.0), 0),
+            SurfaceKind::Menu if open.detached => ((0.0, 0.0), 0),
             SurfaceKind::Menu => {
                 let direction = if self.top.overlay.enabled {
                     exact_kernel::Direction::Ltr
@@ -1174,6 +1267,8 @@ impl<D: DataSource> Presenter<D> {
         };
         let rect = match open.kind {
             SurfaceKind::Alert => [0.0; 4],
+            // In its host's window, which the page's points do not reach.
+            SurfaceKind::Menu if open.detached => [0.0; 4],
             SurfaceKind::Menu => {
                 let [px, py, ..] = self.chrome().frame;
                 let [x, y, w, h] = open.frame.map(|v| f64::from(v) / f64::from(open.scale));

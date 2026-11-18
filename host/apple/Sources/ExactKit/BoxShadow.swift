@@ -191,7 +191,7 @@ extension NodeView {
     /// The section owns hover and focus; its card owns their shadow paint.
     var groupedShadowCard: NodeView? {
         guard props["semanticTag"] == "section", nodeSuperview?.props["listStyle"] != nil else { return nil }
-        return container.subviews.compactMap { $0 as? NodeView }.first {
+        return childNodes.first {
             !["header", "footer"].contains($0.props["semanticTag"] ?? "")
         }
     }
@@ -232,7 +232,7 @@ extension NodeView {
 
     /// The casters onto the layer: the outer ones at its bottom, cast from
     /// the border box; the inset ones over the box's paint; or gone.
-    func applyShadow(outline: CGPath) {
+    func applyShadow(outline makeOutline: @autoclosure () -> CGPath) {
         defer { overflowClipGeometryChanged() }
         if let card = groupedShadowCard {
             card.syncShadowClip()
@@ -257,9 +257,18 @@ extension NodeView {
         let host = layer
         #endif
         let all = surface == nil && bounds.width > 0 && bounds.height > 0 ? boxShadows : []
+        // No shadow, the usual case, needs no outline: a batch that frames thousands of boxes builds none.
+        guard !all.isEmpty else {
+            shadowCaster?.removeFromSuperlayer(); shadowCaster = nil
+            #if os(macOS)
+            removeShadowStand()
+            #endif
+            insetCaster?.removeFromSuperlayer(); insetCaster = nil
+            return
+        }
         var sizes = BorderPaint.reduced(BorderPaint.radii(style, in: bounds), in: bounds)
         // A default surface's corner where its author wrote none, its shadow cast from it.
-        var outline = outline
+        var outline = makeOutline()
         if let r = defaultSurfaceRadius, !writesCorner {
             sizes = BorderPaint.reduced(Array(repeating: CGSize(width: r, height: r), count: 4), in: bounds)
             outline = BorderPaint.roundedRect(bounds, sizes, shape: CornerShape(nil))
@@ -503,7 +512,7 @@ extension NodeView {
 
     /// Descendant geometry can extend the visible axis without changing this
     /// node's size. Refit each enclosing one-axis clip in the same transaction.
-    func overflowClipGeometryChanged() {
+    package func overflowClipGeometryChanged() {
         var view = superview
         if clipBox != nil, clipsOneAxis { placeClipBox() }
         while let current = view {

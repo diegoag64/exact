@@ -62,6 +62,7 @@ final class AudioSessionIOSTests: XCTestCase {
         final class Holder {}
         let holder = Holder()
         for value in ["ambient", "playback", "playback-mix"] {
+            AudioSession.reset()
             AudioSession.configuration = .init(value)
             try session.setCategory(AudioSession.configuration.category, options: AudioSession.configuration.options)
             let readback = session.categoryOptions
@@ -186,7 +187,7 @@ final class AudioSessionIOSTests: XCTestCase {
         try session.setCategory(.soloAmbient)
         surfaceCreationAudio = []
         try counting {
-            host.surface(view: canvas, name: "audio-fixture", values: [])
+            host.surface(view: canvas, name: "audio-fixture", values: Data("[]".utf8))
             XCTAssertEqual(host.entries[100]?.id, 7, "the host created the module's surface")
             XCTAssertEqual(surfaceCreationAudio.count, 1)
             let seen = try XCTUnwrap(surfaceCreationAudio.first)

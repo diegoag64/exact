@@ -702,14 +702,17 @@ function apply(batch) {
               pending.finally(() => inflight.delete(pending));
             }
           } else if (op.name === "saveFile") {
-            const [id, from, suggestedName, text] = op.args ?? [], r = JSON.parse(readOut(host.wasm.exact_command(writeIn(JSON.stringify({
+            const [id, from, suggestedName, text, startIn] = op.args ?? [], r = JSON.parse(readOut(host.wasm.exact_command(writeIn(JSON.stringify({
               command: "saveFile",
               id,
               from: from ?? undefined,
               suggestedName,
-              text,
+              text: text ?? undefined,
+              startIn: startIn ?? undefined,
               agent: agentMode
-            }))))), chosen = r.present && typeof showSaveFilePicker === "function" ? showSaveFilePicker({ suggestedName: r.suggestedName }) : null;
+            }))))), chosen = r.present && typeof showSaveFilePicker === "function" ? (r.startIn?.startsWith("doc:/")
+              ? documentsGlue().then((m) => m.startIn(r.startIn, "saveFile")).then((at) => showSaveFilePicker({ suggestedName: r.suggestedName, ...(at && { startIn: at }) }))
+              : showSaveFilePicker({ suggestedName: r.suggestedName, ...(r.startIn && { startIn: r.startIn === "screenshots" ? "pictures" : r.startIn }) })) : null;
             // LLP 1069.010 D3: the runner rules; the save picker starts inside the press's activation, else a download
             if (r.present || r.view != null) {
               chosen?.catch(() => {});
@@ -719,11 +722,12 @@ function apply(batch) {
             }
           } else if (/^show(OpenFile|Directory|SaveFile)Picker$/.test(op.name)) {
             // LLP 1069.010 D2: the runner rules; a browser without the picker refuses
-            const [id, second] = op.args ?? [], r = JSON.parse(readOut(host.wasm.exact_command(writeIn(JSON.stringify({
+            const [id, second] = op.args ?? [], directory = op.name === "showDirectoryPicker", r = JSON.parse(readOut(host.wasm.exact_command(writeIn(JSON.stringify({
               command: op.name,
               id,
               multiple: second === true,
-              suggestedName: typeof second === "string" ? second : undefined,
+              suggestedName: !directory && typeof second === "string" ? second : undefined,
+              startIn: op.args?.[directory ? 1 : 2] ?? undefined,
               agent: agentMode,
               available: op.name === "showSaveFilePicker" || typeof globalThis[op.name] === "function"
             })))));
@@ -984,6 +988,8 @@ function apply(batch) {
 const heldLinks = new WeakMap();
 const heldOutputs = new Map();
 export function applyBatch(batch) {
+  const freeze = batch.freeze === true;
+  if (freeze) delete batch.freeze;
   for (const line of batch.alerts?.splice(0) ?? []) {
     console.error("exact:", line);
   }
@@ -1080,6 +1086,27 @@ export function applyBatch(batch) {
       }
     }
   }
+  if (freeze) {
+    // A freeze settles everything awaiting presentation in its commit:
+    // physical-output starts are discarded and every other operation is
+    // applied in its original order. This marker is consumed on first apply;
+    // a replay or later resume neither settles newer output nor reconstructs it.
+    const pending = [...heldOutputs.values(), output].flat();
+    const starts = (row, op) => {
+      if (row.op === "command") return row.name === "haptic";
+      if (row.op === "sound") return op.op === "play" || op.op === "haptic";
+      if (row.op !== "midi" || op.op !== "send") return false;
+      const [status, , velocity] = op.data ?? [];
+      return status === 0xfa || status === 0xfb || status === 0xf8 || (status & 0xf0) === 0x90 && velocity > 0;
+    };
+    for (const held of new Set([...heldOutputs.keys(), batch])) {
+      held.ops = held.ops?.filter(op => !starts(op, op)) ?? [];
+    }
+    for (const row of pending) row.ops = row.ops.filter(op => !starts(row, op));
+    heldOutputs.clear();
+    outputNow(pending);
+    output = [];
+  }
   // The runner has already released gated streams; presentation may wait past suspension.
   letGo();
   const link = heldLinks.get(batch) ?? navigation.holdLink();
@@ -1148,9 +1175,12 @@ export function applyBatch(batch) {
       // After a commit (its `at` op), a held press paints again over the boundaries as they are now (input-glue.js
       // `repaintPress`), as modes.js does after each JS-target commit: a boundary's `data-exact-from` may have moved.
       if (batch.ops?.some((op) => op.op === "at")) globalThis.exact.repaintPress?.();
+      globalThis.exact.gpu?.syncPerformance?.();
       globalThis.exact.gpu?.drainRecords();
       globalThis.exact.gpu?.layout?.();
       globalThis.exact.committed?.();
+      // A commit may settle the request a replacement waits for (boot.js).
+      globalThis.exact.replacementChanged?.();
     }
     host.frameSampler?.batch(batch.seq, outer ? performance.now() - began : 0);
   }

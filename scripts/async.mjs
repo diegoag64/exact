@@ -22,7 +22,7 @@ import { Graph, LANE_DISTS, PARITY, Repo, WEB_APPS, commands, gameAppleLeg, pari
 import { INPUTS, Inputs, Store, checkEnv, decide, outcomeOf } from './async-inputs.mjs';
 import { main as issue } from './issue.mjs';
 import { noteOf, publish, stoppedEarly } from './known.mjs';
-import { bisectAffected, probeOutcomes } from './async-bisect.mjs';
+import { bisectAffected, newFailures, probeOutcomes } from './async-bisect.mjs';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(fileURLToPath(new URL('..', import.meta.url)));
@@ -99,7 +99,7 @@ const EDITS_APPS = /\/dev-scheduler\.test\.mjs$/;
 export function glueWorkers(cores = availableParallelism(), load = loadavg()[0]) {
   return Math.max(1, Math.floor((cores - load) / 2));
 }
-// `bundle-size` reads RealWorld's production app.js (`EXACT_REALWORLD_JS`), which no step prepares before the glue.
+// `bundle-size` reads RealWorld's production entry (`EXACT_REALWORLD_DIST`), which no step prepares before the glue.
 const LEFT_OUT = /^host\/web-js\/bundle-size\.test\.mjs$/;
 /** The glue step's files: every test file of the web hosts, of the modules and of `scripts/`, so a new one runs without
  * being named, less `LEFT_OUT`'s. */
@@ -149,7 +149,7 @@ export function laneSelection(changed, { root = WT, full = false, repo, graphs =
   };
 }
 const WEB_AX = ['./host/web/tests/accessibility-tree.test.mjs', './host/web/tests/presence-preload.test.mjs', './host/web/tests/zero-viewport.test.mjs'];
-/** Suites outside the established steps still run: other Bun files, macOS XCTests and authored app tests. */
+/** Suites outside the established steps still run: other Cargo workspaces, Bun files, macOS XCTests and app tests. */
 export function extraChecks(hits, glue, repo) {
   const covered = new Set([...glue, ...WEB_AX, './host/web/tests/document.test.mjs', './game/vocab.test.mjs']);
   const bun = hits.filter(({ suite: s }) => s.kind === 'bun' && !covered.has(`./${s.file}`));
@@ -157,9 +157,13 @@ export function extraChecks(hits, glue, repo) {
   const realworld = resolve(STATE_DIR, 'fixtures/realworld-production');
   if (fixture) out.push(['bundle-fixture', 'bun', ['host/web-js/build.mjs', 'realworld', '--production', '--out', realworld]]);
   for (const cmd of commands(bun)) out.push(['other-glue', 'env', ['EXACT_REQUIRED=1',
-    ...(fixture ? [`EXACT_REALWORLD_JS=${resolve(realworld, 'app.js')}`] : []), ...cmd]]);
+    ...(fixture ? [`EXACT_REALWORLD_DIST=${realworld}`] : []), ...cmd]]);
   for (const hit of hits) {
     const s = hit.suite;
+    if (s.kind === 'cargo' && s.manifest !== 'Cargo.toml' && s.manifest !== 'game/Cargo.toml') {
+      const [cmd, ...args] = commands([hit])[0];
+      out.push([s.id, cmd, args]);
+    }
     if (s.kind !== 'app' && !(s.kind === 'xctest' && s.host === 'macos')) continue;
     const named = s.kind === 'app' ? `app:${s.app}:${s.host}` : 'macos';
     const first = out.length;
@@ -254,8 +258,7 @@ export function checks(sha, since, selection = {}) {
     ['caps', 'bun', ['scripts/caps.mjs']],
     ['boot', 'bun', ['scripts/boot.mjs']],
     ['wasm', 'bun', ['scripts/wasm-check.mjs']],
-    // The bytes each web app ships against its budget (LLP 1047.002 D5), in seconds here rather
-    // than after `metrics --long`'s macOS build, so a VIOLATION is filed in the commit's first minute.
+    // Shared runtime and app byte ceilings fail this step (LLP 1172.011 E1), before metrics --long's native builds.
     ['web-bytes', 'bun', ['scripts/metrics.mjs', '--web-bytes']],
     // Every web host unit test (LLP 1012.001.000 D9; Charlie, 2026-09-30)
     // and the source capture fixtures, in the existing async glue step.
@@ -346,7 +349,7 @@ const distEnv = distsOf('glue');
 
 /** Settings a check inherits from the lane's own environment that change what it tests. */
 export const ENV_DROPPED = ['EXACT_UPDATE_TRUST', 'CARGO_TARGET_DIR', 'EXACT_WEB_BROWSER', 'EXACT_JS_ENGINE', 'EXACT_JS_GPU_SURFACES',
-  'EXACT_WEB_LINK', 'EXACT_WEB_DIST', 'EXACT_WEB_JS_DIST', 'EXACT_NO_GPU_WASM_DIST', 'EXACT_NO_GPU_JS_DIST',
+  'EXACT_JS_UNREGISTERED_SURFACES', 'EXACT_WEB_LINK', 'EXACT_WEB_DIST', 'EXACT_WEB_JS_DIST', 'EXACT_NO_GPU_WASM_DIST', 'EXACT_NO_GPU_JS_DIST',
   'EXACT_NO_GPU_CHROME', 'EXACT_MOTION_DIST', 'EXACT_GLUE_FAST', 'EXACT_REQUIRED', 'EXACT_BACKEND_ORIGIN'];
 export const laneEnv = base => {
   const env = { ...base, HERMES_LEAN_SYS_OFFLINE: '1' };
@@ -406,7 +409,7 @@ export function retainSkippedFailures(previous, result, owners = {}, steps = TIE
   const found = new Set(result.failures);
   for (const f of previous) {
     const name = f.split(': ', 1)[0], check = result.checks[name], owner = owners[f];
-    if (found.has(f) || !(steps.has(name) || name === 'other-glue' || name === 'bundle-fixture' || name === 'macos' || name.startsWith('app:') || name.startsWith('build-app:'))) continue;
+    if (found.has(f) || !(steps.has(name) || name === 'other-glue' || name === 'bundle-fixture' || name === 'macos' || name.startsWith('cargo:') || name.startsWith('app:') || name.startsWith('build-app:'))) continue;
     // What ran it again: its check whole, or the part of it that holds its suites (one it cannot name: any part).
     const ran = check && !check.skipped && check.complete !== false && (!check.covers || (owner?.length && owner.every(o => check.covers.includes(o))));
     if (ran) continue;
@@ -424,6 +427,7 @@ export function owners(name, log, found) {
   const out = {};
   const own = (f, id) => { if (!(out[f] ??= []).includes(id)) out[f].push(id); };
   for (const f of found) {
+    if (name.startsWith('cargo:')) own(f, name);
     const pkg = /^\S+: -p (\S+) /.exec(f)?.[1] ?? /^\S+: (\S+) (?:\([^)]*\) does not compile|build script failed)$/.exec(f)?.[1];
     if (pkg && ['test', 'lane', 'default-test', 'build', 'workspace-build', 'workspace', 'clippy', 'workspace-clippy', 'linux', 'windows', 'windows-arm64'].includes(name)) own(f, `cargo:${pkg}`);
     const app = name.startsWith('conform') && f.slice(name.length + 2).split(' ').slice(0, 2).find(w => WEB_APPS.includes(w));
@@ -461,8 +465,11 @@ export function failures(name, log, status) {
     if (rerun && !failed.length) found.add(`${name}: ${rerun[1]} did not finish`);
     if (rerun) for (const t of failed.splice(0)) found.add(`${name}: ${rerun[1]} ${t}`);
   }
-  // metrics rows: a VIOLATION, or a measurement whose build FAILED.
-  if (name === 'metrics' || name === 'web-bytes') for (const m of log.matchAll(/^[ \t]+(\S[^\n]*?)[ \t]{2,}(?:FAILED\b|[^\n]*\bVIOLATION\b)/gm)) found.add(`${name}: ${m[1]} ${/\bVIOLATION\b/.test(m[0]) ? 'VIOLATION' : 'FAILED'}`);
+  // metrics rows: a VIOLATION, which a byte-budget row names with how far over (async-bisect.mjs `holds`), or a
+  // measurement whose build FAILED.
+  if (name === 'metrics' || name === 'web-bytes') for (const m of log.matchAll(/^[ \t]+(\S[^\n]*?)[ \t]{2,}(?:FAILED\b|[^\n]*\bVIOLATION\b( by \d+(?:\.\d+)? MB\b)?)/gm)) {
+    found.add(`${name}: ${m[1]} ${/\bVIOLATION\b/.test(m[0]) ? `VIOLATION${m[2] ?? ''}` : 'FAILED'}`);
+  }
   for (const m of log.matchAll(/Test Case '-\[(\S+) (\S+)\]' failed/g)) found.add(`${name}: ${m[1]} ${m[2]} failed`);
   // xcodebuild's parallel testing names a failure by class and method only. A test it reports failed in 0.000 s did
   // not run: its test process had crashed, and xcodebuild fails each test that process still held (2026-11-12: 377
@@ -706,8 +713,7 @@ async function once(state) {
   if (!pending.length && !full) return;
   const since = state.last, result = await check(tip, since, { base: since, full });
   retainSkippedFailures(state.failures ?? [], result, state.owners ?? {});
-  const baseline = state.failures === undefined, before = new Set(state.failures ?? []);
-  const fresh = result.failures.filter(f => !before.has(f));
+  const baseline = state.failures === undefined, fresh = newFailures(state.failures ?? [], result.failures);
   console.log(`${tip.slice(0, 8)} ${result.subject}: ${result.failures.length} failure(s), ${baseline ? 'baseline' : `${fresh.length} new`}`);
   if (fresh.length && !baseline) {
     try { result.attribution = await attribute(result, fresh, since, pending); }

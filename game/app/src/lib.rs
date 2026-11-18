@@ -74,11 +74,21 @@ fn bake_source<D: contract::DataSource>(
     constructor: &str,
     shared: bool,
 ) {
-    exact_bake::host::bake(platform, app_dir, &GAME, data, data_type, constructor, |entry| {
-        // The shared shell holds this game's host: the entry it would compile names nothing
-        // of the game but its app id (`SHARED_ENTRY`). shells.mjs decided that from the build's
-        // environment before Cargo ran; a build in another environment finds otherwise.
-        shared.then(|| {
+    exact_bake::host::bake(
+        platform,
+        app_dir,
+        &GAME,
+        data,
+        // A game is the plain Apple host (`GAME.apple_linked` is false),
+        // which links every capability.
+        false,
+        data_type,
+        constructor,
+        |entry| {
+            // The shared shell holds this game's host: the entry it would compile names nothing
+            // of the game but its app id (`SHARED_ENTRY`). shells.mjs decided that from the build's
+            // environment before Cargo ran; a build in another environment finds otherwise.
+            shared.then(|| {
             let own = empty_entry(entry.constructor, entry.inputs, "app_id()")
                 .map(|e| format!("{e}\n{}\n", apple_host("plan()", "compat()")));
             assert!(
@@ -90,7 +100,8 @@ fn bake_source<D: contract::DataSource>(
             );
             SHARED_SHELL.to_string()
         })
-    });
+        },
+    );
 }
 
 /// exact-game-apple's entry: a game's own, with the app id read from its compat.json.

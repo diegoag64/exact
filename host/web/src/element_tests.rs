@@ -632,6 +632,46 @@ fn a_layout_region_is_the_browsers_safe_area() {
     }
 }
 
+/// A node's custom properties (LLP 1123 D5) are the browser's own: each
+/// declaration's length, and a length reads one through `var()`, which the
+/// browser substitutes.
+#[test]
+fn custom_properties_reach_the_browser_as_declarations() {
+    use exact_kernel::{StyleId, StyleValue};
+    let mut style = StyleProps::default();
+    let declared = "--gap: 8px; --pad: calc(var(--gap) * 2)";
+    style
+        .set_dynamic(
+            StyleId::SafeAreaProperties,
+            &StyleValue::Text(declared.into()),
+        )
+        .unwrap();
+    style
+        .set_dynamic(
+            StyleId::PaddingLeft,
+            &StyleValue::Text("var(--pad, 4px)".into()),
+        )
+        .unwrap();
+    // A fallback stands alone where the row's value does, so a sum keeps its `calc()`
+    style
+        .set_dynamic(
+            StyleId::MarginTop,
+            &StyleValue::Text("var(--missing, calc(10% + 2px))".into()),
+        )
+        .unwrap();
+    let (out, _) = crate::css::css_text(&style, &[]);
+    assert!(
+        out.contains("--gap:8px;--pad:calc(2 * var(--gap));"),
+        "{out}"
+    );
+    assert!(out.contains("padding-left:var(--pad, 4px)"), "{out}");
+    // As host/web/tests/local-insets.test.mjs has the browser read it
+    assert!(
+        out.contains("margin-top:var(--missing, calc(10% + 2px))"),
+        "{out}"
+    );
+}
+
 /// A content owner's local inset (LLP 1123 D9) reaches the browser as the
 /// registered custom property it reads, alone or in a calculation.
 #[test]
@@ -666,12 +706,38 @@ fn a_local_inset_is_the_browsers_custom_property() {
     style.set_dynamic(StyleId::LocalInsetBottom, &own).unwrap();
     let off = StyleValue::Text("top bottom".into());
     style.set_dynamic(StyleId::SafeArea, &off).unwrap();
+    let ignore = StyleValue::Text("container top".into());
+    style.set_dynamic(StyleId::SafeAreaIgnore, &ignore).unwrap();
+    let align = StyleValue::Text("bottom".into());
+    style
+        .set_dynamic(StyleId::SafeAreaIgnoreAlign, &align)
+        .unwrap();
+    // Nor does a reservation yet (D11)
+    let reserved = [
+        StyleId::AdditionalSafeAreaTop,
+        StyleId::AdditionalSafeAreaRight,
+        StyleId::AdditionalSafeAreaBottom,
+        StyleId::AdditionalSafeAreaLeft,
+        StyleId::SafeAreaPaddingTop,
+        StyleId::SafeAreaPaddingRight,
+        StyleId::SafeAreaPaddingBottom,
+        StyleId::SafeAreaPaddingLeft,
+    ];
+    for row in reserved {
+        style.set_dynamic(row, &StyleValue::Number(20.0)).unwrap();
+    }
     let (out, skipped) = crate::css::css_text(&style, &[]);
-    assert_eq!(
-        out,
-        "--exact-safe-area-inset-bottom:calc(8px + var(--exact-safe-area-inset-top));"
-    );
+    let own = "--exact-safe-area-inset-bottom:calc(8px + var(--exact-safe-area-inset-top));";
+    assert_eq!(out, own);
     assert!(skipped.is_empty(), "{skipped:?}");
+    // A clear of the ignore, row 256, past a `u8` style id, writes nothing
+    // too, nor does a reservation's
+    let ignore = [StyleId::SafeAreaIgnore, StyleId::SafeAreaIgnoreAlign];
+    for row in ignore.into_iter().chain(reserved) {
+        style.mask.clear(row);
+        style.written.set(row);
+    }
+    assert_eq!(crate::css::css_text(&style, &[]).0, own);
 }
 
 /// LLP 1116.018 D3: a live region's `aria-atomic` reaches the page.
@@ -728,4 +794,39 @@ fn an_active_descendant_is_written_as_the_aria_attribute() {
             Some(value)
         );
     }
+}
+
+/// LLP 1047.003 D1: every attribute `props_of` writes by name (an `insert` or
+/// `get_or_insert_with` of a literal, in element.rs and the symbol marks) is in
+/// `attributes_by_data`, which the JS target's build counts where data sets a
+/// node's props or styles; one missing there could lose its rules.
+#[test]
+fn every_attribute_props_of_derives_is_one_data_can_give() {
+    let source = [
+        include_str!("element.rs"),
+        include_str!("element_symbol.rs"),
+    ]
+    .concat();
+    let body = &source[source.find("pub fn props_of").unwrap()..];
+    let listed: std::collections::BTreeSet<&str> = [
+        NodeType::View,
+        NodeType::Control,
+        NodeType::TextInput,
+        NodeType::Image,
+    ]
+    .into_iter()
+    .flat_map(super::attributes_by_data)
+    .collect();
+    let mut missing = Vec::new();
+    for call in ["insert(", "get_or_insert_with("] {
+        for at in body.match_indices(call).map(|(at, _)| at + call.len()) {
+            let rest = body[at..].trim_start();
+            if let Some(name) = rest.strip_prefix('"').and_then(|r| r.split('"').next()) {
+                if name != "data-" && !listed.contains(name) {
+                    missing.push(name.to_owned());
+                }
+            }
+        }
+    }
+    assert_eq!(missing, Vec::<String>::new());
 }

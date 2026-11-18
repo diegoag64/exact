@@ -154,6 +154,50 @@ final class SessionClockTimerTests: XCTestCase {
         #endif
     }
 
+    /// A press right after a sleep, before any frame or notice checks the
+    /// date, reads the date now: the input checks it first. A check the
+    /// runtime refuses (here held, as over a restart's reset) tells nothing,
+    /// so the next check tells the date though it has not moved since.
+    func testAPressAfterASleepReadsTheDateNowAndARefusedTellIsToldAgain() throws {
+        #if os(macOS)
+        defer { ExactSession.machineDate = Date.init }
+        let source = """
+        shape Time
+          epochAtZero: number
+        component App
+          resource time = exactTime() as shape Time
+          state pressedAt = 0
+          action stamp
+            pressedAt = time.epochAtZero
+          view
+            column
+              button press=stamp testId="stamp"
+                text "Stamp"
+              text `${pressedAt}` testId="stamped"
+              text `${time.epochAtZero}` testId="epoch"
+        """
+        let session = ExactSession(app: ExactApp.shared, label: "slept-press", launchPlace: LaunchPlace(environment: [:]))
+        defer { session.destroy() }
+        XCTAssertNil(session.boot(plan: try TableFixture.plan(source + "\n"), size: CGSize(width: 390, height: 844)).error)
+        func node(_ testId: String) -> UInt32? { session.presenter.views.values.first { $0.props["testId"] as? String == testId }?.id }
+        func number(_ testId: String) -> Double? { node(testId).flatMap { session.presenter.views[$0]?.props["text"] as? String }.flatMap(Double.init) }
+        waitFor("the date") { (number("epoch") ?? 0) > 0 }
+        let start = try XCTUnwrap(number("epoch"))
+        let stamp = try XCTUnwrap(node("stamp"))
+        ExactSession.machineDate = { Date(timeIntervalSinceNow: 3600) }
+        session.presenter.onPress?(stamp) // in this turn: no frame or notice runs first
+        XCTAssertEqual(try XCTUnwrap(number("stamped")), start + 3_600_000, accuracy: 1000, "the press read the date after the sleep")
+
+        ExactSession.machineDate = { Date(timeIntervalSinceNow: 7200) }
+        session.runtime.held = true
+        session.followOffset()
+        session.runtime.held = false
+        _ = session.runtime.takeHeldCalls()
+        session.followOffset()
+        waitFor("the refused date, told at the next check") { number("epoch").map { abs($0 - (start + 7_200_000)) < 1000 } ?? false }
+        #endif
+    }
+
     func testTargetedLayoutDigestStaysWithEachSessionsNode() throws {
         #if os(macOS)
         let a = ExactApp.shared.makeSession(), b = ExactApp.shared.makeSession()
@@ -184,12 +228,14 @@ final class SessionClockTimerTests: XCTestCase {
     func testAgentPreferencesReachEveryLiveSession() throws {
         #if os(macOS)
         let before = DisplayPreferences.agent
-        defer { DisplayPreferences.agent = before }
+        let reader = DisplayPreferences.agentScreenReader
+        DisplayPreferences.agentScreenReader = "off"
+        defer { DisplayPreferences.agent = before; DisplayPreferences.agentScreenReader = reader }
         DisplayPreferences.agent = (false, false)
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: dir) }
-        let source = "shape Preferences\n  prefersReducedMotion: bool\n  prefersReducedTransparency: bool\ncomponent App\n  resource prefs = exactViewport() as shape Preferences\n  view\n    column\n      text (prefs.prefersReducedMotion ? \"reduce motion\" : \"allow motion\")\n      text (prefs.prefersReducedTransparency ? \"reduce transparency\" : \"allow transparency\")\n"
+        let source = "shape Preferences\n  screenReader: string\n  prefersReducedMotion: bool\n  prefersReducedTransparency: bool\ncomponent App\n  resource prefs = exactViewport() as shape Preferences\n  view\n    column\n      text prefs.screenReader\n      text (prefs.prefersReducedMotion ? \"reduce motion\" : \"allow motion\")\n      text (prefs.prefersReducedTransparency ? \"reduce transparency\" : \"allow transparency\")\n"
         try source.write(to: dir.appendingPathComponent("app.contract"), atomically: true, encoding: .utf8)
         let compiler = Process()
         compiler.executableURL = URL(fileURLWithPath: try XCTUnwrap(ProcessInfo.processInfo.environment["EXACT_CONTRACT"], "build.mjs --test builds the Contract compiler and names it"))
@@ -202,10 +248,12 @@ final class SessionClockTimerTests: XCTestCase {
         for session in [a, b] {
             XCTAssertNil(session.boot(plan: plan, size: CGSize(width: 390, height: 844)).error)
         }
-        let reply = a.agentInstance.prefer(["media": ["prefers-reduced-motion": "reduce", "prefers-reduced-transparency": "reduce"]])
+        XCTAssertTrue(a.presenter.views.values.contains { $0.props["text"] == "off" })
+        let reply = a.agentInstance.prefer(["media": ["prefers-reduced-motion": "reduce", "prefers-reduced-transparency": "reduce"], "page": ["screen-reader": "on"]])
         XCTAssertNil(reply["error"])
         for session in [a, b] {
             let words = session.presenter.views.values.compactMap { $0.props["text"] }
+            XCTAssertTrue(words.contains("on"), "\(session.label): \(words)")
             XCTAssertTrue(words.contains("reduce motion"), "\(session.label): \(words)")
             XCTAssertTrue(words.contains("reduce transparency"), "\(session.label): \(words)")
         }
@@ -213,6 +261,13 @@ final class SessionClockTimerTests: XCTestCase {
         defer { c.destroy() }
         XCTAssertNil(c.boot(plan: plan, size: CGSize(width: 390, height: 844)).error)
         XCTAssertTrue(c.presenter.views.values.contains { $0.props["text"] == "reduce motion" })
+        XCTAssertTrue(c.presenter.views.values.contains { $0.props["text"] == "on" })
+        for reading in ["off", "unknown", "on"] {
+            XCTAssertNil(a.agentInstance.prefer(["page": ["screen-reader": reading]])["error"])
+            for session in [a, b, c] {
+                XCTAssertTrue(session.presenter.views.values.contains { $0.props["text"] == reading })
+            }
+        }
         #endif
     }
 

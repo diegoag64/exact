@@ -154,10 +154,10 @@ pub struct Request {
     /// [`Request::idle_timeout`].
     pub idle_timeout_ms: Option<u32>,
     /// The body is this app file's bytes (`app:/…`), read by the host when it
-    /// runs the request, under the `fs.read` grant, at most
-    /// [`MAX_BODY_FROM_BYTES`]: the bytes never cross the source. `body` is
+    /// runs the request, under the `fs.read` grant, streamed from disk with
+    /// no size bound of Exact's: the bytes never cross the source. `body` is
     /// then empty. Set by TypeScript's `fetch(url, {exactBodyFrom})` and
-    /// [`Request::body_from`] (LLP 1108 D6 R2).
+    /// [`Request::body_from`] (LLP 1108 D6 R2, LLP 1133.008.000 D4).
     pub body_from: Option<String>,
     /// A 2xx reply's body is written to this app file (`app:/…`) by the
     /// host as it arrives, under the `fs.write` grant, and never crosses the
@@ -261,9 +261,6 @@ pub struct Retrying {
 /// The host's live view of its long polls' waits (D8), by stream ticket;
 /// `None` for a ticket that is not waiting.
 pub type RetryReader = std::sync::Arc<dyn Fn(u64) -> Option<Retrying> + Send + Sync>;
-
-/// The largest file [`Request::body_from`] sends: 64 MiB.
-pub const MAX_BODY_FROM_BYTES: u64 = 64 << 20;
 
 /// The longest [`Request::body_from`] or [`Request::body_to`] path, in bytes.
 pub const MAX_BODY_FROM_PATH: usize = 4096;
@@ -778,23 +775,31 @@ impl Request {
     }
 
     /// Why this request's idle timeout is refused, if it is: zero, over
-    /// [`MAX_TIMEOUT_MS`], or on anything but a WebSocket stream (LLP
-    /// 1016.000 D11). Every host asks it with [`Request::timeout_refusal`].
+    /// [`MAX_TIMEOUT_MS`], or on anything but a WebSocket, event or byte
+    /// stream, which an upload, a long poll and a listener are not (LLP
+    /// 1016.000 D11). A URL that names no scheme is the web's same-origin
+    /// HTTP, as an upload's is. Every host asks it with
+    /// [`Request::timeout_refusal`].
     pub fn idle_timeout_refusal(&self) -> Option<&'static str> {
         let ms = self.idle_timeout_ms?;
-        let socket = self.stream
+        let scheme = (self.url.split_once(':').map(|(scheme, _)| scheme)).filter(|s| {
+            s.starts_with(|c: char| c.is_ascii_alphabetic())
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        });
+        let taken = self.stream
             && self.listen.is_none()
             && self.long_poll.is_none()
             && !self.upload_progress
-            && ["ws:", "wss:"].iter().any(|scheme| {
-                self.url
-                    .get(..scheme.len())
-                    .is_some_and(|s| s.eq_ignore_ascii_case(scheme))
+            && scheme.is_none_or(|scheme| {
+                ["ws", "wss", "http", "https"]
+                    .iter()
+                    .any(|known| scheme.eq_ignore_ascii_case(known))
             });
         if ms == 0 || ms > MAX_TIMEOUT_MS {
             Some("an idle timeout must be 1 to 3600000 ms")
-        } else if !socket {
-            Some("only a WebSocket stream takes an idle timeout")
+        } else if !taken {
+            Some("only a WebSocket, event or byte stream takes an idle timeout")
         } else {
             None
         }
@@ -848,8 +853,10 @@ impl Request {
         listen.refusal().map(str::to_string)
     }
 
-    /// Yield to a host-owned executor without inventing a network URL or grant.
-    pub fn continuation(token: u64) -> Self {
+    /// Yield to a host-owned executor without inventing a network URL or
+    /// grant, for a source `S` that declares it hands out such work
+    /// ([`crate::HostWork`], LLP 1047.001 D12).
+    pub fn continuation<S: crate::HostWork + ?Sized>(token: u64) -> Self {
         Self {
             continuation: Some(token),
             ..Self::get("")
@@ -1259,6 +1266,10 @@ impl Drop for Reply {
 pub enum Work {
     /// Runs on the host's I/O worker; what it returns is the outcome.
     Now(Box<dyn FnOnce() -> Outcome + Send>),
+    /// A driver response, returned only after the HTTP executor prepares the
+    /// request's file body and checks its abort and deadline. Prefetch and its
+    /// foreground fallback can each ask the same response provider.
+    HttpResponse(std::sync::Arc<dyn Fn() -> Outcome + Send + Sync>),
     /// Hands the reply to another owner and returns at once; the outcome
     /// arrives when that owner sends it. The I/O worker is never held
     /// while a module computes (LLP 1027.002 D4).
@@ -1326,8 +1337,12 @@ pub struct CompletionTiming {
 
 /// A request the host is to run: its ticket, the resource or mutation it
 /// answers, and the request. Taken by [`Runner::take_requests`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct RequestOut {
+    /// Runner-issued authority, shared with this request's lifetime record and
+    /// integer entry (LLP 1172.019 Carry). Retained work keeps it after UI
+    /// retirement; synthetic host work has none.
+    pub completion: Option<crate::runner::CompletionReply>,
     /// Names the reply: [`Runner::fulfill`] takes it back.
     pub ticket: u64,
     /// The resource's or mutation's name.
@@ -1338,6 +1353,31 @@ pub struct RequestOut {
     pub class: RequestClass,
     /// The app forced it (`refresh`): the executor bypasses its cache.
     pub forced: bool,
+}
+
+// Authority is separate from the work value: replay and full/incremental
+// comparisons must agree across sessions (LLP 1172.005 E10).
+impl PartialEq for RequestOut {
+    fn eq(&self, other: &Self) -> bool {
+        self.ticket == other.ticket
+            && self.target == other.target
+            && self.request == other.request
+            && self.class == other.class
+            && self.forced == other.forced
+    }
+}
+impl Eq for RequestOut {}
+
+impl std::fmt::Debug for RequestOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestOut")
+            .field("ticket", &self.ticket)
+            .field("target", &self.target)
+            .field("request", &self.request)
+            .field("class", &self.class)
+            .field("forced", &self.forced)
+            .finish()
+    }
 }
 
 #[cfg(test)]
@@ -1403,7 +1443,7 @@ mod scheduling_tests {
         for request in [
             Request::get("https://example.test"),
             Request::post_json("https://example.test", "{}"),
-            Request::continuation(1),
+            Request::continuation::<crate::host_work::TestWork>(1),
             Request::storage(vec![]),
         ] {
             assert_eq!(request.http, HttpScheduling::Ordered);

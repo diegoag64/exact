@@ -173,7 +173,7 @@ impl World {
         }
         d.resources
             .retain(|name, _| self.resources.contains_key(name));
-        for (&name, storage) in &self.resources {
+        for (&name, storage) in self.resources.iter() {
             if !ambient_resources && self.registry[name].ambient {
                 continue;
             }

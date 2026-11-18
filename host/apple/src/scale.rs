@@ -17,7 +17,8 @@ pub(crate) fn kernel(measurer: Box<dyn TextMeasurer>) -> Kernel {
     } else {
         Column::Ios
     });
-    let mut kernel = Kernel::new(measurer);
+    // Grid layout is the composition's to link (`link::Grammars`).
+    let mut kernel = Kernel::by_use(measurer);
     kernel.set_pixel_borders();
     kernel
 }
@@ -66,6 +67,7 @@ impl<D: DataSource> Host<D> {
 /// only after its first boot lays that one out at the defaults.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct LaunchLayout {
+    pub flat_nodes: bool,
     pub root_font_size: Option<f32>,
     pub display_scale: Option<f32>,
     /// The scale Canvas 2D backs its bitmaps at (`exact_canvas_display`):
@@ -78,6 +80,7 @@ pub(crate) struct LaunchLayout {
 }
 impl LaunchLayout {
     pub const NONE: Self = Self {
+        flat_nodes: false,
         root_font_size: None,
         display_scale: None,
         canvas_scale: None,

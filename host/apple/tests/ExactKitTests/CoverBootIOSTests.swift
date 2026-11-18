@@ -49,7 +49,7 @@ final class CoverBootIOSTests: XCTestCase {
         let env = try XCTUnwrap(Agent(session: session).layout()["env"] as? [String: Any])
         XCTAssertEqual(try XCTUnwrap(env["safe-area-inset-bottom"] as? Double), Double(view.safeAreaInsets.bottom), accuracy: 0.01)
         XCTAssertEqual(try XCTUnwrap(env["safe-area-inset-left"] as? Double), Double(view.safeAreaInsets.left), accuracy: 0.01)
-        let navigation = session.presenter.navigation
+        let navigation = session.presenter.navigationHost
         let route = try XCTUnwrap(navigation.activeRoute)
         route.navigationController?.view.layoutIfNeeded()
         route.view.layoutIfNeeded()

@@ -20,10 +20,12 @@ mod find;
 mod foresee;
 mod keys;
 pub mod looks;
+mod owners;
+pub use owners::OwnerInst;
 mod rare;
 mod region;
+mod retire;
 pub mod tabs;
-mod text;
 pub mod theme;
 mod trapped;
 use trapped::Evaluated;
@@ -80,24 +82,19 @@ type CreateList = fn(
     NodesId,
     ViewId,
     &[Frame],
-) -> Result<Option<Box<collection::Collection>>, InstanceError>;
-/// A list's data update, given its end-follow policy, scroll behavior and
-/// `keep-mounted` value.
+    &mut Vec<Child>,
+) -> Result<Option<Box<dyn rare::ListState>>, InstanceError>;
 type UpdateList = fn(
-    &mut collection::Collection,
+    &mut dyn rare::ListState,
     &mut Update<'_>,
-    &[Frame],
-    bool,
-    bool,
-    Option<&Value>,
-    [Option<&Value>; 2],
+    collection::DataUpdate<'_>,
 ) -> Result<(), InstanceError>;
 type ListTypography = fn(&mut [Child], &mut Update<'_>, &[Frame]) -> Result<(), InstanceError>;
 
 /// The list engine.
 pub static LISTS: ListLinks = ListLinks {
-    create: collection::Collection::create,
-    update: collection::update_collection,
+    create: collection::create_state,
+    update: collection::update_state,
     typography: collection::invalidate_typography,
     collections_json: collection::collections_json,
     into_view: Tree::scroll_into_view,
@@ -121,7 +118,7 @@ use errors::invalid;
 pub use errors::InstanceError;
 
 /// One realized node.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NodeInst {
     /// The site.
     pub node: NodesId,
@@ -148,14 +145,14 @@ pub struct NodeInst {
     around: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Child {
     Node(NodeInst),
     Region(RegionInst),
 }
 
 /// One realized region.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RegionInst {
     region: RegionsId,
     active: Active,
@@ -164,7 +161,7 @@ pub struct RegionInst {
     subject: Option<Value>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Active {
     /// `if` / `match`: the active arm and its roots.
     Arm {
@@ -196,7 +193,7 @@ impl ArmFrame {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Row {
     key: Value,
     /// Which repeat of `key` this row is: 0 for the first; the data gave the
@@ -248,7 +245,29 @@ pub struct Ids {
     pub(crate) tabs: tabs::Tabs, // tab panels waiting for their first selection (tabs.rs)
 }
 
+/// A refused render restores ownership; view IDs and work counters keep advancing.
+#[derive(Debug)]
+pub(crate) struct IdsCheckpoint {
+    sites: exact_kernel::id::IdMap<ViewId, NodesId>,
+    theme: theme::ThemeIndex,
+    tabs: tabs::Tabs,
+}
+
 impl Ids {
+    pub(crate) fn checkpoint(&self) -> IdsCheckpoint {
+        IdsCheckpoint {
+            sites: self.sites.clone(),
+            theme: self.theme.clone(),
+            tabs: self.tabs.clone(),
+        }
+    }
+
+    pub(crate) fn restore(&mut self, saved: IdsCheckpoint) {
+        self.sites = saved.sites;
+        self.theme = saved.theme;
+        self.tabs = saved.tabs;
+    }
+
     fn fresh(&mut self) -> ViewId {
         self.next += 1;
         self.next
@@ -279,7 +298,6 @@ impl Ids {
         });
     }
 
-    /// A binding of `node`'s evaluated, and whether it came out as before.
     fn evaluated(&mut self, node: NodesId, unchanged: bool) {
         if let Some(w) = self.work.sites.get_mut(node.0 as usize) {
             w.evaluated += 1;
@@ -302,7 +320,7 @@ pub fn value_json(value: &Value, out: &mut String) {
         }
         Value::Number(_) | Value::Unit | Value::Option(None) => out.push_str("null"),
         Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
-        v @ exact_plan::str_value!() => crate::agent::quote(v.text(), out),
+        v @ exact_plan::str_value!() => crate::json::quote(v.text(), out),
         Value::Option(Some(v)) => value_json(v, out),
         Value::List(items) | Value::Record(items) => {
             out.push('[');
@@ -345,7 +363,7 @@ impl SurfaceUpdate {
                 out.push(',');
             }
             if named {
-                crate::agent::quote(&self.names[i], &mut out);
+                crate::json::quote(&self.names[i], &mut out);
                 out.push(':');
             }
             value_json(value, &mut out);
@@ -402,6 +420,12 @@ pub struct Update<'a> {
     pub full: bool,
     /// Rows an action wrote since the last update.
     pub rows: RowWrites,
+    /// Resources a child declares whose request in some instance shows
+    /// something new since the last update (LLP 1035.005.004 D2).
+    pub owned: Vec<usize>,
+    /// Mutations a child declares whose `pending` or failure in some
+    /// instance changed since the last update (D6).
+    pub owned_sends: Vec<usize>,
     /// Inputs changed since the tree last updated; `None` outside
     /// [`Tree::update`], where everything is stale.
     changed: Option<Bits>,
@@ -438,7 +462,7 @@ pub struct Update<'a> {
     /// them `renewed`.
     pub renewed: Vec<ViewId>,
     /// List rows mounted out of their port, and those that showed (LLP 1055 D13).
-    pub shown: collection::shown::RowsShown,
+    pub shown: crate::list_api::RowsShown,
     /// Rebind retiring list rows to new items (LLP 1078), as the runner was
     /// told ([`crate::Runner::set_row_reuse`]).
     pub reuse: bool,
@@ -474,6 +498,8 @@ impl<'a> Update<'a> {
             work: InstanceWork::default(),
             full: false,
             rows: RowWrites::default(),
+            owned: Vec::new(),
+            owned_sends: Vec::new(),
             changed: None,
             dirty_frames: 0,
             dirty_fields: 0,
@@ -699,7 +725,6 @@ fn roots_of(children: &[Child]) -> Vec<ViewId> {
     out
 }
 
-/// The first of [`roots_of`], without collecting the rest.
 fn first_root(children: &[Child]) -> Option<ViewId> {
     children.iter().find_map(|c| match c {
         Child::Node(n) => Some(n.view),
@@ -819,9 +844,10 @@ impl NodeInst {
         let realized = (|| {
             let wait = tabs::wait(u, node, view);
             if let Some(lists) = lists.filter(|_| !wait) {
-                inst.set_collection((lists.create)(u, node, view, frames)?);
+                let collection = (lists.create)(u, node, view, frames, &mut inst.children)?;
+                inst.set_list(collection);
             }
-            if !wait && inst.collection().is_none() {
+            if !wait && inst.list().is_none() {
                 inst.children = realize(u, Some(node), row.arm, frames)?;
                 inst.emit_children(u);
             }
@@ -1164,7 +1190,7 @@ impl NodeInst {
         frames: &[Frame],
     ) -> Result<(), InstanceError> {
         let plan = u.env.plan;
-        let follow = self.collection().is_some()
+        let follow = self.list().is_some()
             && plan
                 .node(self.node)
                 .bindings
@@ -1176,33 +1202,35 @@ impl NodeInst {
                 })
                 .is_some_and(|i| self.emitted(plan, u.sites, i) == Some(Value::Bool(true)));
         let keep = self
-            .collection()
+            .list()
             .and_then(|_| self.bound_prop(plan, u.sites, exact_kernel::PropId::KeepMounted));
-        let smooth = self.collection().is_some()
+        let smooth = self.list().is_some()
             && self
                 .bound_style(plan, u.sites, exact_kernel::StyleId::ScrollBehavior)
                 .is_some_and(|value| value.as_str() == Some("smooth"));
         // Its estimate and its gap, read again as they change (`sizing.rs`).
         use exact_kernel::PropId::{EstimatedItemHeight, EstimatedItemWidth};
         let estimate = (self
-            .collection()
+            .list()
             .map(|_| self.bound_prop(plan, u.sites, EstimatedItemWidth)))
         .and_then(|w| w.or_else(|| self.bound_prop(plan, u.sites, EstimatedItemHeight)));
-        let gap = (self.collection())
+        let gap = (self.list())
             .and_then(|_| self.bound_style(plan, u.sites, exact_kernel::StyleId::ColumnGap));
-        if let Some(collection) = self.collection_mut() {
-            collection.around = theme::Around {
-                retheme: false,
-                ..u.theme.clone()
-            };
+        if self.list().is_some() {
+            update_all(u, &mut self.children, frames)?;
+        }
+        if let Some(list) = self.rare.as_mut().and_then(|r| r.collection.as_deref_mut()) {
             (u.env.lists.ok_or_else(unlinked)?.update)(
-                collection,
+                list,
                 u,
-                frames,
-                follow,
-                smooth,
-                keep.as_ref(),
-                [estimate.as_ref(), gap.as_ref()],
+                collection::DataUpdate {
+                    frames,
+                    follow,
+                    smooth,
+                    keep: keep.as_ref(),
+                    sizing: [estimate.as_ref(), gap.as_ref()],
+                    children: &self.children,
+                },
             )?;
         } else if update_all(u, &mut self.children, frames)? {
             self.emit_children(u);
@@ -1213,7 +1241,7 @@ impl NodeInst {
     fn destroy(self, u: &mut Update<'_>) {
         // Destroying the view destroys its subtree in the kernel; the instance
         // tree just drops.
-        collection::work::retire_node(u, &self);
+        retire::retire_node(u, &self);
         u.ops.push(Op::DestroyView { id: self.view });
     }
 }
@@ -1226,8 +1254,10 @@ pub(crate) fn invalid_face(view: ViewId, text: String, then: &str) -> String {
 }
 
 /// The root of the instance tree: the plan's top-level sites.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Tree {
+    #[cfg(test)]
+    pub(crate) collection_walks: usize,
     has_collections: bool,
     children: Vec<Child>,
     last_roots: Vec<ViewId>,
@@ -1242,6 +1272,8 @@ impl Tree {
     pub fn create(u: &mut Update<'_>) -> Result<Tree, InstanceError> {
         let children = realize(u, None, None, &[])?;
         let mut tree = Tree {
+            #[cfg(test)]
+            collection_walks: 0,
             has_collections: u.env.plan.bindings.iter().any(|b| {
                 b.kind == BindingKind::Prop
                     && b.id == exact_kernel::PropId::Virtualized as u16
@@ -1267,7 +1299,14 @@ impl Tree {
     pub fn update(&mut self, u: &mut Update<'_>) -> Result<(), InstanceError> {
         // New views cannot change the typography of already measured rows.
         let last_existing_view = u.ids.next;
-        u.changed = Some(u.sites.data.deps.changed(&self.seen, &u.env));
+        let mut changed = u.sites.data.deps.changed(&self.seen, &u.env);
+        for &i in &u.owned {
+            u.sites.data.deps.mark_resource(&mut changed, i);
+        }
+        for &i in &u.owned_sends {
+            u.sites.data.deps.mark_mutation(&mut changed, i);
+        }
+        u.changed = Some(changed);
         let roots = update_all(u, &mut self.children, &[]);
         u.changed = None;
         if roots? {
@@ -1352,8 +1391,8 @@ impl NodeInst {
         if self.view == view {
             return Some((self.node, self.tuple));
         }
-        if let Some(collection) = self.collection() {
-            if let Some(found) = collection.site(view, path) {
+        if let Some(list) = self.list() {
+            if let Some(found) = list.site(view, path) {
                 return Some(found);
             }
         }

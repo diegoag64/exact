@@ -15,7 +15,6 @@ use crate::generated::{AlignContent, ColumnFill, Direction, NodeType, StyleMask}
 use crate::id::AxisOffer;
 use crate::layout::LayoutTree;
 use crate::text::{TextMeasureRequest, TextMeasurer, TextRun};
-use crate::Dimension;
 
 /// What one container's cut publishes.
 #[derive(Debug, Default)]
@@ -516,7 +515,7 @@ pub(crate) fn container(
     // Read the height bounds as layout resolved them, border box (Taffy
     // patch 30): only layout knows whether a percentage had a definite basis
     let (min_outer, max_outer) = tree.multicol_bounds(node);
-    let definite = s.height != Dimension::Auto;
+    let definite = !s.height.is_content_sized();
     let max = max_outer.map(|v| (v - inset_v).max(0.0));
     let content = (l.size.height - inset_v).max(0.0);
     let (h, walk, used) = match (definite, max, s.column_fill) {

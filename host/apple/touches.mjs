@@ -157,6 +157,17 @@ const KEPT_IDLE = '10 minutes';
  * (null until its hello), token, log, and xcodebuild's PID, the one PID this
  * module may kill. */
 const keptPath = (udid) => resolve(tmpdir(), `exact-touches-${udid}.runner.json`);
+/** This checkout's derived data for the device's runners: xcodebuild's logs and result bundles, which nothing reads. */
+const derivedData = (udid) => resolve(ROOT, 'target/touch-runner/derived', udid);
+/** Forgets a runner whose xcodebuild has exited: its record, then this checkout's
+ * derived data for the device, which no runner uses now (a device has one at a
+ * time, under its lock). Left in place, the directory of a throwaway simulator
+ * would stay after the simulator. The directory's removal is best-effort, as
+ * nothing reads what xcodebuild writes there. */
+const forget = (udid) => {
+  rmSync(keptPath(udid), { force: true });
+  try { rmSync(derivedData(udid), { recursive: true, force: true }); } catch {}
+};
 const logTail = (log, n = 20) => { try { return readFileSync(log, 'utf8').trim().split('\n').slice(-n).join('\n'); } catch { return ''; } };
 /** Whether `pid` is still the xcodebuild a record names (a PID can be reused once it exits). */
 const isRunner = (pid, run) => alive(pid) && read('ps', ['-p', String(pid), '-o', 'command=']).stdout.includes(run);
@@ -193,7 +204,7 @@ async function retire(udid, kept) {
     for (const until = Date.now() + 3000; running() && Date.now() < until;) await new Promise((r) => setTimeout(r, 100));
   }
   if (running()) throw new Error(`the kept touch runner's xcodebuild (PID ${kept.pid}) did not exit after SIGKILL; its record ${keptPath(udid)} is kept`);
-  rmSync(keptPath(udid), { force: true });
+  forget(udid);
 }
 
 /** The device's kept runner, of runner `key`, connected and greeted for `appId`, or null. */
@@ -242,16 +253,25 @@ const simDefaults = (udid, args) => new Promise((done) => {
   p.on('close', (status, signal) => { clearTimeout(timer); done({ status: signal ? -1 : status, out, err: signal ? 'no answer in 10 s' : err }); });
 });
 /** Hold the simulator's shared launch lock through AX setup, launch and restoration.
- * The loaded runtime stays with the process. Ordinary drives perform no defaults reads or writes. */
+ * The loaded runtime stays with the process. Ordinary drives perform no defaults reads or writes.
+ * `enabled` is `'try'` for a launch that reads the tree if it can (verify, LLP 1156.006.000 D15): a simulator that
+ * will not say or take the setting is launched without the runtime, with a note, where `true` refuses. */
 export async function withAccessibilityRuntime(udid, enabled, launch, run = simDefaults) {
   return withAccessibilityLock(udid, async () => {
     if (!enabled) return launch();
     const key = 'ApplicationAccessibilityEnabled', args = [AX, key];
+    const refuse = (message) => {
+      if (enabled !== 'try') throw new Error(message);
+      console.error(`note: ${message}; launched without UIKit's accessibility runtime, so the accessibility tree is not read`);
+      return launch();
+    };
     const before = await run(udid, ['read', ...args]);
-    if (before.status !== 0 && !/does not exist|not found/.test(before.err)) throw new Error(`simulator accessibility: ${before.err}`);
+    // An unset key is no failure. `defaults` words it three ways: macOS's "does not exist", and iOS 27's "Domain … not
+    // found" and "Could not find key … in domain …", which a simulator no session has touched answers.
+    if (before.status !== 0 && !/does not exist|not found|Could not find key/.test(before.err)) return refuse(`simulator accessibility: ${before.err}`);
     if (before.status === 0 && before.out.trim() === '1') return launch();
     const set = await run(udid, ['write', ...args, '-bool', 'true']);
-    if (set.status !== 0) throw new Error(`simulator accessibility: ${set.err}`);
+    if (set.status !== 0) return refuse(`simulator accessibility: ${set.err}`);
     let carrier;
     try { carrier = await launch(); return carrier; }
     finally {
@@ -268,7 +288,7 @@ export async function withAccessibilityRuntime(udid, enabled, launch, run = simD
 /** The three keys as simulator `udid` has them (`'1'`, `'0'`, or undefined when unset), or null when it could not say. */
 async function accessibilityKeys(udid) {
   const r = await simDefaults(udid, ['read', AX]);
-  if (r.status !== 0 && !/does not exist/.test(r.err)) return null;
+  if (r.status !== 0 && !/does not exist|not found/.test(r.err)) return null;
   return Object.fromEntries(AX_KEYS.map((k) => [k, new RegExp(`^\\s*${k} = (\\d+);`, 'm').exec(r.out)?.[1]]));
 }
 /** The keys as a session finds them: the record a session killed before its end left of what it found, else read
@@ -339,7 +359,7 @@ export async function openTouches({ udid, appId, foldable }) {
           if ((gone = (await within(exited, 3000, () => 'timeout')) !== 'timeout')) break;
         }
         if (!gone) throw new Error(`the touch runner's xcodebuild (PID ${child.pid}) did not exit after SIGKILL; the device's touch lock and its record ${keptPath(udid)} are kept`);
-        rmSync(keptPath(udid), { force: true });
+        forget(udid);
       } else await retire(udid, kept);
     } catch (e) { await putBack(); throw e; } // the lock is kept while a runner may live; the keys go back regardless
     await release();
@@ -376,7 +396,7 @@ export async function openTouches({ udid, appId, foldable }) {
       }));
       // Its own session and its output in a file: it outlives this process.
       const out = openSync(log, 'w');
-      child = spawn('xcodebuild', ['test-without-building', '-xctestrun', run, '-derivedDataPath', resolve(ROOT, 'target/touch-runner/derived', udid), '-destination', `id=${udid}`, '-only-testing:ExactTouches/ExactTouches/testDrive'], { stdio: ['ignore', out, out], detached: true });
+      child = spawn('xcodebuild', ['test-without-building', '-xctestrun', run, '-derivedDataPath', derivedData(udid), '-destination', `id=${udid}`, '-collect-test-diagnostics', 'never', '-only-testing:ExactTouches/ExactTouches/testDrive'], { stdio: ['ignore', out, out], detached: true });
       closeSync(out);
       // Recorded before its hello: a driver killed while it waits leaves a runner the next one can retire.
       kept = { key: identity.key, port: null, token: bridge.env.EXACT_AGENT_TOKEN, pid: child.pid, run, log };
@@ -750,4 +770,88 @@ export async function realTap({ ask, touches, id, at, rel, drag, abandon }) {
     if (Date.now() >= deadline) { throw touchError(`${what}: no touch reached the app's window within 1 s; the runner finished at ${injected.injected?.end} (log: ${JSON.stringify(seen)}); ${SETTLE_FIRST}`); }
     await new Promise((r) => setTimeout(r, 16));
   }
+}
+
+/**
+ * Two real touches on view `id` from one aim, the tap's, taken twice: a
+ * two-finger pinch (`realPinch`) or a finger's double tap
+ * (`realDoubleTap`). `request(aim)` is the runner's request; the window's
+ * dispatch log must show exactly two new touches, both in the session, each
+ * beginning and ending.
+ */
+async function twoTouches({ ask, touches, id, at, what, request, reply, ms, abandon }) {
+  const transport = (message) => Object.assign(new Error(message), { transport: true });
+  const aimReq = { op: 'tap', id, aim: at ? { at } : true };
+  await touches.cloak?.clear();
+  const first = await ask(aimReq);
+  if (first.error) throw new Error(first.error);
+  const fg = await touches.ask({ op: 'foreground' });
+  if (fg.error) throw transport(`${what}: the touch runner: ${fg.error}`);
+  if (fg.state !== 'runningForeground') throw new Error(`${what}: the app is ${fg.state}, not in the foreground`);
+  const aim = await ask(aimReq);
+  if (aim.error) throw new Error(aim.error);
+  if (!sameAim(first.aim, aim.aim)) throw new Error(`${what}: the screen rotated or moved since aim`);
+  const a = aim.aim;
+  if (!a.fixed || !a.fixedAxes) throw new Error(`${what}: the aim has no screen coordinate axes; rebuild the iOS app`);
+  const injected = await touches.ask(request(a), RUNNER_MS + ms);
+  if (injected.error) throw transport(`${what}: the touch runner: ${injected.error}`);
+  const deadline = Date.now() + 1000;
+  const seen = [];
+  let cursor = a.seq;
+  for (;;) {
+    const page = await within(ask({ op: 'tap', log: cursor }), Math.max(deadline - Date.now(), 1), () => null);
+    if (!page) {
+      const why = `${what}: the dispatch log did not answer within 1 s of the touches; the app's carrier and the touch runner were stopped`;
+      abandon?.(why);
+      touches.end?.();
+      throw transport(why);
+    }
+    if (page.error || page.lost) throw new Error(`${what}: the dispatch log: ${page.error ?? `dropped entries past seq ${cursor}`}`);
+    seen.push(...page.log);
+    if (page.log.length) cursor = page.log[page.log.length - 1].seq;
+    if (page.truncated) continue;
+    const ids = [...new Set(seen.map((e) => e.touch))];
+    if (ids.length > 2) throw new Error(`${what}: ${ids.length} touches after seq ${a.seq}, not two: ${JSON.stringify(seen.slice(0, 8))}`);
+    const fingers = ids.map((t) => ({ began: seen.find((e) => e.touch === t && e.phase === 'began'), ended: seen.find((e) => e.touch === t && e.phase === 'ended') }));
+    if (ids.length === 2 && fingers.every((f) => f.began && f.ended)) {
+      for (const { began } of fingers) {
+        if (began.session !== a.session || began.generation !== a.generation) throw new Error(`${what}: a touch landed ${began.session == null ? `on ${began.view}, outside every session` : `in session ${began.session}`}, not in ${a.session}`);
+      }
+      return {
+        tapped: id, at: a.at, ...reply, delivery: 'platform',
+        touches: fingers.map(({ began, ended }) => ({ node: began.node, from: began.at, to: ended.at, began: began.t, ended: ended.t, moved: seen.filter((e) => e.touch === began.touch && e.phase === 'moved').length })),
+        injected: injected.injected,
+      };
+    }
+    if (Date.now() >= deadline) throw new Error(`${what}: the dispatch log did not show two touches begin and end within 1 s (log: ${JSON.stringify(seen.slice(0, 8))}); ${SETTLE_FIRST}`);
+    await new Promise((r) => setTimeout(r, 16));
+  }
+}
+
+/**
+ * A real two-finger pinch on view `id` (LLP 1057.001.000 §6): the fingers lie
+ * level about the target's middle or `at` (a point in it), 80 points apart,
+ * and spread to 80 × `scale` apart over 400 ms, as UIKit's own recognizers
+ * read a pinch.
+ */
+export function realPinch({ ask, touches, id, at, scale, abandon }) {
+  const what = `pinch #${id}`, from = 40, to = 40 * scale;
+  return twoTouches({ ask, touches, id, at, what, abandon, ms: 500, reply: { pinch: scale }, request: (a) => {
+    for (const half of [from, to]) {
+      for (const side of [-1, 1]) {
+        const point = [a.at[0] + side * half, a.at[1]];
+        if (!reaches(a, point)) throw new Error(`${what}: a finger would be at (${point}), ${outside(a)}`);
+      }
+    }
+    const [[rx, ry]] = a.fixedAxes;
+    const finger = (half, side) => [a.fixed[0] + side * half * rx, a.fixed[1] + side * half * ry];
+    return { op: 'pinch', display: a.display, screen: [finger(from, -1), finger(from, 1)], screenTo: [finger(to, -1), finger(to, 1)], over: 0.4 };
+  } });
+}
+
+/** A finger's double tap on view `id`, at its middle or `at` in it (LLP 1057.001.000 §6): two taps, the second
+ *  down 150 ms after the first. */
+export function realDoubleTap({ ask, touches, id, at, abandon }) {
+  return twoTouches({ ask, touches, id, at, what: `dblclick touch #${id}`, abandon, ms: 300, reply: { dblclick: 'touch' },
+    request: (a) => ({ op: 'tap', double: true, point: a.point, screen: a.fixed, display: a.display }) });
 }

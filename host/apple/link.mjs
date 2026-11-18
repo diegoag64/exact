@@ -40,6 +40,9 @@ export function appleProduction(app, platform, args = []) {
   return { optimize, profile: optimize === 'speed' ? 'release' : optimize };
 }
 
+/** Whether an Apple face needs the file bridge and its supportedContentTypes initializer. */
+export const hasFileParameters = intents => Object.values(intents?.tools ?? {}).some(f => (!f.doors || f.doors.includes('apple')) && Object.values(f.parameters ?? {}).some(p => p.type === 'file'));
+
 /** A Linux builder can target an ARM simulator on another machine, independently of its host CPU. */
 export function iosSimulatorTarget(arch = process.env.EXACT_IOS_SIM_ARCH ?? (process.platform === 'linux' ? 'arm64' : process.arch)) {
   const cpu = arch === 'arm64' ? 'arm64' : ['x64', 'x86_64'].includes(arch) ? 'x86_64' : null;
@@ -80,13 +83,19 @@ export function deploymentTargets(app) {
  * triple by a target flag of their own (Package.swift's
  * `EXACT_LAUNCH_PARTS_TARGET`), and the rest keeps the floor. Swift Build (a
  * Mac) puts its generated `-target` after a target's flags, so there the whole
- * package compiles at the app's minimum. */
+ * package compiles at the app's minimum. File faces also use the app's minimum:
+ * their supportedContentTypes initializer requires iOS 18. */
 export const compiledTargets = (app, trust = process.env.EXACT_UPDATE_TRUST ?? 'development', platform = process.platform) =>
-  trust === 'production' || app.manifest.launch?.length && platform !== 'linux' ? deploymentTargets(app) : { ...deploymentTargets(app), ios: '17.0' };
+  trust === 'production' || hasFileParameters(app.manifest.intents) || app.manifest.launch?.length && platform !== 'linux' ? deploymentTargets(app) : { ...deploymentTargets(app), ios: '17.0' };
 
-/** The capabilities with a Swift half, by name, and the product of
- * `Package.swift` (its `capabilities` table) each is. */
-const SWIFT_CAPABILITIES = [['grouped_lists', 'ExactGroupedLists'], ['markdown', 'ExactMarkdown'], ['surfaces', 'ExactSurfaces'], ['drag', 'ExactDrag'], ['media_picker', 'ExactMediaPicker'], ['auth_session', 'ExactAuthSession'], ['numerals', 'ExactNumerals'], ['tips', 'ExactTips'], ['presence', 'ExactPresence']];
+/** The capabilities with a Swift half, by name, and the product each is: the rows of `Package.swift`'s
+ * `allCapabilities`, the one list a family's move adds to. */
+const SWIFT_CAPABILITIES = (() => {
+  const table = readFileSync(new URL('./Package.swift', import.meta.url), 'utf8').match(/^let allCapabilities[^\n]*\n([\s\S]*?)^\]/m)?.[1] ?? '';
+  const rows = [...table.matchAll(/^\s*\("([a-z_]+)", "(Exact\w+)"\),$/gm)].map(([, name, product]) => [name, product]);
+  if (!rows.length) throw new Error('host/apple: Package.swift has no allCapabilities rows');
+  return rows;
+})();
 
 /** The capabilities a development build links only as production would
  * (LLP 1047.001.000 F): each links a framework that costs every iOS launch
@@ -249,4 +258,14 @@ export function assertLinkedSdk(executable, expected) {
       throw new Error(`host/apple: ${basename(executable)} records SDK ${recorded ?? '(none)'}, not ${expected}: AppKit would draw it in another design`);
     }
   }
+}
+
+/** This build's command, to run it again: an `exact new` app's `exact.mjs` verb (EXACT_APP_DIR, which that
+ * sets), else this script's. */
+export function rebuildArgs(args, dir = process.env.EXACT_APP_DIR) {
+  const quote = (a) => /^[\w@%+=:,./-]+$/.test(a) ? a : `'${a.replaceAll("'", "'\\''")}'`;
+  if (!dir) return `bun host/apple/build.mjs ${args.map(quote).join(' ')}`;
+  const ios = ['--ios', '--device', '--tvos'].some((flag) => args.includes(flag));
+  const rest = args.filter((a) => a !== '--ios' && !(a.endsWith('-apple') && !a.startsWith('-')));
+  return [`(cd ${quote(dir)} && bun exact.mjs ${ios ? 'ios' : 'mac'}`, ...rest.map(quote)].join(' ') + ')';
 }

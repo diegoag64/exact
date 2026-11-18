@@ -4,7 +4,7 @@
 // carrier and installer stay loopback-only. Games serve HTTP during the first build.
 import { buildingServer } from '../../game/dev.mjs';
 import { acceptModuleReply, failedPhase, phased, phasedAsync } from './dev-phase.mjs';
-import { cacheBuildInputs, nativeWatchPaths, watchDirectoryInputs, watchModuleSources } from './dev-watch.mjs';
+import { cacheBuildInputs, readDevBuilds as readBuilds, nativeWatchPaths, watchDirectoryInputs, watchModuleSources } from './dev-watch.mjs';
 import { directoryInputNames } from '../../scripts/cargo-dep-info.mjs';
 import { spawn, spawnSync } from 'node:child_process';
 let tuning = null;
@@ -17,19 +17,21 @@ import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSyn
 import { basename, dirname, isAbsolute, relative, resolve } from 'node:path';
 import { slashRelative, within } from '../../scripts/paths.mjs';
 import { rustPackage, rustOutput, rustInputs, rustCards } from '../../scripts/rust.mjs';
-import { gpuModules, shaderWatchRoots, rustPolicy, rebuildPolicy } from '../../scripts/app.mjs';
-import { HOST_DEV, webDist, cargoReproducibilityFlags, compilerPaths, developmentBuildEnv, developmentCandidate, devBinRun, pendingBuildInputs, readBuilds, resolveApp } from '../../scripts/app.mjs';
+import { currentGpuModules, gpuView } from '../../scripts/app-shells.mjs';
+import { injectedProfiles, gpuModules, shaderWatchRoots, rustPolicy, rebuildPolicy } from '../../scripts/app.mjs';
+import { HOST_DEV, webDist, cargoReproducibilityFlags, compilerPaths, developmentBuildEnv, developmentCandidate, devBinRun, pendingBuildInputs, resolveApp } from '../../scripts/app.mjs';
 import { developmentLinks } from '../apple/build.mjs';
 import { acceptsHTML, webRequestURL } from '../../scripts/origin.mjs';
 import { guardFlags } from '../../scripts/help.mjs';
 import { webPortRange } from '../../scripts/agent-launch.mjs';
 import { localInstaller } from './local-install.mjs';
 import { claimDevLoop, runBuildTree, startupBuilds, stopBuildTree } from './dev-startup.mjs';
+import { loopWebDist } from '../../scripts/web-build.mjs';
 import { designPath, frameOnlyByTool, formaServer } from '../../scripts/forma-server.mjs';
 import { pluginOnLoopback, remoteArgs } from '../../scripts/forma-remote.mjs'; import { openRemoteCanvas } from '../../scripts/forma-canvas.mjs';
 import { designDigest, patchDesign } from '../../scripts/forma-patch.mjs';
 import { relayChannel, serveCommands, serveReport, streamFrame } from '../../scripts/forma-builds.mjs';
-import { captureAssets, assetCards, alsoOnIPv6Loopback, freeOnIPv6Loopback, listenDelay, applyShaderTreeChange, sendStaticBody, watchLauncher, applyStaticChange, applyStaticTreeChange, builtAppMatches, developmentOpenPage, readDevGenerationAsync, readStaticFileAsync, readWebRequest, readModuleFile, reflectShaderFiles, saveTrace, retainDevGeneration, shaderInterfaceDigests, syncStaticTree, watchStaticTrees, webContentType, webEnvelope, devGenerationDigest, MODULE_FILES, moduleCards } from './serve.mjs';
+import { captureAssets, assetCards, alsoOnIPv6Loopback, freePort, listenDelay, applyShaderTreeChange, sendStaticBody, watchLauncher, applyStaticChange, applyStaticTreeChange, builtAppMatches, developmentOpenPage, readDevGenerationAsync, readStaticFileAsync, readWebRequest, readModuleFile, reflectShaderFiles, saveTrace, retainDevGeneration, shaderInterfaceDigests, syncStaticTree, watchStaticTrees, webContentType, webEnvelope, devGenerationDigest, MODULE_FILES, moduleCards } from './serve.mjs';
 import { fileURLToPath } from 'node:url';
 const argv = guardFlags('web', process.argv.slice(2)); // --help, or a flag it does not take, before anything starts
 const arg = (name, fallback) => { const i = argv.indexOf(name); return i >= 0 ? argv[i + 1] : fallback; };
@@ -38,27 +40,16 @@ const arg = (name, fallback) => { const i = argv.indexOf(name); return i >= 0 ? 
 const buildEnv = {...developmentBuildEnv(),EXACT_UPDATE_TRUST:'development',EXACT_WEB_LINK:'all'};
 let app, appDesign;
 try { app = resolveApp(arg('--app', undefined)); appDesign = designPath(app.dir); } catch (e) { console.error(e.message); process.exit(2); }
+if ((app.manifest.host?.web?.base ?? '/') !== '/') { console.error('host.web.base: the web/native development loop requires /; use web-build --out dist and serve dist, which rebuilds on edits'); process.exit(2); }
 if (app.outside) buildEnv.EXACT_APP_DIR = app.dir;
 if (app.manifest.game) buildEnv.EXACT_GAME_PROOF_PROFILE ??= 'gpu-dev';
 const lan = argv.includes('--lan');
-/** The first of 100 ports from `from` up that `host` can listen on: another app's loop holding 8765 is common.
- * A probe does not reserve it; a loop started at the same moment can still take it, and its listen error says so. */
-async function freePort(from, host) {
-  const range = webPortRange() ?? [from, Math.min(from + 99, 65535)];
-  for (let p = range[0]; p <= range[1]; p++) {
-    const free = await new Promise((ok) => { const t = createServer(); t.once('error', () => ok(false)); t.listen(p, host, () => t.close(() => ok(true))); });
-    // And on [::1], which a localhost URL (the design tool's canvas) reaches.
-    if (free && await freeOnIPv6Loopback(p)) return p;
-  }
-  console.error(`ports ${range[0]}–${range[1]} are all in use; --port <n> picks another`);
-  process.exit(1);
-}
 // An explicit --port (or EXACT_PORT: one variable for every listener the app's commands start) is kept, and fails
 // loudly if taken; the default moves to a free one.
 const named = argv.includes('--port') ? arg('--port') : process.env.EXACT_PORT || null;
 if (named != null && !(Number.isInteger(Number(named)) && Number(named) >= 1 && Number(named) <= 65535)) { console.error(`${argv.includes('--port') ? '--port' : 'EXACT_PORT'} ${named}: a port number, 1–65535`); process.exit(2); }
 let loopClaim; try { loopClaim = argv.includes('--serve-as') ? null : claimDevLoop(app.dir, argv.includes('--wasm') || app.manifest.game !== undefined ? 'wasm' : 'js'); } catch (error) { console.error(error.message); process.exit(1); }
-const port = named != null || argv.includes('--serve-as') ? Number(named ?? 8765) : await freePort(8765, lan ? '0.0.0.0' : '127.0.0.1');
+const port = named != null || argv.includes('--serve-as') ? Number(named ?? 8765) : await freePort(8765, lan ? '0.0.0.0' : '127.0.0.1', webPortRange());
 loopClaim?.url(`http://127.0.0.1:${port}`);
 if (port !== 8765 && named == null && !webPortRange() && !argv.includes('--serve-as')) console.log(`port 8765 is in use; serving on ${port} (--port <n> or EXACT_PORT picks one)`);
 // `--serve-as <port>` (internal): the resident loop's producers behind the
@@ -74,11 +65,11 @@ let doors = null; const remoteAsked = remoteArgs(argv, { exit: true });
 if ((remoteAsked.remote || remoteAsked.tunnel != null || remoteAsked.plugin || remoteAsked.relay) && servedAs == null && !appDesign) { const named = [remoteAsked.remote && '--remote', remoteAsked.tunnel != null && '--trust-tunnel', remoteAsked.plugin && '--allow-plugin-origin', remoteAsked.relay && '--relay'].filter(Boolean); console.error(`${named.join(' and ')} ${named.length > 1 ? 'serve' : 'serves'} the design wire: this app has no design (app.forma)`); process.exit(2); }
 const gate = developmentGate(origins, servedAs ?? port, allowHosts);
 const root = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-// An outside app's wasm loop (a game's is always one) builds apart from
-// `target/web-dist`, which the JS target's loop, `agent web` and `test web`
-// build into: no other command replaces the files this loop serves.
-if ((argv.includes('--wasm') || app.manifest.game !== undefined) && servedAs == null && app.outside && !process.env.EXACT_WEB_DIST)
-  process.env.EXACT_WEB_DIST = buildEnv.EXACT_WEB_DIST = resolve(app.target, 'web-dist-wasm');
+if (!process.env.EXACT_WEB_DIST)
+  process.env.EXACT_WEB_DIST = loopWebDist(app, argv.includes('--wasm') || app.manifest.game ? 'wasm' : 'js');
+buildEnv.EXACT_WEB_DIST = process.env.EXACT_WEB_DIST;
+process.env.EXACT_BAKE_OUTPUT ??= `${process.env.EXACT_WEB_DIST}-bake`;
+buildEnv.EXACT_BAKE_OUTPUT = process.env.EXACT_BAKE_OUTPUT;
 const dist = webDist(app);
 const source = resolve(app.dir, 'app.contract');
 // The JS target (LLP 1071): the runtime the app ships, rebuilt and reloaded
@@ -113,7 +104,7 @@ async function currentWebBuild() {
   try {
     const build = JSON.parse(readFileSync(graphPath, 'utf8'));
     return build.version === 1 && build.trust === 'development' && build.binary?.configuration?.flags?.EXACT_WEB_LINK === 'all'
-      && (!app.manifest.game || ['gpu', ...gpuModules(app.manifest).map(({name}) => `gpu-${name}`)].every(kind => build.products?.some(p => p.path === resolve(app.target, 'wasm32-unknown-unknown', buildEnv.EXACT_GAME_PROOF_PROFILE === 'gpu-dev' ? 'gpu-dev' : 'web', app.crate(kind).replaceAll('-', '_') + '.wasm'))))
+      && (!app.manifest.game || ['gpu', ...gpuModules(app.manifest, 'web').map(({name}) => `gpu-${name}`)].every(kind => build.products?.some(p => p.path === resolve(app.target, 'wasm32-unknown-unknown', buildEnv.EXACT_GAME_PROOF_PROFILE === 'gpu-dev' ? 'gpu-dev' : 'web', app.crate(kind).replaceAll('-', '_') + '.wasm'))))
       && pendingBuildInputs(build).length === 0;
   } catch { return false; }
 }
@@ -150,7 +141,7 @@ function readGpuInputs(profile = buildEnv.EXACT_GAME_PROOF_PROFILE === 'gpu-dev'
 // Every GPU artifact the web serves (LLP 1009 D6): the primary `gpu`, then
 // each declared module `gpu/<name>`, with the inputs its last link named.
 const gpuArtifacts = () => [{ stem: 'gpu', kind: 'gpu' },
-  ...gpuModules(app.manifest).map(({ name }) => ({ stem: `gpu/${name}`, kind: `gpu-${name}`, module: name }))];
+  ...gpuModules(app.manifest, 'web').map(({ name }) => ({ stem: `gpu/${name}`, kind: `gpu-${name}`, module: name }))];
 let gpuArtifactInputs = new Map();
 function gameRuntimeInputs(inputs) {
   if (!app.manifest.game || !inputs.size) return inputs;
@@ -434,7 +425,7 @@ let assetsNeedRebuild = false;
 // Browsers reload on changed web bytes; native admission uses its own build receipt.
 const programIdentity = () => {
   if (producersOnly) return JSON.parse(readFileSync(graphPath, 'utf8')).binary.sha256;
-  const files = ['app.wasm', 'gpu_bg.wasm', ...gpuModules(app.manifest).map(({ name }) => `gpu/${name}_bg.wasm`), 'markup-editor.wasm', 'textflow.wasm'].map((name) => {
+  const files = ['app.wasm', 'gpu_bg.wasm', ...gpuModules(app.manifest, 'web').map(({ name }) => `gpu/${name}_bg.wasm`), 'markup-editor.wasm', 'textflow.wasm'].map((name) => {
     const encoded = filesystem({ op: 'get', root: dist, path: name });
     if (encoded === null && name === 'app.wasm') throw new Error('the app wasm is missing');
     return { name, sha256: encoded === null ? null : createHash('sha256').update(Buffer.from(encoded, 'base64')).digest('hex') };
@@ -1102,8 +1093,14 @@ function refreshNativePending() {
 }
 refreshNativePending();
 let previousWeb=cohortReceipt(JSON.parse(readFileSync(graphPath,'utf8')));
+// A native build whose inputs changed since it was built refuses every generation, Contract-only ones too, until it is
+// rebuilt (LLP 1023 D3). The device says so; here each generation's lines say it as well (LLP 1156.006.000 D21).
+const nativeRefusals = () => builtReceipts.filter(r => r.compat.inputs.platform !== 'web').flatMap(r => {
+  const changes = nativePending.get(r.compat.target + '/' + r.compat.inputs.platform) ?? [];
+  return changes.length ? [`${r.compat.inputs.platform} ${r.compat.target}: the installed build will not take this generation until it is rebuilt and relaunched (${changes.slice(0, 3).join(', ')} changed since it was built)`] : [];
+});
 function classifyGeneration(planBytes, assets) {
-  if (currentModule || currentRust) return ['plan/module/assets: development candidate; each client verifies its admitted module identity and grants (not signed deployment classification)'];
+  if (currentModule || currentRust) return ['plan/module/assets: development candidate; each client verifies its admitted module identity and grants (not signed deployment classification)', ...nativeRefusals()];
   const web=JSON.parse(readFileSync(graphPath,'utf8'));
   const candidate=developmentCandidate(web,{sha256:createHash('sha256').update(planBytes).digest('hex'),bytes:planBytes.length},assets,shaderDigests);
   const lines=[];
@@ -1137,10 +1134,11 @@ let optionalRootsSeen = optionalRoots();
 function watchCompilerInputs(contract = contractGraph()) {
   // Poll file and directory-entry metadata: saves, replacements and new paths
   // remain visible when filesystem notifications are lost or coalesced.
-  // A Contract package's files are inputs wherever they are installed,
-  // node_modules included (LLP 1091 D10).
+  // Package Contract and GPU files are inputs wherever they are installed,
+  // node_modules included (LLP 1091 D10, LLP 1153.003 D5).
   compilerContracts = contract; for (const path of contract.sources) readinessContracts.add(path);
-  const outside=p=>skipped.test(p)&&!contract.files.has(p), cargo=p=>/[\\/]\.cargo[\\/]/.test(p);
+  const outside=p=>skipped.test(p)&&!contract.files.has(p)
+    &&!(gpuInputs.has(p)&&/[\\/]node_modules[\\/]/.test(p)), cargo=p=>/[\\/]\.cargo[\\/]/.test(p);
   // Paths in skipped trees invalidate cached native admission (`nativeValidation`) and rebuild nothing.
   const { directories: nativeTrees, files: nativeFiles, nativeOnly } = nativeWatchPaths(builtReceipts, outside, cargo);
   resourceDirectories = nativeTrees;
@@ -1289,16 +1287,17 @@ async function produceGpu(files) {
 }
 async function produceGpuArtifact(files, { stem, kind, module }) {
   const start = Date.now();
-  const profile = Bun.TOML.parse(readFileSync(resolve(app.workspace, 'Cargo.toml'), 'utf8')).profile?.['gpu-dev'] ? 'gpu-dev' : 'web';
+  const at = gpuView(app, currentGpuModules(app, 'web').find(m => m.name === module));
+  const profile = Bun.TOML.parse(readFileSync(resolve(at.workspace, 'Cargo.toml'), 'utf8')).profile?.['gpu-dev'] ? 'gpu-dev' : 'web';
   if (profile === 'web') console.log('gpu: add [profile.gpu-dev] inheriting dev, opt-level=1, no LTO, and optimized dependencies for fast module rebuilds');
   mkdirSync(gpuSideRoot, { recursive: true });
   const stage = mkdtempSync(resolve(gpuSideRoot, 'build-'));
   const run = (command, args) => runBuildTree(command, args,
-    { cwd: app.workspace, env: { ...buildEnv, CARGO_TARGET_DIR: app.target } },
+    { cwd: at.workspace, env: { ...buildEnv, CARGO_TARGET_DIR: app.target } },
     child => { gpuBuildChild = child; }, () => stopping);
   try {
     console.log(`gpu: ${files.length} source file(s) changed; building ${app.crate(kind)} (${profile})`);
-    await run('cargo', ['build',...cargoReproducibilityFlags(app),'-p',app.crate(kind),'--target','wasm32-unknown-unknown','--profile',profile]);
+    await run('cargo', ['build',...cargoReproducibilityFlags(at),...injectedProfiles(at),'-p',app.crate(kind),'--target','wasm32-unknown-unknown','--profile',profile]);
     const compiled = Date.now();
     // The side directory mirrors dist: `gpu.js`, or a module's `gpu/<name>.js`.
     await run('wasm-bindgen', ['--target','no-modules','--no-typescript','--out-dir',module ? resolve(stage, 'gpu') : stage,'--out-name',module ?? 'gpu',resolve(app.target,'wasm32-unknown-unknown',profile,app.crate(kind).replaceAll('-','_')+'.wasm')]);
@@ -1478,7 +1477,7 @@ const serve = async (req, res) => {
     sendStaticBody(req, res, body, { 'content-type': webContentType(found.route), ...(index ? { vary: 'Accept' } : {}), 'cache-control': 'no-store' });
   } catch { try { res.writeHead(404); res.end(); } catch { /* mid-write */ } }
 };
-const server = early?.server ?? createServer(serve);
+const server = early?.server ?? createServer({ maxHeaderSize: 128 * 1024 }, serve);
 let six = null; server.on('error', async (e) => { console.error(`cannot listen on ${host}:${port}: ${e.code ?? e.message}${e.code === 'EADDRINUSE' ? ' (another dev loop? --port <n> picks another)' : ''}`); six?.close(); killCompiler(); await forma?.close(); process.exit(1); });
 await readStaticFileAsync(dist, '/index.html'); if (!early) await listenDelay(process.env, firstGeneration); // warm the reader before advertising readiness (a test may wait too)
 // (and on [::1], for a localhost URL: the design tool's canvas)

@@ -236,8 +236,8 @@ final class ArrangementHost {
         return ids.allSatisfy { presenter.views[$0] != nil } ? ids : nil
     }
 
-    private func route(of node: NodeView) -> RouteController? {
-        ViewPresentation.controllers(for: node, layout: true).compactMap { $0 as? RouteController }.first
+    private func route(of node: NodeView) -> (any RouteSurface)? {
+        ViewPresentation.controllers(for: node, layout: true).compactMap { $0 as? any RouteSurface }.first
     }
 
     private func retire(_ entry: Entry) {
@@ -262,6 +262,7 @@ final class ArrangementHost {
     }
 
     private func layoutChanged() {
+        NodeView.scrollLayoutEpoch &+= 1
         guard !layoutPending else { return }
         layoutPending = true
         // Read UIKit's safe area after its current layout has finished
@@ -299,7 +300,7 @@ final class ArrangementHost {
                 // The top compares only the pane's origin, where it sits whatever block it was told.
                 let pane = holder.node, frame = pane.convert(pane.bounds, to: holder.view)
                 guard let told = presenter.owners.told[pane.id]?.block, case .size = told.height,
-                      pane.scrollView != nil, pane.scrollsVertically, pane.transform.isIdentity, pane.clipPath == nil, NavigationHost.inFlow(pane) else { return false }
+                      pane.scrollView != nil, pane.scrollsVertically, pane.transform.isIdentity, pane.clipPath == nil, RouteGeometry.inFlow(pane) else { return false }
                 if top { return abs(frame.minY) < 1 }
                 return BottomReach.reaches(pane, end: frame.maxY, told: told, slack: slack, held: &reaches[pane.id])
             }) else { return [] }
@@ -312,7 +313,7 @@ final class ArrangementHost {
     private func reachesEdge(_ node: NodeView, in route: NodeView, top: Bool) -> CGFloat? {
         var child = node, slack: CGFloat = 0
         while child !== route {
-            guard !child.isHidden, NavigationHost.inFlow(child) else { return nil }
+            guard !child.isHidden, RouteGeometry.inFlow(child) else { return nil }
             var up = child.superview
             while let view = up, !(view is NodeView) {
                 guard !(view is UIScrollView), view.transform.isIdentity, view.layer.mask == nil else { return nil }
@@ -338,13 +339,14 @@ final class ArrangementHost {
     }
 
     private func syncInsets() {
+        NodeView.scrollLayoutEpoch &+= 1
         guard !syncingInsets else { return }
         syncingInsets = true
         defer { syncingInsets = false }
         adoptOwners()
         syncSafeAreas()
         var now: [UInt32: UIScrollView] = [:]
-        for route in presenter.navigation.controllers.values where !NavigationHost.insetsNoTop(route.node) {
+        for route in presenter.navigation.routeSurfaces.values where !RouteGeometry.insetsNoTop(route.node) {
             for node in scrollers(in: route.node, top: true) + scrollers(in: route.node, top: false) {
                 now[node.id] = node.scrollView
             }
@@ -358,7 +360,7 @@ final class ArrangementHost {
                 let top = node.pendingScrollTop.map { CGFloat($0) } ?? saved ?? (scroll.contentOffset.y + node.scrollTopInset(scroll))
                 node.hiddenScroll = CGPoint(x: scroll.contentOffset.x, y: top)
             }
-            if let node, presenter.navigation.controllers.values.contains(where: { $0.collapseScroll === node || $0.edgeScroll === node }) { continue }
+            if let node, presenter.navigation.routeSurfaces.values.contains(where: { $0.collapseScroll === node || $0.edgeScroll === node }) { continue }
             let top = scroll.contentOffset.y + (node?.scrollTopInset(scroll) ?? scroll.adjustedContentInset.top)
             scroll.contentInsetAdjustmentBehavior = .never
             node?.scrollOrigin = 0; node?.scrollCollapsed = 0
@@ -482,44 +484,6 @@ final class ArrangementHost {
 
 #if os(iOS) || os(tvOS)
 import UIKit
-
-extension NavigationHost {
-    /// Follow neutral wrappers only while the named scroller remains the first content at their top
-    static func topScroller(_ start: NodeView, target: NodeView?) -> NodeView? {
-        guard let target else { return nil }
-        var node = start
-        while node !== target {
-            guard node.scrollView == nil, !node.bounds.isEmpty, node.transform.isIdentity,
-                  CATransform3DIsIdentity(node.layer.transform),
-                  !node.overflowClips, node.clipPath == nil,
-                  node.contentBox().minY <= 0.5 else { return nil }
-            let children = node.container.subviews.compactMap { $0 as? NodeView }.filter(flowingTopContent)
-            guard let first = children.first, abs(first.frame.minY - node.contentBox().minY) < 1,
-                  children.allSatisfy({ $0 === first || $0.frame.minY >= first.frame.maxY - 0.5 }) else { return nil }
-            node = first
-        }
-        return target.scrollView == nil ? nil : target
-    }
-
-    static func flowingTopContent(_ node: NodeView) -> Bool {
-        (!node.isHidden || node.presenter?.menus.isLaidOut(node) == true) && inFlow(node)
-    }
-
-    func arrangementScrollers(in route: RouteController, top: Bool) -> [NodeView] {
-        #if os(iOS)
-        if #available(iOS 27.1, *), !Self.insetsNoTop(route.node) { return presenter.arrangements.scrollers(in: route.node, top: top) }
-        #endif
-        return []
-    }
-
-    func arrangementInsets(_ scroll: UIScrollView, in route: RouteController) -> Bool {
-        arrangementPeers(in: route).contains { $0.scrollView === scroll }
-    }
-
-    func arrangementPeers(in route: RouteController) -> [NodeView] {
-        arrangementScrollers(in: route, top: true) + arrangementScrollers(in: route, top: false)
-    }
-}
 
 extension Presenter {
     func arrangementHides(_ id: UInt32) -> Bool {

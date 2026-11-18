@@ -1,8 +1,8 @@
-import {test, expect} from 'bun:test';
+import {test, expect, spyOn} from 'bun:test';
 import {mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, realpathSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {resolve} from 'node:path';
-import {gameDefaults, gameShells, sharesAppleEntry} from './shells.mjs';
+import {gameDefaults, gameShells, renderGraph, sharesAppleEntry} from './shells.mjs';
 
 test('external shells use the SDK toolchain and refresh stale generated pins', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'exact-shell-toolchain-'));
@@ -117,6 +117,23 @@ test('a declared app data crate is linked into generated game hosts', () => {
   } finally { rmSync(dir, {recursive:true, force:true}); }
 });
 
+test('a game with an update store is refused before its shells are generated', () => {
+  const dir = mkdtempSync(resolve(tmpdir(), 'exact-store-shell-'));
+  const shells = () => gameShells(dir, gameDefaults(dir).game, resolve(import.meta.dir, '..'));
+  try {
+    mkdirSync(resolve(dir, 'logic/src'), {recursive:true});
+    writeFileSync(resolve(dir, 'logic/src/lib.rs'), 'impl Game for Island { const ID: &\'static str = "island"; }');
+    for (const platform of ['android', 'ios', 'macos', 'linux', 'windows', 'web']) {
+      writeFileSync(resolve(dir, 'app.json'), JSON.stringify({deploy:{store:{[platform]:'A'}}}));
+      expect(shells).toThrow(`deploy.store.${platform} is "A", but games take no over-the-air updates today`);
+      expect(existsSync(resolve(dir, '.shells'))).toBe(false);
+    }
+    writeFileSync(resolve(dir, 'app.json'), JSON.stringify({deploy:{store:{android:'0', ios:'0'}}}));
+    shells();
+    expect(existsSync(resolve(dir, '.shells/android/Cargo.toml'))).toBe(true);
+  } finally { rmSync(dir, {recursive:true, force:true}); }
+});
+
 test('render declarations fail before creating or changing generated files', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'exact-render-declaration-'));
   const valid = {crate:'island-render', hooks:'view::Hooks', shaders:'shaders::REGISTRY'};
@@ -218,7 +235,9 @@ test('the bake writes the render crate its assembled shader inventory, engine pr
     gameShells(dir, gameDefaults(dir).game, resolve(import.meta.dir, '..'));
     const frame = readFileSync(resolve(import.meta.dir, '../render/src/shaders/frame.wgsl'), 'utf8');
     expect(readFileSync(resolve(dir, '.shells/shaders/sky.wgsl'), 'utf8')).toBe(`${frame}\n// sky body\n`);
-    expect(readFileSync(resolve(dir, '.shells/.cargo/config.toml'), 'utf8')).toContain(`EXACT_GAME_SHADERS = ${JSON.stringify(resolve(realpathSync(dir), '.shells/shaders'))}`);
+    const config = readFileSync(resolve(dir, '.shells/.cargo/config.toml'), 'utf8');
+    expect(config).toContain(`EXACT_GAME_SHADERS = ${JSON.stringify(resolve(realpathSync(dir), '.shells/shaders'))}`);
+    expect(config).toContain(`build-dir = ${JSON.stringify(resolve(realpathSync(dir), 'target'))}`);
   } finally { rmSync(dir, {recursive:true, force:true}); }
 });
 
@@ -273,3 +292,38 @@ test('a lock captured before the shared Apple host keeps the game on its own hos
     expect(sharesHost()).toBe(true);
   } finally { rmSync(dir, {recursive:true, force:true}); }
 });
+
+test('the bake warns when logic can enable a renderer dependency', () => {
+  const logic = { id: 'logic', name: 'sample-logic', dependencies: [] };
+  const metadata = { packages: [logic], workspace_members: ['logic'], resolve: { nodes: [] } };
+  const game = { crate: logic.name };
+  const warn = spyOn(console, 'warn').mockImplementation(() => {});
+  try {
+    renderGraph(metadata, game);
+    expect(warn).not.toHaveBeenCalled();
+    logic.dependencies.push({ name: 'exact-game-render', rename: 'renderer', optional: true, kind: null });
+    renderGraph(metadata, game);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith('warning: hook code in the logic crate: its optional features are outside the determinism lint run, and the logic crate can name renderer types; move it to render/');
+    warn.mockClear();
+    logic.dependencies = [{ name: 'exact-game-render', optional: false, kind: null, target: 'cfg(unix)' }];
+    renderGraph(metadata, game);
+    expect(warn).toHaveBeenCalledTimes(1);
+  } finally {
+    warn.mockRestore();
+  }
+});
+
+for (const kind of ['dev', 'build']) {
+  test(`the bake does not warn about a ${kind} dependency on the renderer`, () => {
+    const logic = { id: 'logic', name: 'sample-logic', dependencies: [{ name: 'exact-game-render', kind }] };
+    const metadata = { packages: [logic], workspace_members: ['logic'], resolve: { nodes: [] } };
+    const warn = spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      renderGraph(metadata, { crate: logic.name });
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+}

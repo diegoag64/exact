@@ -7,7 +7,8 @@
 // `authoredTests`; agent-test.mjs `runTests`), launches the app on a fresh scratch store at a phone width and a desktop
 // width (iOS: the simulator's own size, with UIKit's bars), and runs `check` light and dark there, having read the screen's
 // accessibility tree once (verify-ax.mjs). Each test's end screen is checked the same way inside the test's own session (the web at both
-// widths, resized to each), so its secondary screens and populated states are in the report. Then the app
+// widths, resized to each), so its secondary screens and populated states are in the report. An end on a system alert
+// gets one finding asking the test to answer it; its screen is left unjudged, including at the largest text size. Then the app
 // relaunches once on the store a passing test left, on real time (at most REAL_MS) and under the zone, locale and seed
 // the test launched with and the date it had reached (its launch date plus its `clock` steps, as a `reload` relaunches,
 // LLP 1116.007 D3.4, LLP 1116.009 D1), and its first screen is compared with a fresh launch's under the same (the
@@ -218,7 +219,8 @@ export function storedTexts(state) {
  * amount, a form the app refused with its error), so their values are left out of the comparison; and `saved`, the fields that
  * showed a value the app kept and now show another. A field is compared like any text only when the app kept what it showed and
  * the reloaded field shows something it did not keep: focus-timer's settings reloaded with 25 and 5 over the saved 30 and 10.
- * What the app kept is what its state and resources hold both before and after the reload (`storedTexts` of each); a field that
+ * A field marked invalid is a draft even if another saved record holds the same text. Otherwise, what the app kept is what
+ * its state and resources hold both before and after the reload (`storedTexts` of each); a field that
  * shows what is kept after the reload (the water tracker's refused 0, then its saved goal) is the app doing as it should. */
 function typedFields(before, after, touched, states) {
   const was = storedTexts(states?.before), now = storedTexts(states?.after);
@@ -228,7 +230,7 @@ function typedFields(before, after, touched, states) {
   const drafts = new Set(), saved = [];
   for (const id of ids) {
     const there = (before ?? []).find((n) => field(n, id)), here = (after ?? []).find((n) => field(n, id));
-    if (!(has(value(there)) && (!here || !has(value(here))))) drafts.add(id);
+    if (['true', 'grammar', 'spelling'].includes(there.props?.accessibilityInvalid) || !(has(value(there)) && (!here || !has(value(here))))) drafts.add(id);
     else if (here) saved.push({ kind: 'field', id, was: value(there), now: value(here) });
   }
   return { drafts, saved };
@@ -350,6 +352,10 @@ async function reloadEnd(s, t, persisted = []) {
 /** `check both` on the session at each of `sizes` (null: as it is; else resized to it first), a run per size and scheme
  * tagged with its `screen`; a resource that failed is a line of each. `shot(viewport, scheme)` names a capture to keep.
  * With `ax`, the screen's accessibility tree is read once first, as it stands, and kept as the runs' `ax` (LLP 1166.002 D1). */
+/** Whether a launch verify reads the accessibility tree of asks the host to load its accessibility runtime: UIKit's
+ * loads only for an assistive technology, and a simulator has none, so every screen's tree would come back unread
+ * (`open`'s `ax`, as a drive that asks `tree --ax` passes it; LLP 1156.006.000 D15). */
+const readsAx = (host) => host === 'ios' && 'try'; // if the simulator allows: `withAccessibilityRuntime`
 async function checkHere(s, { screen, sizes = [null], shot, state, ax = true }) {
   const [{ checkOp }, { axHere }] = await Promise.all([import('./agent-check.mjs'), import('./verify-ax.mjs')]);
   const failed = Object.entries(state?.failed ?? {}).map(([name, why]) => `  failed   resource ${name}: ${why}; the screen shows its placeholder or last value`);
@@ -422,7 +428,16 @@ const contentSize = (udid, size) => spawnSync('xcrun', ['simctl', 'ui', udid, 'c
  * own size is put back after, and when the process ends first. Null on iOS with no simulator to set. */
 /** Where the largest text size's pictures go, this run's (`deviceMain`): one per screen with a finding (LLP 1156.001 D3). */
 let largeShots = null;
+/** The host's presented alert: UIKit's confirmation, AppKit's NSAlert, or a painted host's alert surface.
+ * The web reports a modal alertdialog as a confirmation too. Anchored popovers and ordinary sheets remain app content. */
+export function systemAlert(state) {
+  const pop = state?.navigation?.popover;
+  return pop?.kind === 'confirmation' && (pop.presentation == null || pop.presentation === 'alert' || pop.presentation === 'sheet')
+    || state?.dialog?.kind === 'alert' || state?.surface?.kind === 'alert';
+}
+
 export async function largestText(s, screen) {
+  if (systemAlert(await s.state())) return null;
   const web = s.host === 'web', udid = s.carrier?.udid, was = web ? null : udid && contentSize(udid).stdout?.trim();
   if (!web && !was) return null;
   const started = Date.now(), body = async () => (await s.prefer({})).page?.['root-font-size'];
@@ -491,7 +506,7 @@ export function scaledEnd(runs, size) {
 
 /** runTests' `atEnd`: a test's last screen once its transitions end, checked in both schemes (the web: at both widths,
  * one capture kept at the width nearer the test's own; iOS: the simulator's), and what the relaunch chooses by. */
-const testEnd = (host, shots, persisted, capture = true) => async (s, t) => {
+export const testEnd = (host, shots, persisted, capture = true) => async (s, t) => {
   await s.clock('settle');
   const state = await s.state().catch(() => ({}));
   const facts = await seen(s, state);
@@ -503,6 +518,13 @@ const testEnd = (host, shots, persisted, capture = true) => async (s, t) => {
     WEB_SIZES.reduce((a, b) => (Math.abs(b[0] - own) < Math.abs(a[0] - own) ? b : a));
   const path = resolve(shots, shotName(host, t.index, t.name));
   const shot = (vp, scheme) => (scheme === 'light' && (host !== 'web' || vp.w === near[0]) ? path : undefined);
+  if (systemAlert(state)) {
+    const vp = (await s.layout()).viewport, scheme = (await s.prefer({})).media?.['prefers-color-scheme'] ?? 'light';
+    await s.screenshot(path);
+    const line = '  alert    the test ends on a system alert: the screen under it is not checked; answer the alert before the test ends to check it';
+    return { ...kept, shot: path, refusals: await refusalsIn(s, t.expectedRefusals), runs: [{ screen: t.name, size: [vp.w, vp.h], scheme, shot: path,
+      findings: [{ kind: 'alert', line }], accepted: [], lines: [line], hidden: 0, advice: [] }], reloaded: await reloadEnd(s, t, persisted) };
+  }
   const runs = await checkHere(s, { screen: t.name, sizes: host === 'web' ? WEB_SIZES : [null], shot, state });
   if (host === 'ios') scaledEnd(runs, t.size);
   const refusals = await refusalsIn(s, t.expectedRefusals);
@@ -524,7 +546,7 @@ async function tests(host, app, shots, running) {
   for (const [i, file] of files.entries()) {
     const first = out.results.length;
     try {
-      const r = await runTests({ host, file, app: app.selector, running, atEnd: (s, t) => atEnd(s, { ...t, index: first + t.index }), ...(i ? { storage: `test${i}` } : {}), ...hostOpen(host, app) });
+      const r = await runTests({ host, file, app: app.selector, running, ax: readsAx(host), atEnd: (s, t) => atEnd(s, { ...t, index: first + t.index }), ...(i ? { storage: `test${i}` } : {}), ...hostOpen(host, app) });
       out.passed += r.passed; out.failed += r.failed;
       // A failure the test did not arrange is a finding (LLP 1146 D4): `runTests` says it in a note.
       out.results.push(...r.results.map(({ name, index, failures, notes = [], end, store, shots }) => ({ name, index, file: basename(file), failures, unarranged: notes.filter((n) => n.startsWith('unarranged: ')).map((n) => n.slice(12)), ...(shots ? { shots } : {}), ...(end ? { end } : {}), ...(store ? { store } : {}) })));
@@ -579,7 +601,7 @@ export function tourNews(visited, toured) {
 async function checkAt(host, app, size, store, shots) {
   const [{ open }, { driveStore, removeBrowserProfile }] = await Promise.all([import('./agent.mjs'), import('./agent-launch.mjs')]);
   const fresh = { EXACT_AGENT_STORAGE_FRESH: '1' };
-  const s = await open({ host, app: app.selector, storage: store, env: fresh, ...(size ? { size } : hostOpen(host, app)) });
+  const s = await open({ host, app: app.selector, storage: store, env: fresh, ax: readsAx(host), ...(size ? { size } : hostOpen(host, app)) });
   try {
     await s.clock('data');
     await s.clock('settle');
@@ -744,7 +766,7 @@ export function pinnedLaunch(test, defaults) {
 /** What a fresh launch shows under `launch`'s facts on an empty scratch store, for `seen`'s comparison. */
 async function freshUnder(host, app, launch, store) {
   const [{ open }, { driveStore, removeBrowserProfile }] = await Promise.all([import('./agent.mjs'), import('./agent-launch.mjs')]);
-  const s = await open({ host, app: app.selector, storage: store, env: { EXACT_AGENT_STORAGE_FRESH: '1' }, ...launchOf(launch), ...(host === 'web' ? { size: WEB_SIZES[0] } : hostOpen(host, app)) });
+  const s = await open({ host, app: app.selector, storage: store, env: { EXACT_AGENT_STORAGE_FRESH: '1' }, ax: readsAx(host), ...launchOf(launch), ...(host === 'web' ? { size: WEB_SIZES[0] } : hostOpen(host, app)) });
   try {
     for (const [name, value] of Object.entries(preferencesOf(launch))) await s.prefer({ [name]: value });
     await s.clock('data');
@@ -762,7 +784,7 @@ async function freshUnder(host, app, launch, store) {
  * end; then `check both` (the web: at both widths, one capture kept). */
 async function relaunch(host, app, test, fresh, shots) {
   const [{ open }, { driveStore, removeBrowserProfile }] = await Promise.all([import('./agent.mjs'), import('./agent-launch.mjs')]);
-  const s = await open({ host, app: app.selector, storage: test.store, ...launchOf(relaunchFacts(test)), ...(host === 'web' ? { size: WEB_SIZES[0], ...(test.end.port ? { port: test.end.port } : {}) } : hostOpen(host, app)) });
+  const s = await open({ host, app: app.selector, storage: test.store, ax: readsAx(host), ...launchOf(relaunchFacts(test)), ...(host === 'web' ? { size: WEB_SIZES[0], ...(test.end.port ? { port: test.end.port } : {}) } : hostOpen(host, app)) });
   try {
     for (const [name, value] of Object.entries(preferencesOf(test.end?.launch))) await s.prefer({ [name]: value });
     const started = performance.now(), b = (st) => (st.background?.queued ?? 0) + (st.background?.inFlight ?? 0);
@@ -1006,7 +1028,9 @@ async function deviceMain(argv, emitJSON, declined, ended) {
   const args = guardFlags('verify', argv);
   const value = (flag) => args.indexOf(flag) >= 0 ? args[args.indexOf(flag) + 1] : undefined;
   const json = args.includes('--json'), sim = value('--sim'), copyTo = value('--shots');
-  const flagged = new Set([args.indexOf('--app') + 1, args.indexOf('--sim') + 1, args.indexOf('--shots') + 1].filter((i) => i > 0));
+  // The app's variant (LLP 1030.008 D3), for every process verify starts; the app it resolves claims it.
+  if (value('--variant')) { process.env.EXACT_VARIANT = value('--variant'); delete process.env.EXACT_VARIANT_APP; }
+  const flagged = new Set([args.indexOf('--app') + 1, args.indexOf('--sim') + 1, args.indexOf('--shots') + 1, args.indexOf('--variant') + 1].filter((i) => i > 0));
   const { resolveApp } = await import('./app.mjs');
   const app = resolveApp(value('--app'));
   const named = args.find((a, i) => !a.startsWith('-') && !flagged.has(i)), chosen = named ? { host: named } : shippedHost('verify', app.manifest);
@@ -1018,22 +1042,19 @@ async function deviceMain(argv, emitJSON, declined, ended) {
   const host = chosen.host;
   if (!['web', 'ios', 'windows', 'android'].includes(host)) { console.error(`verify: web, ios, windows or android, not ${host} (test ${host} runs the tests there)`); return declined(2); }
   if (host === 'windows' && process.platform !== 'win32') { console.error('verify windows runs on Windows (bun exact.mjs verify windows there)'); return declined(2); }
+  if (['web', 'ios', 'windows'].includes(host)) {
+    const { privateWebBuild, privateNativeBuild } = await import('./web-build.mjs');
+    const build = (host === 'web' ? privateWebBuild : privateNativeBuild)(app, 'verify');
+    Object.assign(process.env, build.env);
+    if (host !== 'web') await build.seed(host);
+    process.once('exit', build.close);
+  }
   if (host === 'android') process.env.EXACT_ANDROID_READER = '1'; // the APK, as `test android` drives it
   if (sim) process.env.EXACT_SIM = sim; // as the driver names it (devices.mjs `simulator`)
   const started = Date.now();
   ACCEPT = app.manifest.verify?.accept ?? [];
   const say = (lines) => console.log(lines.join('\n'));
-  // An app with a server of its own: verify runs it where the app calls it, on an empty database. One already
-  // answering there (the builder's dev server) is refused before the build: never stopped, never written to; so is
-  // an entry that does not read DB (LLP 1116.008 D1), which could only be run on its own database.
-  const server = appServer(app.dir), owned = server && !server.why;
   const refuse = (line) => { if (json) emitJSON({ host, server: { error: line }, problems: 1, exit: 1 }); else console.error(`verify: ${line}`); return declined(1); };
-  if (server?.refusal) return refuse(server.refusal);
-  // (A test run that holds the port's turn is waited for when the server starts.)
-  if (owned && await answering(server.url) && !(await holderOf(server.port))) return refuse(heldLine(server));
-
-  const last = lastRuns(app)[host];
-  console.error(`verify ${host}: about ${Math.round((last ?? ESTIMATE[host]) / 1000)} s${last ? ', as its last run took' : ''}; one report when it ends`);
   const built = host === 'web' ? await webBuild(app) : host === 'windows' ? await windowsBuild(app) : host === 'android' ? await (await import('./agent-android.mjs')).apkBuildFirst(app) : await iosBuild(app);
   // The build said the compiler's warnings when it ran; the report's own group says them whether it ran or not.
   if (built?.said) { const { compilerWarnings } = await import('./agent-launch.mjs'); built.said = built.said.filter((line) => !compilerWarnings(line).length && !/^compiler: \d+ (?:warnings?|notes?)\b/.test(line)); }
@@ -1044,6 +1065,14 @@ async function deviceMain(argv, emitJSON, declined, ended) {
     return built.code;
   }
 
+  // Discovery uses the completed build's module record. Database and ownership checks precede every launch.
+  const server = appServer(app.dir), owned = server && !server.why;
+  if (server?.refusal) return refuse(server.refusal);
+  // A test run that holds the port's turn is waited for when the server starts.
+  if (owned && await answering(server.url) && !(await holderOf(server.port))) return refuse(heldLine(server));
+
+  const last = lastRuns(app)[host];
+  console.error(`verify ${host}: about ${Math.round((last ?? ESTIMATE[host]) / 1000)} s${last ? ', as its last run took' : ''}; one report when it ends`);
   const shots = resolve(app.dir, '.exact', 'verify');
   mkdirSync(shots, { recursive: true }); largeShots = { dir: shots, host, n: 0 };
   for (const f of readdirSync(shots)) if (f.startsWith(`${host}-`) && f.endsWith('.png')) rmSync(resolve(shots, f), { force: true });

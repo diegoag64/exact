@@ -38,7 +38,7 @@ extension NodeView {
     /// accent. The colour follows the appearance it is asked in, as a
     /// `light-dark()` accent must. Reading it records whose it was
     /// (`tintSource`), so a move under another accent is known (`retint`).
-    var nearestAccent: NSColor? {
+    package var nearestAccent: NSColor? {
         let node = accentNode
         tintSource = node.map(ObjectIdentifier.init)
         // No authored accent above: the theme's `AccentColor`, if it sets one
@@ -71,7 +71,7 @@ extension NodeView {
     func retint(changed: Bool = false) {
         guard kind == "svg" || hasSymbolLeaf || style.values.contains(where: \.namesTint) || inlineText.contains(where: \.namesTint) else { return }
         guard changed || accentNode.map(ObjectIdentifier.init) != tintSource else { return }
-        if kind == "svg" { presenter?.svg.reappear(id, dark: drawsDark, clock: presenter?.session?.clock, tint: viewTint) }
+        if kind == "svg" { presenter?.svg?.reappear(id, dark: drawsDark, clock: presenter?.session?.clock, tint: viewTint) }
         reapplyColors()
     }
 }

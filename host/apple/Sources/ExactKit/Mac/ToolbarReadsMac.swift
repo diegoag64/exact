@@ -150,8 +150,8 @@ extension WindowToolbarHost {
         inputs.hasStack = navigation.hasStack
         inputs.backInToolbar = navigation.backInToolbar
         inputs.back = navigation.backFacts
-        let split = navigation.split
-        if split.active, let shown = split.shown { inputs.split = [shown.root.id, shown.list.id, shown.detail?.id ?? 0] }
+        let split = navigation.stackSplit
+        if split.active, let shown = split.shownSplit { inputs.split = [shown.root.id, shown.list.id, shown.detail?.id ?? 0] }
         inputs.listOwnsWindow = split.listOwns
         inputs.modal = presenter.dialogs.active?.id
         let routes = [navigation.headerRoute?.route, navigation.splitHeaderRoutes?.owner, navigation.splitHeaderRoutes?.beside].compactMap { $0 }
@@ -214,7 +214,7 @@ extension WindowToolbarHost {
             // `aria-labelledby`: the names and words of what it names are the node's label (`authoredLabel`),
             // a readout's, a tablist's or a search field's item's name.
             if let refs = node.props["accessibilityLabelledBy"] { refs.split(separator: " ").forEach { named(String($0)) } }
-            for case let child as NodeView in node.container.subviews { subtree(child) }
+            for child in node.childNodes { subtree(child) }
         }
         let navigation = presenter.navigation
         var routes: [(root: NodeView, route: NodeView, pushed: Bool)] = []
@@ -224,12 +224,12 @@ extension WindowToolbarHost {
             if let beside = s.beside { routes.append((s.root, beside, true)) }
         }
         // Every route in the split's pane: a block's answer for the one under the detail shows the detail.
-        if navigation.split.active, let shown = navigation.split.shown { shown.routes.forEach(note) }
+        if navigation.stackSplit.active, let shown = navigation.stackSplit.shownSplit { shown.routes.forEach(note) }
         for (root, route, _) in routes {
             note(root); note(route)
             // The route's own children: which one is its header (`HeaderRule`). A first child that is a
             // `header` is walked whole by the rule whatever it answers, so it is read whole, refused or not.
-            let kids = route.container.subviews.compactMap { $0 as? NodeView }
+            let kids = route.childNodes
             kids.forEach(note)
             if let first = kids.first, first.props["semanticTag"] == "header" { subtree(first) }
         }

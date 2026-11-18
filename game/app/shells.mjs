@@ -5,8 +5,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { pathWithin } from '../../scripts/paths.mjs';
 import { parseManifest, shaderFiles } from '../../scripts/app.mjs';
-import { lockBlocks, lockChanges, lockSeed, memberRefusal, outsideSdkLock, series, seriesId, staleLock } from '../../scripts/app-shells.mjs';
+import { lockBlocks, lockChanges, memberRefusal, outsideSdkLock, series, seriesId, staleLock } from '../../scripts/app-shells.mjs';
 
 // Resolve authored keys in memory; only the bake writes the resolved manifest.
 const merge = (base, overrides) => {
@@ -100,10 +101,14 @@ function renderDeclaration(dir, render) {
 /** Check actual unfiltered Cargo edges: aliases and target/build dependencies
  * must not smuggle the GPU render crate into simulation or host metadata. */
 export function renderGraph(metadata, game) {
+  const members = new Set(metadata.workspace_members);
+  const logic = metadata.packages.find(pkg => pkg.name === game.crate && members.has(pkg.id));
+  if (logic?.dependencies?.some(dep => dep.kind === null && dep.name === 'exact-game-render')) {
+    console.warn('warning: hook code in the logic crate: its optional features are outside the determinism lint run, and the logic crate can name renderer types; move it to render/');
+  }
   if (!game.render) return;
   const packages = new Map(metadata.packages.map(pkg => [pkg.id, pkg]));
   const nodes = new Map(metadata.resolve.nodes.map(node => [node.id, node]));
-  const members = new Set(metadata.workspace_members);
   const find = name => metadata.packages.find(pkg => pkg.name === name && members.has(pkg.id))?.id;
   const forbidden = find(game.render.crate), name = game.crate.slice(0, -'-logic'.length);
   if (!forbidden) throw new Error(`game.render package ${game.render.crate} is absent from Cargo metadata`);
@@ -140,7 +145,6 @@ export function sharesAppleEntry(app, env = process.env) {
  * `updateLock`: the workspace is generated for a lock refresh (`prepareGame`), which takes the shared Apple host
  * whenever the game can have it. */
 export function gameShells(dir, game, workspace, {env = process.env, updateLock = false} = {}) {
-  // Relative paths are written from the real directory: /tmp is a symlink on macOS.
   dir = realpathSync(dir);
   // Only this app is materialized. Each bake owns a generated Cargo workspace.
   // Read before the defaults are, so a file edited meanwhile is recorded as the older.
@@ -150,6 +154,12 @@ export function gameShells(dir, game, workspace, {env = process.env, updateLock 
   // Reject authored declaration errors before touching even an old generated workspace.
   if (app.game.presentation !== undefined) {
     throw new Error('game.presentation is now game.render: rename the key, move presentation/ to render/, name the crate <name>-render and rename its "type" to "hooks" (LLP 1046.008, amendment of 2026-10-04)');
+  }
+  // The shells below link no update store on any platform, so a game baked with a store level other than "0" would
+  // build and then refuse to boot (each native host checks the level against its linked delivery, LLP 1030 D4).
+  const stores = Object.entries(app.deploy?.store ?? {}).filter(([, level]) => level !== '0');
+  if (stores.length) {
+    throw new Error(`${resolve(dir, 'app.json')}: ${stores.map(([platform, level]) => `deploy.store.${platform} is ${JSON.stringify(level)}`).join(', ')}, but games take no over-the-air updates today: their hosts link no update store, and every change ships as a new binary. Set ${stores.length === 1 ? 'it' : 'each'} to "0" or remove ${stores.length === 1 ? 'it' : 'them'}.`);
   }
   const renderDir = renderDeclaration(dir, render);
   const root = resolve(dir, '.shells');
@@ -176,7 +186,7 @@ export function gameShells(dir, game, workspace, {env = process.env, updateLock 
     }
   }
   for (const deps of [cargo.workspace.dependencies, ...Object.values(cargo.patch ?? {})]) {
-    for (const dep of Object.values(deps ?? {})) if (dep.path) dep.path = relative(root, resolve(source, dep.path));
+    for (const dep of Object.values(deps ?? {})) if (dep.path) dep.path = pathWithin(root, resolve(source, dep.path));
   }
   const toml = value => value && typeof value === 'object' && !Array.isArray(value)
     ? `{ ${Object.entries(value).map(([key,item])=>`${JSON.stringify(key)} = ${toml(item)}`).join(', ')} }`
@@ -312,7 +322,7 @@ fn main() {
       : `${kind === 'web' ? '' : 'ibex2-sqlite.workspace = true\nexact-logic.workspace = true\n'}exact-runner.workspace = true\nexact-${kind}.workspace = true\n${shared ? 'exact-game-apple.workspace = true\n' : ''}${kind === 'web' ? 'exact-web-capabilities.workspace = true\n' : ['linux', 'windows'].includes(kind) ? 'exact-painted.workspace = true\n' : ''}${dataDependency}\n[build-dependencies]\nexact-game-app.workspace = true\n${dataBuildDependency}`;
     const files = {
       ...(kind === 'web' && data ? { [`src/bin/${name}-dev.rs`]: `//! The resident dev driver for the game's web shell: \`${name}-dev <source> <out>\`, baking with its data.\n\nfn main() -> std::process::ExitCode {\n    exact_web::dev::main::<app_data::${data.type}>()\n}\n` } : {}),
-      'Cargo.toml': header + dependencies + (tests.length ? `\n[dev-dependencies]\nserde_json.workspace = true\nexact-update = { path = ${JSON.stringify(relative(shell, resolve(gameRoot, '../update')))} }\n` : ''),
+      'Cargo.toml': header + dependencies + (tests.length ? `\n[dev-dependencies]\nserde_json.workspace = true\nexact-update = { path = ${JSON.stringify(pathWithin(shell, resolve(gameRoot, '../update')))} }\n` : ''),
       ...Object.fromEntries(tests.map(file => [`tests/${file}`, readFileSync(resolve(appDir, 'linux/tests', file), 'utf8')])),
       [['linux', 'windows'].includes(kind) ? 'src/main.rs' : 'src/lib.rs']: kind === 'gpu' ? `exact_game_render::module!(game_logic::${type}${app.game.audio === true ? ", audio" : ""}${app.game.assets === true ? ", assets" : ""}${render ? `, hooks = game_render::${render.hooks}${render.shaders ? `, shaders = game_render::${render.shaders}` : ''}` : ''});\n` : (kind === 'windows' ? '#![cfg_attr(\n    all(target_os = "windows", not(debug_assertions)),\n    windows_subsystem = "windows"\n)]\n' : '') + 'include!(concat!(env!("OUT_DIR"), "/entry.rs"));\n',
       'build.rs': kind === 'gpu'
@@ -402,10 +412,21 @@ const sdkLockFile = source => [resolve(source, 'app/shells.lock'), resolve(gameR
 // path packages, which carry no source or checksum, seed it the same way.
 export function withRootPins(sdk, root = existsSync(resolve(gameRoot, '../Cargo.lock')) ? readFileSync(resolve(gameRoot, '../Cargo.lock'), 'utf8') : '') {
   // A root's new major of a package the SDK lock holds is a pin too; a compatible one is not.
-  const held = new Set((Bun.TOML.parse(sdk).package ?? []).map(pkg => `${pkg.name} ${series(pkg.version)}`));
+  const packages = Bun.TOML.parse(sdk).package ?? [];
+  const held = new Set(packages.map(pkg => `${pkg.name} ${series(pkg.version)}`));
   const pins = lockBlocks(root)
     .filter(block => (/^source = "registry\+/m.test(block) || !/^source = /m.test(block)) && !held.has(seriesId(block)));
-  return pins.length ? `${sdk.trimEnd()}\n\n${pins.join('\n\n')}\n` : sdk;
+  if (!pins.length) return sdk;
+  // A lock names a dependency by its bare name while it holds one version. A
+  // second version of that name makes the bare edge ambiguous, and Cargo then
+  // resolves it afresh: codespan-reporting's `>=0.1, <0.3` took the root's
+  // unicode-width 0.1.14 over the SDK's 0.2.2. Naming the SDK's version keeps it.
+  let seeded = sdk;
+  for (const name of new Set(pins.map(block => /^name = "([^"]+)"/m.exec(block)[1]))) {
+    const versions = packages.filter(pkg => pkg.name === name).map(pkg => pkg.version);
+    if (versions.length === 1) seeded = seeded.replaceAll(`\n "${name}",\n`, `\n "${name} ${versions[0]}",\n`);
+  }
+  return `${seeded.trimEnd()}\n\n${pins.join('\n\n')}\n`;
 }
 const cargoMetadata = (cwd, flags, env) => spawnSync('cargo', ['metadata', ...flags, '--format-version', '1'], {cwd, env, encoding:'utf8', maxBuffer:64 * 1024 * 1024});
 // A lock's versions by package name.
@@ -523,23 +544,19 @@ export function prepareGame(dir, game, source = gameRoot, {updateLock = false, f
   const metadata = locked => (locked ? lockedMetadata : cargoMetadata)(root, ['--offline', ...(locked ? ['--locked'] : []), ...(target ? ['--filter-platform', target] : [])], env);
   const refused = result => new Error(`game Cargo graph: ${result.stderr || result.error?.message || ''}${result.status === null ? ` (cargo metadata ended by ${result.signal})` : ''}\nCrates missing from Cargo's cache, the lock unchanged: cargo fetch --manifest-path ${JSON.stringify(resolve(root, 'Cargo.toml'))}\nA dependency change (or both): ${lockCommand(dir)} fetches, resolves again and captures this game's lock`);
   if (fetch) {
-    // `lock` (LLP 1046.011 D2): the SDK lock's versions seed the resolution (a game
-    // with its own lock keeps its own packages; one without starts from the SDK
-    // lock, as its build does), and the network brings only what they lack.
+    // A captured lock is already copied into the shell. Seed from the SDK only
+    // without one, so Cargo keeps compatible versions when refreshing a lock.
     const lockFile = sdkLockFile(source), sdk = lockFile && withRootPins(readFileSync(lockFile, 'utf8'));
-    if (sdk) writeFileSync(shell, updateLock && existsSync(shell) ? lockSeed(sdk, readFileSync(shell, 'utf8')) : sdk);
+    if (sdk && !(updateLock && existsSync(shell))) writeFileSync(shell, sdk);
     const fetched = spawnSync('cargo', ['fetch'], {cwd:root, env, stdio:['ignore', 'inherit', 'inherit']});
     if (fetched.error || fetched.status !== 0) throw new Error(`cargo fetch in ${root} failed${fetched.error ? `: ${fetched.error.message}` : ''}; it needs the network`);
   }
   const checked = result => {
     const graph = JSON.parse(result.stdout);
-    if (game.render) {
-      // A platform-filtered graph omits inactive target edges. Check every
-      // production edge before accepting any build or publishing an own lock.
-      const all = target ? lockedMetadata(root, ['--offline', '--locked'], env) : result;
-      if (all.status !== 0) throw refused(all);
-      renderGraph(JSON.parse(all.stdout), game);
-    }
+    // Render isolation needs the inactive target edges too.
+    const all = game.render && target ? lockedMetadata(root, ['--offline', '--locked'], env) : result;
+    if (all.status !== 0) throw refused(all);
+    renderGraph(all === result ? graph : JSON.parse(all.stdout), game);
     return graph;
   };
   if (updateLock || existsSync(own)) {
@@ -574,7 +591,7 @@ A partial offline Cargo cache: cargo fetch --manifest-path ${JSON.stringify(reso
 }
 
 /** `bun exact.mjs lock` (LLP 1046.011 D2): fetch what the game's graph needs,
- * resolve it again with the SDK lock's versions first, and say what moved. A
+ * keep captured versions unless the manifests require a change, and say what moved. A
  * game that adds no packages keeps resolving against the SDK lock: it gains
  * no lock of its own. Never run by a build. */
 export function refreshLock(dir, {source = gameRoot, env = process.env} = {}) {
@@ -742,7 +759,13 @@ if (import.meta.main) {
     process.exitCode=failed?1:0;
   } else if (!requested && args.includes('--update-lock')) sdkLock(gameRoot, {update:true});
   else if (args.includes('--lock')) {
-    try { console.log(refreshLock(resolve(requested ?? '.'))); }
+    try {
+      const dir = resolve(requested ?? '.');
+      console.log(refreshLock(dir));
+      const { lockSwiftPackages } = await import('../../host/apple/compose.mjs');
+      const swift = lockSwiftPackages({ dir, manifest: gameDefaults(dir) });
+      if (swift) console.log(swift);
+    }
     catch (error) { console.error(error.message); process.exitCode = 1; }
   } else {
     const dir = resolve(requested);

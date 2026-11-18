@@ -8,6 +8,29 @@ import { renderer } from './render.mjs';
 import { suiteBrowser } from '../../scripts/agent-launch.mjs';
 import { standIns } from '../web/tests/stand-ins.mjs';
 
+test('a tab preparation can clone its render DOM shell without sharing attributes or children', () => {
+  const doc = createDocument(), panel = doc.createElement('section');
+  panel.setAttribute('id', 'panel');
+  panel.setAttribute('role', 'tabpanel');
+  panel.style.setProperty('visibility', 'hidden');
+  panel.append('content', doc.createComment('anchor'));
+  doc.root.append(panel);
+  const shell = panel.cloneNode(false);
+  expect(shell.parentNode).toBe(null);
+  expect(shell.childNodes).toHaveLength(0);
+  expect(shell.localName).toBe('section');
+  expect(shell.getAttribute('role')).toBe('tabpanel');
+  expect(shell.style.cssText).toBe(panel.style.cssText);
+  shell.setAttribute('id', 'prepared');
+  shell.style.setProperty('visibility', 'visible');
+  expect(panel.id).toBe('panel');
+  expect(panel.style.getPropertyValue('visibility')).toBe('hidden');
+  const deep = panel.cloneNode(true);
+  expect(deep.html()).toBe(panel.html());
+  expect(deep.childNodes[0]).not.toBe(panel.childNodes[0]);
+  expect(deep.childNodes[1].nodeType).toBe(8);
+});
+
 // The render's DOM orders nodes as DOM §4.4 does (midi.js sorts its listeners by it).
 test('the render DOM compares document positions, across trees one way each', () => {
   const doc = createDocument(), root = doc.getElementById('exact-root');
@@ -68,6 +91,14 @@ test('the render DOM marks its hero first among its attributes and preloads it b
   shown.append(make('https://example.com/unset.png', 'unset', { class: 'c1' }));
   inline.getElementById('exact-root').append(make('https://example.com/collapsed.png', 'collapse'), inert, gone, shut, shown);
   expect(inline.heroPreload()).toBe('<link rel="preload" as="image" href="https://example.com/unset.png" fetchpriority="high">');
+});
+
+test('the render DOM refuses a NUL in text or an attribute', () => {
+  for (const write of [el => { el.textContent = 'a\0b'; }, el => el.setAttribute('title', 'a\0b')]) {
+    const doc = createDocument(), el = doc.createElement('p');
+    write(el); doc.getElementById('exact-root').append(el);
+    expect(() => doc.rootHTML()).toThrow('a NUL character, which the HTML parser does not keep');
+  }
 });
 
 test('the render DOM selects options by their value or label', () => {

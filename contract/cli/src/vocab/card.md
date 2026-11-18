@@ -60,11 +60,11 @@ option | value
 time | datetime format
 progress | value max start end
 list | listStyle appearance virtualized refreshing scroll-start | reachstart reachend refresh
-scroll | scrollTop navigationScroll keyboardDismissMode | scroll scrollend
+scroll | scrollTop scrollZoom navigationScroll keyboardDismissMode | scroll scrollend
 dialog | closedby | cancel close
 
 ## rules
-- An event hands its action its payload after the captured arguments: text for a field, `select` or date; a bool for a checkbox or switch; a number for a range; none for `press` and `submit`. `change=set(i.id)` calls `set(id, payload)`.
+- An event's payload follows captured arguments: text for a field, `select` or date; a bool for a checkbox or switch; a number for a range; none for `press` and `submit`. `change=set(i.id)` calls `set(id, payload)`.
 
 ```contract
 component App
@@ -81,12 +81,11 @@ component App
 ```
 - `select value=v change=set` holds `option "Label" value="x"`. Tabs: a `row role="tablist"` of `button role="tab" aria-controls="panel-x" aria-selected=… press=…`, each panel a `column role="tabpanel" id="panel-x"`; `routes nav`, `tab`, `select(nav, name)`.
 - `min`, `max`, `step` are numbers; with `inputmode="decimal"` a negative `min` gives the pad its ± key.
-- Symbols: `"symbol:<role>"` (below); `symbol:sf/<name>` is Apple-only.
-- Not in Contract (`vocab <name>` says what instead): abs pow sqrt sort reduce find some every contains padStart parseInt.
+- Not in Contract (ask `vocab <name>`): abs pow sqrt sort reduce find some every contains padStart parseInt.
 
 ## how
 ### a second screen, a sheet
-A screen is a route, not an `if`; a sheet's root has `navigationPresentation="modal"`, its Cancel the `id` `navigationBack` names (`pattern list-detail`).
+Use a route for a screen. A sheet has `navigationPresentation="modal"`; Cancel has the `navigationBack` id (`pattern list-detail`).
 ```contract
 routes nav
   home "/"
@@ -115,7 +114,7 @@ main navigationKey=`${top(nav).id}` navigationBack="back"
             image "symbol:checkmark"
 ```
 ### a confirmation
-What can't be undone asks first. `aria-label` is the question; actions run their `press` and close (`command="close"`); Cancel has no `press`. Open it: `command="show-modal"` or `showModal(id)`.
+Confirm irreversible actions: `aria-label` asks; `press` acts; `command="close"` closes. Cancel has no `press`. Open: `command="show-modal"` or `showModal(id)`.
 ```contract
 state n = 1
 action remove
@@ -139,7 +138,7 @@ action step
 text `${now}`
 ```
 ### keeping a value
-Root `state` only: a number, string or bool (or an option or list of one) up to 16 KB. Records go in a source (`files-and-grants`).
+`persist`: root `state`, a number, string or bool (or an option or list of one) up to 16 KB. Records go in a source (`files-and-grants`).
 ```contract
 state units = "C" persist
 ```
@@ -175,8 +174,7 @@ action log
   days = days.concat([formatDate(at, time.utcOffset, "iso")])
 ```
 ### a test, and verify
-Tests start with no storage. `clock data` lands replies, `clock settle` ends transitions, `clock held` lands held replies; `reload` keeps storage. `bun exact.mjs verify` tests, checks end screens, relaunches; `verify ios` last; `--shots <dir>` keeps shots.
-It runs `contract verify`; keep its receipt.
+Empty storage per test. `clock data` lands replies, `clock settle` ends transitions; `reload` keeps storage. `bun exact.mjs verify` tests end screens and relaunches; `verify ios` last; `--shots <dir>` keeps shots. Keep its `contract verify` receipt.
 ```contract-test
 test "a pick survives a relaunch"
   tap "pick"

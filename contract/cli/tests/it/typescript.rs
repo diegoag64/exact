@@ -158,7 +158,9 @@ fn compress_image_is_declared_as_the_docs_give_it() {
     for line in [
         "compressImage(from: string, to: string, options: CompressImageOptions): Promise<CompressedImage>;",
         "readonly maxDimension: number;",
-        "readonly maxBytes: number;",
+        "readonly maxBytes?: number;",
+        "readonly quality?: number;",
+        "({ readonly maxBytes: number } | { readonly quality: number });",
         "readonly type?: \"image/jpeg\" | \"image/png\";",
         "readonly type: \"image/jpeg\" | \"image/png\";",
         "readonly width: number;",
@@ -175,9 +177,8 @@ fn compress_image_is_declared_as_the_docs_give_it() {
     // The engine's positional binding is the prelude's to adapt, never the app's.
     assert!(!declared.contains("compressImage(from: string, to: string, maxDimension"));
     let reference = include_str!("../../../../docs/reference.md");
-    assert!(
-        reference.contains("`storage.fs.compressImage(from, to, {maxDimension, maxBytes, type})`")
-    );
+    assert!(reference
+        .contains("`storage.fs.compressImage(from, to, {maxDimension, maxBytes, quality, type})`"));
     assert!(reference.contains("`storage.fs.transformImage(from, to, options)`"));
 }
 

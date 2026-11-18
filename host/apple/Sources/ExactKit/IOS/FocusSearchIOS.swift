@@ -34,7 +34,7 @@ enum FocusSearch {
         // plain tab) holds exact2's nodes, whose own foreign views join the
         // nodes themselves.
         if view is NodeView || view is PlainView || view is ScrollView || view is MetalView
-            || view is UIImageView || view is UIVisualEffectView || view.next is UINavigationController || view.next is PlainTab
+            || view is UIImageView || view is UIVisualEffectView || view.next is UINavigationController || view.next is BootHolding
             || view is NativeButtonIOS { return } // a native button's node keeps the focus (LLP 1069.011 D4)
         candidates.add(view)
     }
@@ -57,7 +57,7 @@ enum FocusSearch {
     }
 }
 /// Answer UIKit's focus search for a document viewport.
-final class Viewport: ScrollView {
+package final class Viewport: ScrollView {
     /// The route whose document this viewport scrolls; the session's viewport has no route.
     weak var documentNode: NodeView?
     /// Its bands past the page's area (`Presenter.pageMargins`, LLP 1130 D1).
@@ -67,7 +67,7 @@ final class Viewport: ScrollView {
     /// Its tint as UIKit last gave it undimmed (its window's, or an embedder's), which a dimmed
     /// view cannot read (`NodeView.carriedTint`)
     private(set) var restingTint: UIColor?
-    override func tintColorDidChange() {
+    package override func tintColorDidChange() {
         super.tintColorDidChange()
         if tintAdjustmentMode != .dimmed { restingTint = tintColor }
     }
@@ -81,23 +81,9 @@ final class Viewport: ScrollView {
         #endif
     }
     required init?(coder: NSCoder) { nil }
-    /// A scroll indicator is an accessibility element ("Horizontal scroll
-    /// bar, 1 page"), which a page that does not scroll on that axis has
-    /// none of, as a hand-built view controller's root has none: a route
-    /// that holds a list showed three pairs where UIKit's list shows one.
-    /// Each axis it scrolls has its indicator while its content reaches past the port.
-    package override func layoutSubviews() {
-        super.layoutSubviews()
-        let inset = adjustedContentInset
-        let x = scrollsX && contentSize.width + inset.left + inset.right > bounds.width + 0.5
-        let y = scrollsY && contentSize.height + inset.top + inset.bottom > bounds.height + 0.5
-        if showsHorizontalScrollIndicator != x { showsHorizontalScrollIndicator = x }
-        if showsVerticalScrollIndicator != y { showsVerticalScrollIndicator = y }
-    }
-    package override var contentSize: CGSize { didSet { if contentSize != oldValue { setNeedsLayout() } } }
     // tvOS focuses exact2's own nodes (RemoteTVOS), so its search sees every view.
     #if !os(tvOS)
-    override func focusItems(in rect: CGRect) -> [any UIFocusItem] { FocusSearch.items(self, in: rect) }
+    package override func focusItems(in rect: CGRect) -> [any UIFocusItem] { FocusSearch.items(self, in: rect) }
     #endif
 }
 #if os(tvOS)
@@ -115,22 +101,22 @@ extension NodeView {
 #endif
 /// Bound focus search to a native route or modal presentation, as the
 /// document viewport does (LLP 1123 D2).
-final class PresentationMount: UIView {
+package final class PresentationMount: UIView {
     #if os(iOS)
     /// Relay a modal presentation's events to its logical ancestors (`MountRelay`).
     var relay: MountRelay?
     #endif
     // UIKit's views over the ranked route (`keepPlatformViewsOver`).
-    override func didAddSubview(_ subview: UIView) {
+    package override func didAddSubview(_ subview: UIView) {
         super.didAddSubview(subview)
         keepPlatformViewsOver()
     }
-    override func layoutSubviews() {
+    package override func layoutSubviews() {
         super.layoutSubviews()
         keepPlatformViewsOver()
     }
     #if !os(tvOS)
-    override func focusItems(in rect: CGRect) -> [any UIFocusItem] { FocusSearch.items(self, in: rect) }
+    package override func focusItems(in rect: CGRect) -> [any UIFocusItem] { FocusSearch.items(self, in: rect) }
     #endif
 }
 #endif

@@ -828,7 +828,7 @@ test.skipIf(process.platform !== 'darwin')('Icon Composer supplies the primary i
   assert.deepEqual(appIcon(app, mac, 'macos'), { CFBundleIconFile: 'AppIcon' });
 }), 60000);
 
-test.skipIf(process.platform !== 'darwin')('iOS alternate icon sets compile beside raster and Composer primaries for both device families', () => inDir(dir => {
+test.skipIf(process.platform !== 'darwin')('a declared alternate\'s catalog set compiles beside raster and Composer primaries for both device families', () => inDir(dir => {
   const { useXcode } = require('../host/apple/devices.mjs');
   const { iosAssets } = require('../host/apple/assets.mjs');
   useXcode();
@@ -841,6 +841,9 @@ test.skipIf(process.platform !== 'darwin')('iOS alternate icon sets compile besi
   writeFileSync(resolve(set, 'Contents.json'), JSON.stringify({ info: { author: 'xcode', version: 1 }, images: [{ idiom: 'universal', platform: 'ios', size: '1024x1024', filename: 'icon.png' }] }));
   const app = composerFixture(dir);
   app.manifest.icons = [{ src: 'icon.png', sizes: '1024x1024' }];
+  // A catalog set is an alternate only where alternate_icons names it (LLP 1163.000 D1).
+  assert.throws(() => iosAssets(app, resolve(dir, 'undeclared'), false), /Alternate\.appiconset is an app icon that no alternate_icons entry names/);
+  app.manifest.alternate_icons = [{ name: 'Alternate', icons: [{ src: 'icon.png' }] }];
   for (const [composer, catalog, device, folder] of [[true, true, false, 'composer'], [false, true, false, 'raster'], [false, false, false, 'development'], [false, true, true, 'device']]) {
     if (!composer) delete app.manifest.host.ios.icon;
     const out = resolve(dir, folder); mkdirSync(out);
@@ -1042,6 +1045,9 @@ test('docs prints the section on its words first, matching whole words', () => {
     return { where, text: text.slice(0, 40).join('\n') };
   };
   for (const [words, file, shows] of [
+    [['web', 'tokens'], 'docs/recipes/web-sessions.md', /HttpOnly/],
+    [['web', 'sessions'], 'docs/recipes/web-sessions.md', /HttpOnly/],
+    [['HttpOnly'], 'docs/recipes/web-sessions.md', /cookie/],
     [['exit', 'animation'], 'docs/recipes/motion.md', /-exact-exit-animation/],
     [['-exact-exit-animation'], 'docs/recipes/motion.md', /-exact-exit-animation/],
     [['call'], 'docs/recipes/native-module.md', /`native\.call`/],
@@ -1335,12 +1341,13 @@ test('exact add says how each grant line is written, from the device table', asy
   assert.equal(grantAdvice(['net.fetch']), '`net.fetch <its target>`, what it reaches');
 });
 
-test('add writes a relative package specifier within a shared tree, including through symlinks', async () => {
+test('add writes a relative package specifier within a shared repository, including through symlinks', async () => {
   const { packageSpecifier } = await import('./exact.mjs');
   inDir(dir => {
     const app = resolve(dir, 'nested/shop'), sdk = resolve(dir, 'sdk');
     mkdirSync(app, { recursive: true });
     mkdirSync(resolve(sdk, 'packages/in-app-browser'), { recursive: true });
+    assert.equal(spawnSync('git', ['init', '-q', dir]).status, 0);
     assert.equal(packageSpecifier(app, 'in-app-browser', sdk), 'file:../../sdk/packages/in-app-browser');
     symlinkSync(app, resolve(dir, 'linked-shop'), 'dir');
     symlinkSync(sdk, resolve(dir, 'linked-sdk'), 'dir');

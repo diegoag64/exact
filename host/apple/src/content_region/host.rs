@@ -514,10 +514,15 @@ impl<D: DataSource> Host<D> {
         let collection_wire = collections
             .iter()
             .try_fold(2usize, |n, c| {
+                let roots = c
+                    .fixed
+                    .iter()
+                    .try_fold(0usize, |n, f| n.checked_add(f.roots.len()))?;
                 c.rows
                     .len()
                     .checked_add(1)
                     .and_then(|rows| rows.checked_mul(1024))
+                    .and_then(|bytes| roots.checked_mul(12).and_then(|r| bytes.checked_add(r)))
                     .and_then(|bytes| n.checked_add(bytes))
             })
             .ok_or("native collection wire overflow")?;

@@ -102,6 +102,7 @@ pub mod warning_rank;
 pub use shorthands::style_values;
 pub mod vocab;
 mod warnings;
+mod zoom;
 
 pub use dataset::{data_words, hatch_words};
 pub use error::LowerError;
@@ -171,8 +172,7 @@ pub use theme::retained::{
     before_view, first_refusal, offer_design_scan, retention_only, take_design_scan,
     with_design_scan, DesignScan,
 };
-pub use theme::rows;
-pub use theme::{retention, synthetic_candidates};
+pub use theme::{retention, rows, synthetic_candidates};
 pub use warnings::{warnings, MAX_WARNINGS};
 
 use contract_analyze::Analysis;
@@ -263,7 +263,7 @@ pub(crate) struct Lowerer<'a> {
     pub(crate) atoms: BTreeMap<String, atoms::Declared>,
     pub atom_scopes: BTreeMap<u32, Vec<(String, String)>>,
     /// The `keyframes` declarations, by name, with what each animates (LLP 1055 D5).
-    pub keyframes: BTreeMap<String, Vec<exact_motion::Property>>,
+    pub keyframes: BTreeMap<String, exact_motion::Keyframes>,
     /// The file's `fn` declarations, by name, expanded inline at each call
     /// (LLP 1017 P5), each with its body's repeated calls bound once.
     pub fns: BTreeMap<&'a str, (&'a FnDecl, &'a Expr)>,
@@ -372,11 +372,10 @@ pub fn lower(
         .map_err(|mut all| all.swap_remove(0))
 }
 
-/// Lower, reporting every independent refusal: each element and each of its
-/// attributes is lowered whatever its siblings' fate (at most
-/// [`MAX_REFUSALS`]). `mapped` also returns the development source sites;
-/// `profile` is the surface the plan is for. `warned` collects diagnostics using
-/// the same control appearance decisions as the plan.
+/// Lower, reporting every independent refusal: each element and each of its attributes is
+/// lowered whatever its siblings' fate (at most [`MAX_REFUSALS`]). `mapped` also returns the
+/// development source sites; `profile` is the surface the plan is for. `warned` collects diagnostics
+/// using the plan's control appearance decisions. It links every row's grammar (LLP 1053.000 §2).
 pub fn lower_all(
     checked: &Checked<'_>,
     analysis: &Analysis,
@@ -385,6 +384,7 @@ pub fn lower_all(
     profile: Profile,
     warned: Option<&mut Vec<LowerError>>,
 ) -> Result<(Plan, Option<Sites>), Vec<LowerError>> {
+    exact_kernel::style::link_all();
     if mapped && checked.expanded.instances.is_empty() {
         return Err(vec![LowerError {
             id: "lower-source-sites",
@@ -394,7 +394,10 @@ pub fn lower_all(
     }
     let (mut asset_errors, asset_warnings) = asset_root
         .filter(|_| !theme::retained::stops_at_retention())
-        .map(|root| bundled::check(&checked.expanded.root.view, root))
+        .map(|root| {
+            let checking = contract_checking::Checking::new(checked);
+            bundled::check(&checking.expanded(), root)
+        })
         .unwrap_or_default();
     let mut text_styles = warnings::TextStyles::new();
     let result = lower_with_sites(
@@ -716,7 +719,7 @@ fn lower_body(
         let code = l.expr_code(&d.expr, &scope, 0)?;
         l.b.set_derive_body(l.derives[i], code);
     }
-    l.resource_args(root, &scope)?;
+    l.resource_args(root, &ex.resource_owners, &scope)?;
     // @ref LLP 1048.003 D6 — a declared placeholder is a row of its own,
     // after every authored row; its arguments read no state.
     for (i, r) in root.resources.iter().enumerate() {
@@ -798,7 +801,6 @@ fn lower_body(
         );
     }
     l.tools(file)?;
-    l.timers(&root.tasks, &scope)?;
     l.sequences(&root.sequences, &scope)?;
     // The view, inlined (by `expand`, above).
     let view = &root.view;
@@ -846,6 +848,9 @@ fn lower_body(
         // Row slots name regions a refused element may not have lowered.
         return Err(Vec::new());
     }
+    l.owned_resource_args(root, ex, &scope)?;
+    l.owned_mutations(root, ex, &scope)?;
+    l.timers(&root.tasks, ex, &scope)?;
     // Child state (LLP 1017 P4c): each lifted state is initialized where its
     // instance is created — in its owning arm's scope, now that the arms
     // exist, or, for a use outside every region, at the boot render.
@@ -1311,6 +1316,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             tags::AttrTarget::Styles(rows) => {
+                let a = &*values::fallback_tokens(a, rows)?;
                 if rows == [StyleId::FontFamily] {
                     if self.family_token(a, scope, locals, bindings)? {
                         return Ok(());
@@ -1368,7 +1374,10 @@ impl<'a> Lowerer<'a> {
                     .or_else(|| values::grid_tokens(a, rows).map(|g| vec![g]));
                 let a = written.as_ref().map_or(a, |m| &m[0]);
                 let (code, ty) = self.typed_code(&a.value, scope, locals)?;
-                self.check_style(a, rows, &ty, font, scope)?;
+                let pressed = rows
+                    .contains(&StyleId::PressTranslate)
+                    .then(|| crate::lint::press_translation_arms(a, self.root, scope));
+                self.check_style(pressed.as_ref().unwrap_or(a), rows, &ty, font, scope)?;
                 for &row in rows {
                     bindings.push(style_row(row, code, a.written));
                 }

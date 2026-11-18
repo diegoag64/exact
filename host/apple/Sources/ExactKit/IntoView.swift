@@ -7,11 +7,11 @@
 // and a virtualized list's window, as a reader's scroll does.
 import CoreGraphics
 
-enum IntoView {
+package enum IntoView {
     /// Where a scroller's offset goes on one axis so the target `t0..<t1`
     /// (in the scroller's content) aligns in the port `p0..<p0 + size` by
     /// CSS's `start`, `center`, `end` or `nearest`, before clamping.
-    static func aligned(_ align: String, target t0: CGFloat, _ t1: CGFloat, port p0: CGFloat, size: CGFloat) -> CGFloat {
+    package static func aligned(_ align: String, target t0: CGFloat, _ t1: CGFloat, port p0: CGFloat, size: CGFloat) -> CGFloat {
         let p1 = p0 + size, length = t1 - t0
         switch align {
         case "start": return t0
@@ -162,7 +162,11 @@ final class ElementScrolls {
     /// The person took a scroller: a request it would move is dropped and
     /// stays dropped, so nothing scrolls it back once the gesture ends. A
     /// reveal running on it is over: UIKit stops the animation for the drag.
+    /// A swipe row open in it closes, as a table's does when it scrolls.
     func userScrolled(_ scroll: UIScrollView) {
+        #if os(iOS)
+        presenter.swipeActions.scrolling(scroll)
+        #endif
         FrameSampler.scrolled(scroll, in: presenter.session, person: true)
         presenter.personScrolls += 1 // a fragment's scroll not yet made stays unmade (Fragment.swift)
         reveals[ObjectIdentifier(scroll)] = nil
@@ -315,6 +319,8 @@ extension Presenter {
         // The target's box where it will be once the inner scrollers'
         // reveals arrive, and where it is now, in the last of them.
         for (index, sv) in scrollers.enumerated() {
+            // A newer request owns the scroller: a position Exact carries for it gives way, instant or animated
+            ((sv as? ScrollView)?.scrollingNode ?? (sv as? GroupedScroller)?.scrollingNode)?.dropCarriedScroll()
             // The inner ports, weakly, for a destination asked again later.
             let inners = scrollers[..<index].map { inner in { [weak inner] in inner } }
             let projected = projection(target, through: inners.compactMap { $0() }, grouped: grouped, block: block, inline: inline)
@@ -375,10 +381,10 @@ extension Presenter {
     /// A reveal still aligns inside the part of that page UIKit leaves visible.
     private func elementPageInsets(_ scroll: UIScrollView) -> UIEdgeInsets {
         var inset = scroll.adjustedContentInset
-        guard let route = scroll.superview?.next as? RouteController,
+        guard let route = scroll.superview?.next as? any RouteSurface,
               route.contentViewport === scroll else { return inset }
-        let safe = scroll.safeAreaInsets, off = NavigationHost.clearanceOff(route.node)
-        if !NavigationHost.insetsNoTop(route.node) { inset.top = max(inset.top, safe.top) }
+        let safe = scroll.safeAreaInsets, off = RouteGeometry.clearanceOff(route.node)
+        if !RouteGeometry.insetsNoTop(route.node) { inset.top = max(inset.top, safe.top) }
         if off & 2 == 0 { inset.right = max(inset.right, safe.right) }
         if off & 4 == 0 { inset.bottom = max(inset.bottom, safe.bottom) }
         if off & 8 == 0 { inset.left = max(inset.left, safe.left) }

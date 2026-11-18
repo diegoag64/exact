@@ -114,8 +114,8 @@ final class DialogTopLayerIOSTests: XCTestCase {
         XCTAssertEqual(ask.center.y, top.scroller.bounds.midY, accuracy: 0.5, "and down it")
         XCTAssertEqual(top.backdrop.backgroundColor, DialogSheetController.dimming, "over UIKit's dimming")
         XCTAssertTrue(ask.accessibilityViewIsModal)
-        XCTAssertEqual(p.menus.sheets.observation?["presentation"] as? String, "top-layer")
-        let block = try XCTUnwrap(p.menus.sheets.containingBlocks.first { $0.0 == 30 }?.1)
+        XCTAssertEqual(p.dialogHost.observation?["presentation"] as? String, "top-layer")
+        let block = try XCTUnwrap(p.dialogHost.containingBlocks.first { $0.0 == 30 }?.1)
         XCTAssertEqual(block, HostBlock(width: .size(top.scroller.bounds.width), height: .fit(top.view.bounds.height)), "its block is the window")
 
         p.dialogCommand("close", "ask")
@@ -268,16 +268,16 @@ final class DialogTopLayerIOSTests: XCTestCase {
         let (p, controller) = page(scene)
         let other = Presenter()
         defer {
-            _ = ThemeRoles.apply(wireBatch([["op": "roles", "roles": [String: Any]()]]), root: p.root)
-            _ = ThemeRoles.apply(wireBatch([["op": "roles", "roles": [String: Any]()]]), root: other.root)
+            _ = ThemeRoles.apply(wireBatch([["op": "roles", "roles": [String: Any]()]]).ops[0], root: p.root)
+            _ = ThemeRoles.apply(wireBatch([["op": "roles", "roles": [String: Any]()]]).ops[0], root: other.root)
         }
-        _ = ThemeRoles.apply(wireBatch([["op": "roles", "roles": ["AccentColor": [0, 200, 0, 255]]]]), root: p.root)
+        _ = ThemeRoles.apply(wireBatch([["op": "roles", "roles": ["AccentColor": [0, 200, 0, 255]]]]).ops[0], root: p.root)
         p.applyThemeTint()
         p.dialogCommand("showModal", "ask")
         spin { !p.menus.inTransition }
         let top = try XCTUnwrap(controller.presentedViewController as? DialogSheetController)
         // Another session's theme applies last.
-        _ = ThemeRoles.apply(wireBatch([["op": "roles", "roles": ["AccentColor": [200, 0, 0, 255]]]]), root: other.root)
+        _ = ThemeRoles.apply(wireBatch([["op": "roles", "roles": ["AccentColor": [200, 0, 0, 255]]]]).ops[0], root: other.root)
         func rgb(_ c: UIColor?) throws -> [CGFloat] {
             var (r, g, b, a): (CGFloat, CGFloat, CGFloat, CGFloat) = (0, 0, 0, 0)
             XCTAssertTrue(try XCTUnwrap(c).getRed(&r, green: &g, blue: &b, alpha: &a))
@@ -287,7 +287,7 @@ final class DialogTopLayerIOSTests: XCTestCase {
         let ask = try XCTUnwrap(p.views[30])
         for (got, want) in zip(try rgb(ThemeRoles.color("AccentColor", in: ask)), [0, 200.0 / 255, 0]) { XCTAssertEqual(got, want, accuracy: 0.01, "its presenter's accent") }
         for (got, want) in zip(try rgb(top.view.tintColor), [0, 200.0 / 255, 0]) { XCTAssertEqual(got, want, accuracy: 0.01, "and tint") }
-        _ = ThemeRoles.apply(wireBatch([["op": "roles", "roles": ["AccentColor": [0, 0, 200, 255]]]]), root: p.root)
+        _ = ThemeRoles.apply(wireBatch([["op": "roles", "roles": ["AccentColor": [0, 0, 200, 255]]]]).ops[0], root: p.root)
         p.applyThemeTint()
         for (got, want) in zip(try rgb(top.view.tintColor), [0, 0, 200.0 / 255]) { XCTAssertEqual(got, want, accuracy: 0.01, "a live edit retints it") }
         XCTAssertEqual(top.backdrop.backgroundColor, DialogSheetController.dimming, "and keeps its dimming")

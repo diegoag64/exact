@@ -6,8 +6,8 @@
 // bar's scroller too, by one rule, LLP 1115.000 D11.1), else, with no routes,
 // the viewport when it scrolls, else the first vertical scroller on the
 // page. A grouped list answers with the collection view that shows, never
-// the hidden scroll beneath it. Run after every batch and every finished
-// navigation.
+// the hidden scroll beneath it. Run after batches that can change the
+// scroller selection and every finished navigation.
 #if os(iOS) || os(tvOS)
 import UIKit
 
@@ -24,7 +24,7 @@ extension Presenter {
         navigation.scrollsToTopSelection = chosen
         if let chosen, !chosen.scrollsToTop { chosen.scrollsToTop = true }
         if viewport.scrollsToTop != (chosen === viewport) { viewport.scrollsToTop = chosen === viewport }
-        for route in navigation.primaryRoutes {
+        for route in navigation.primaryRouteSurfaces {
             route.contentViewport?.scrollsToTop = route.contentViewport === chosen
         }
         for id in scrollers {
@@ -35,7 +35,7 @@ extension Presenter {
 
     /// The scroll view a status-bar tap scrolls, or nil for none.
     func scrollsToTopTarget() -> UIScrollView? {
-        if let route = navigation.activeRoute { return navigation.contentScrollView(of: route) }
+        if let route = navigation.activeRouteSurface { return navigation.contentScrollView(of: route) }
         if let modal = modals.routes.last?.node { return navigation.shownScroll(Self.firstVerticalScroller(under: modal)) }
         if viewport.contentSize.height > viewport.bounds.height - viewport.adjustedContentInset.top - viewport.adjustedContentInset.bottom {
             return viewport
@@ -56,8 +56,9 @@ extension NodeView {
     /// the list (`CollectionHost.readerMoves`).
     @objc package func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
         presenter?.elementScrolls.userScrolled(scrollView)
-        guard scrollView === self.scrollView, let collections = presenter?.collections,
-              let entry = collections.entries[id], !entry.snapshot.horizontal else { return true }
+        guard scrollView === self.scrollView else { return true }
+        dropCarriedScroll()
+        guard let collections = presenter?.collections, let snapshot = collections.snapshot(id), !snapshot.horizontal else { return true }
         collections.readerMoves(id)
         let top = -scrollView.adjustedContentInset.top, glide = scrollView.bounds.height * 2
         guard scrollView.contentOffset.y - top > glide * 1.5 else { return true }
@@ -88,39 +89,5 @@ extension Presenter {
     }
 }
 
-#if os(iOS)
-extension RouteController {
-    func scrollViewShouldScrollToTop(_ scrollView: UIScrollView) -> Bool {
-        host?.presenter.elementScrolls.userScrolled(scrollView)
-        return true
-    }
-}
-#endif
-
-extension NavigationHost {
-    /// Native selection wins over `navigationScroll`, then the first vertical scroller
-    /// (LLP 1115.000 D11.1). The bar, scroll-to-top actions and route hatch share this rule.
-    func contentScroller(of c: RouteController) -> NodeView? {
-        c.nativeContentScrollEdges.contains(.top) ? c.nativeContentScroller : automaticContentScroller(of: c)
-    }
-
-    /// The content scroller with no native selection: the one `navigationScroll` names (none when
-    /// no scrolling element carries the name), else the first vertical scroller.
-    func automaticContentScroller(of c: RouteController) -> NodeView? {
-        if let name = c.node.props["navigationScroll"], !name.isEmpty {
-            return element(named: name, in: c.node).flatMap { $0.scrollView == nil ? nil : $0 }
-        }
-        return Presenter.firstVerticalScroller(under: c.node)
-    }
-
-    /// The native selection, else the automatic content scroller's scroll view, else, with no
-    /// `navigationScroll`, the route's own viewport where it has one.
-    func contentScrollView(of route: RouteController) -> UIScrollView? {
-        if route.nativeContentScrollEdges.contains(.top) { return route.contentScrollView(for: .top) }
-        if let node = automaticContentScroller(of: route) { return shownScroll(node) }
-        if let name = route.node.props["navigationScroll"], !name.isEmpty { return nil }
-        return route.contentViewport
-    }
-}
 
 #endif

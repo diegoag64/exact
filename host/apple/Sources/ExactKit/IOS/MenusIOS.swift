@@ -22,7 +22,7 @@ final class MenuHost {
     /// Native buttons that are pull-downs (`nativeMenu`), by node.
     var nativeMenus: [UInt32: NativeButtonIOS] = [:]
     #endif
-    private var confirmation: Confirmation?
+    private(set) var confirmation: Confirmation?
     /// A press another invoker activates (`activating`): it invokes nothing.
     var invocationOwner: NodeView?
     /// A press whose caller presents what its command opens (a pull-down, a
@@ -146,8 +146,8 @@ final class MenuHost {
     #endif
     /// The focus a native menu sets aside while it shows (MenuFocusIOS.swift).
     private(set) lazy var focus = MenuFocus(presenter: presenter!)
-    /// A `dialog` that is not a confirmation, as UIKit's sheet (DialogSheetIOS.swift).
-    private(set) lazy var sheets = DialogSheets(presenter: presenter!)
+    /// The presenter's dialog sheets (`DialogLink`).
+    private var sheets: any DialogHosting { presenter!.dialogs }
 
     private func isDialog(_ node: NodeView) -> Bool { node.props["semanticTag"] == "dialog" }
     func isConfirmation(_ node: NodeView) -> Bool {
@@ -562,21 +562,24 @@ final class MenuHost {
             button.isEnabled = entry.enabled
         }
     }
-    func cancelled(_ owner: Confirmation) {
+    /// UIKit dismissed it: a tap outside or a swipe (`closeRequest`), or its presenter went.
+    func cancelled(_ owner: Confirmation, closeRequest: Bool) {
         // UIKit also delivers this after a selected action's handler. That
         // notification must not cancel the action awaiting the next turn.
         guard confirmation === owner, !owner.finishing else { return }
         owner.finishing = true
         owner.fields.forEach { $0.end() }
         confirmation = nil
+        if closeRequest, owner.modal { owner.popover?.queueDialogCancel() }
         owner.popover?.queueDialogClose()
         if let pop = owner.popover { presenter?.popoverEvents.changed(pop, open: false) }
         DispatchQueue.main.async { [weak self] in self?.resumeAfterRouteDismissal() }
     }
     /// `chosen` is the selected action, nil for the cancel.
-    private func finish(_ owner: Confirmation, chosen: NodeView?) {
+    private func finish(_ owner: Confirmation, chosen: NodeView?, closeRequest: Bool = false) {
         guard confirmation === owner, !owner.finishing else { return }
         owner.finishing = true
+        owner.closeRequest = closeRequest && chosen == nil
         // A field's `change` before the action's press, as a blur's before a click.
         owner.fields.forEach { $0.end() }
         owner.chosen = chosen
@@ -601,6 +604,7 @@ final class MenuHost {
                 self.resumeAfterRouteDismissal()
                 if let action { self.presenter?.press(action.id) }
             }
+            if owner.closeRequest, owner.modal { owner.popover?.queueDialogCancel() }
             owner.popover?.queueDialogClose()
         }
     }
@@ -809,6 +813,7 @@ final class MenuHost {
     }
     /// Revisit only the hosts captured at opening, including after UIKit detaches one.
     func rehostPopovers() {
+        guard !agentOpen.isEmpty else { return }
         for entry in agentOpen.values.sorted(by: { $0.order < $1.order }) { lift(entry) }
     }
     func replacePopoverHost(_ old: UIViewController, with controller: UIViewController) {
@@ -1160,8 +1165,9 @@ final class MenuHost {
     }
     /// A sheet action's handler: the action at `index` as presented, nil
     /// for the cancel. Its own entry, never a successor's at that index.
+    /// UIKit runs the cancel's handler for its button, a hardware Escape and a popover's tap outside: only the last is a close request.
     private func select(_ owner: Confirmation, _ index: Int?) {
-        guard let index else { finish(owner, chosen: nil); return }
+        guard let index else { finish(owner, chosen: nil, closeRequest: owner.style == .popover); return }
         guard owner.actions.indices.contains(index), let node = owner.actions[index].node else {
             finish(owner, chosen: nil); return
         }
@@ -1217,7 +1223,7 @@ final class MenuHost {
         if dismissPopover() { return true }
         guard let owner = confirmation else { return nil }
         guard !inTransition, valid(owner) else { return false }
-        finish(owner, chosen: nil)
+        finish(owner, chosen: nil, closeRequest: true)
         return true
     }
 
@@ -1286,7 +1292,7 @@ final class MenuHost {
     /// LLP 1115.000 D11.5: a `dialog` that is not a confirmation by its rows
     /// is a sheet, its content laid out by the kernel (DialogSheetIOS.swift).
     func isSheet(_ node: NodeView) -> Bool {
-        isDialog(node) && node.props["popover"] == nil && (sheets.owns(node) || DialogSheets.paintsOwnSurface(node) || unconfirmable(node, modal: true) != nil)
+        isDialog(node) && node.props["popover"] == nil && (sheets.owns(node) || DialogShape.paintsOwnSurface(node) || unconfirmable(node, modal: true) != nil)
     }
     private func busy(_ controller: UIViewController) -> Bool {
         controller.presentedViewController != nil || controller.isBeingDismissed || controller.isBeingPresented
@@ -1348,7 +1354,7 @@ final class MenuHost {
         // has no other presentation here.
         // A dialog its author painted is the author's box in the top layer,
         // whatever its rows (LLP 1035.001 D11).
-        if let why = DialogSheets.paintsOwnSurface(pop) && isDialog(pop) ? "" : unconfirmable(pop, modal: modal) {
+        if let why = DialogShape.paintsOwnSurface(pop) && isDialog(pop) ? "" : unconfirmable(pop, modal: modal) {
             guard isDialog(pop), pop.props["popover"] == nil else { return refuse(why) }
             guard let controller = controller(for: source ?? pop), !busy(controller) else { return false }
             return sheets.show(pop, from: source, over: controller)

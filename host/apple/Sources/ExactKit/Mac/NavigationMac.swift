@@ -5,15 +5,10 @@ import AppKit
 final class NavigationHost {
     unowned let presenter: Presenter
     private var refused: [UInt32: String] = [:]
-    private var gates: [UInt32: [Bool]] = [:]
     /// The tabpanels a root last hid or showed: one it stops naming shows again.
     private var panels: Set<UInt32> = []
     /// Each root's stack as last shown, its keys through its selected route.
     private var shown: [UInt32: [String]] = [:]
-    /// The ops that can change what hides or disables a node: a frame, a
-    /// paint or a presentation value (every frame of an animation) cannot,
-    /// and each write posts an accessibility notification.
-    private static let gating: Set<BatchOp.Kind> = [.create, .props, .style, .children, .roots]
     init(presenter: Presenter) { self.presenter = presenter }
     /// LLP 1080.001 D3: a route or tabpanel this host hid (the web's
     /// hide-and-inert rule), which it inerts with it.
@@ -53,6 +48,8 @@ final class NavigationHost {
     var sheetsRead = false
     /// @ref LLP 1115.002 D4 — the selected stack as a list beside its detail (SplitMac.swift).
     private(set) lazy var split = SplitHost(presenter)
+    /// @ref LLP 1013.001 — a route's own entrance and exit (RouteTransitionMac.swift).
+    private(set) lazy var transitions = RouteTransitions(presenter: presenter)
     /// The modal route the root shows painted in the window, on its ground.
     var paintedModal: NodeView? {
         guard let selection, selection.at > 0, selection.stack.indices.contains(selection.at), let route = presenter.views[selection.stack[selection.at]],
@@ -60,7 +57,8 @@ final class NavigationHost {
         return route
     }
     /// What is shown, read again with no batch: a sheet left, a window came.
-    func resync() { sync(Batch(ops: [], timers: false, motion: false, clock: nil, error: nil), concerned: true) }
+    func resync() { project(Batch(ops: [], timers: false, motion: false, clock: nil, error: nil), reparented: [], concerned: true) }
+    func sync(_ batch: Batch, reparented: Set<UInt32> = []) { project(batch, reparented: reparented, concerned: nil) }
     /// A stack's routes as authored, a route in its sheet's window among
     /// them. What else has left `node`'s views for a container of its own
     /// (a `dialog` in its sheet) is no route.
@@ -72,7 +70,7 @@ final class NavigationHost {
     /// The page's ground changed colour: the grounds are painted again.
     func groundChanged() { for ground in grounds.values { ground.needsDisplay = true }; split.groundChanged() }
     func reset() {
-        refused.removeAll(); gates.removeAll(); panels.removeAll(); shown.removeAll(); selection = nil; barRoute = false; root = nil; routeless = false
+        refused.removeAll(); panels.removeAll(); shown.removeAll(); selection = nil; barRoute = false; root = nil; routeless = false
         oneLocationAsked = nil; sheets = []; keptSheets.removeAll(); split.reset()
         for ground in grounds.values { ground.removeFromSuperview() }
         grounds.removeAll()
@@ -98,9 +96,9 @@ final class NavigationHost {
         }
     }
 
-    func sync(_ batch: Batch, reparented: Set<UInt32> = [], concerned: Bool? = nil) {
-        var touched = Set<UInt32>()
-        var subtrees = reparented
+    private func project(_ batch: Batch, reparented: Set<UInt32>, concerned: Bool?) {
+        let gating = presenter.inputGates.touched(by: batch, reparented: reparented)
+        var subtrees = gating.subtrees
         // Whether a header can have changed: what the window's bar reads again for.
         let concerned = concerned ?? presenter.toolbar.mayChangeAHeader(batch)
         if concerned { sheetsRead = true }
@@ -109,16 +107,7 @@ final class NavigationHost {
             // A row, or a symbol in one, came or changed: the split's painted list is read again (SplitMac.swift `veil`).
             if op.op == .create || op.op == .children || op.op == .props { split.rowsChanged = true }
             if op.op == .style || op.op == .frame, let id = op.nodeID { split.restyled(id) }
-            if let id = op.nodeID {
-                if op.op == .destroy { gates.removeValue(forKey: id); refused.removeValue(forKey: id); shown.removeValue(forKey: id); keptSheets.removeValue(forKey: id) }
-                else if Self.gating.contains(op.op) { touched.insert(id) }
-            }
-            // A children op names retained siblings too. Only changed ancestry
-            // can change their inherited gates; a list append must not revisit
-            // every paragraph and cell already mounted in the window.
-            if op.op == .roots {
-                subtrees.formUnion(op.ids)
-            }
+            if op.op == .destroy, let id = op.nodeID { refused.removeValue(forKey: id); shown.removeValue(forKey: id); keptSheets.removeValue(forKey: id) }
         }
         func gate(_ node: NodeView, hidden: Bool, inert: Bool) {
             if node.isHidden != hidden || node.routeInert != inert { subtrees.insert(node.id) }
@@ -177,7 +166,11 @@ final class NavigationHost {
                 // The selected stack shows the route the root names; another
                 // keeps its top laid out under its hidden panel.
                 let selected = stack == at ? routes.firstIndex { $0.props["navigationKey"] == key } ?? 0 : routes.count - 1
-                if stack == at { shown[nav.id] = routes.prefix(selected + 1).map { $0.props["navigationKey"] ?? "" } }
+                if stack == at {
+                    let before = shown[nav.id] ?? [], after = routes.prefix(selected + 1).map { $0.props["navigationKey"] ?? "" }
+                    shown[nav.id] = after
+                    if nav === roots.first { transitions.changed(from: before, to: after, stack: routes, at: selected) }
+                }
                 if stack == at, nav === roots.first { selection = (nav.id, routes.map(\.id), selected) }
                 if nav === roots.first, routes.contains(where: { $0.props["navigationBar"] != "none" }) { barRoute = true }
                 // A modal route painted in the window shows the route beneath it, and so does a
@@ -200,8 +193,12 @@ final class NavigationHost {
                     let column = splits && (index == 0 || route === beside)
                     // In the detail's pane, out of its hidden panel's views: hidden and inert by name.
                     let away = stack != at && split.holds(route)
-                    gate(route, hidden: leaving ? route.isHidden : away || (index != selected && !(overPage && index == selected - 1) && !under && !column),
-                         inert: away || (index != selected && !(splits && index == 0 && !covered)))
+                    // A route a push holds beneath its entrance stays shown, as does a route playing its
+                    // exit, and they stay inert until the part ends.
+                    let beneath = transitions.held?.beneath == route.id || transitions.exiting == route.id
+                    let held = beneath || transitions.held?.arriving == route.id
+                    gate(route, hidden: leaving ? route.isHidden : !beneath && (away || (index != selected && !(overPage && index == selected - 1) && !under && !column)),
+                         inert: held || away || (index != selected && !(splits && index == 0 && !covered)))
                 }
             }
         }
@@ -213,65 +210,7 @@ final class NavigationHost {
         }
         panels = managed
         for id in Array(grounds.keys) where !grounded.contains(id) { grounds.removeValue(forKey: id)?.removeFromSuperview() }
-        // Reuse the presenter's ancestor inert gate for focus/input. AppKit's
-        // accessibility subtree is suppressed as HTML inert suppresses it.
-        for id in touched {
-            guard let node = presenter.views[id] else { continue }
-            let gate = [node.isHidden, node.routeInert, node.props["inert"] == "true", node.props["accessibilityElementsHidden"] == "true"]
-            if let old = gates[id], old != gate { subtrees.insert(id) }
-            gates[id] = gate
-        }
-        func descendants(_ view: NSView) {
-            if let node = view as? NodeView { touched.insert(node.id) }
-            for child in view.subviews { descendants(child) }
-        }
-        for id in subtrees { if let node = presenter.views[id] { descendants(node) } }
-        // The placeholder the split's pane shows is out of its route's views: its gates follow its authored ancestors'.
-        if let lifted = split.shownPlaceholder, !subtrees.isEmpty,
-           presenter.logicalAncestry(of: lifted).contains(where: { ($0 as? NodeView).map { subtrees.contains($0.id) } ?? false }) {
-            descendants(lifted)
-        }
-        for id in touched {
-            guard let node = presenter.views[id] else { continue }
-            gates[id] = [node.isHidden, node.routeInert, node.props["inert"] == "true", node.props["accessibilityElementsHidden"] == "true"]
-        }
-        refreshInputGates(touched.compactMap { presenter.views[$0] })
-    }
-
-    /// Top-layer ownership changes the same native input/AX gates as inert.
-    /// The focus leaves a node input no longer reaches (a hidden view, an
-    /// inert one: authored, a route's, behind a dialog) and a control that
-    /// became disabled (HTML's focus fixup rule), whose place Tab goes on
-    /// from (`Presenter.tabStart`). `aria-hidden` takes a node out of the
-    /// accessibility tree only, and the focus stays, as in Chrome.
-    func refreshInputGates(_ nodes: [NodeView]) {
-        // Nothing below changes what makes a node inert: the ancestors' answers are asked once, as a hit test asks them.
-        let outermost = NodeView.hitInert == nil
-        if outermost { NodeView.hitInert = [:] }
-        defer { if outermost { NodeView.hitInert = nil } }
-        for node in nodes {
-            let inert = node.inert
-            let unreachable = inert || node.isHiddenOrHasHiddenAncestor
-            // Read before a field is disabled below, which can end its editing.
-            let window = node.window, responder = window?.firstResponder as? NSView
-            let focused = responder.map { $0 === node || $0.isDescendant(of: node) || node.field?.currentEditor() === $0 } ?? false
-            // The AX getter can traverse the legacy unsupported-attribute path
-            // for non-elements; writing this property is cheaper than querying it.
-            // Each write posts a notification, changed or not.
-            let hidden = node.accessibilityInert || node.isHiddenOrHasHiddenAncestor || node.accessibilityHiddenByProp
-            if node.accessibilityHiddenWritten != hidden { node.setAccessibilityHidden(hidden) }
-            let enabled = !node.disabled && !inert
-            if let field = node.field, field.isEnabled != enabled { field.isEnabled = enabled }
-            let editable = enabled && node.props["editable"] != "false"
-            if let area = node.textArea, area.isEditable != editable { area.isEditable = editable }
-            guard focused, unreachable || node.formDisabled, let window else { continue }
-            if !unreachable {
-                presenter.tabStart = presenter.keyView(of: node)
-                presenter.keyViewLoopStale = true
-            }
-            // A field that was disabled may have ended its editing already.
-            if window.firstResponder === responder { window.makeFirstResponder(nil) }
-        }
+        presenter.inputGates.settle(touched: gating.touched, subtrees: subtrees, placeholder: split.shownPlaceholder)
     }
 }
 

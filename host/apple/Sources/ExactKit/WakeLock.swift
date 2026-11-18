@@ -40,15 +40,8 @@ package enum WakeLock {
         }
         #else
         // The agent keeps the idle timer off for the whole drive
-        // (`Agent.startSocket`): the last holder leaves it so.
+        // (`AgentLink.startSocket`): the last holder leaves it so.
         if on || !ExactEnv.agentMode { UIApplication.shared.isIdleTimerDisabled = on }
         #endif
-    }
-}
-
-extension Presenter {
-    /// The batch's word on the wake lock, when it says one.
-    func applyWakeLock(_ batch: Batch) {
-        if let held = batch.wakelock { WakeLock.hold(self, held) }
     }
 }

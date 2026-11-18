@@ -75,12 +75,11 @@ pub(crate) fn run<D: DataSource>(
     // A GPU canvas's `Frame::period_ms` (LLP 1009).
     p.set_frame_period(display.period_ms());
     let mut plan_seen = config.dev_plan.as_deref().and_then(mtime);
-    // The dev plan's modification time and since when it has waited on requests in flight.
-    let mut held: Option<(Option<ReloadStamp>, Instant)> = None;
-    // First pixel is the first frame presented (LLP 1026 D11); the update
-    // check follows two seconds after it, off the boot path.
+    // First pixel is the first frame presented (LLP 1026 D11). It asks for
+    // the launch's update check; the presenter's cadence asks for the rest
+    // (LLP 1030.006 D5). The window counts as in the foreground throughout:
+    // this loop is not told its focus.
     let mut first_pixel: Option<Instant> = None;
-    let mut check_due: Option<Instant> = None;
     loop {
         if measured {
             // A replaced host's flip and samples are the old runner's.
@@ -102,9 +101,9 @@ pub(crate) fn run<D: DataSource>(
                 marks.submitted(first_pixel.is_none());
             }
             match submitted {
-                Ok(Some(frame)) => {
-                    presented(&mut p, frame, events, &mut first_pixel, &mut check_due)
-                }
+                // The first picture's synchronous modeset has no flip event:
+                // it is presented when `set_crtc` returns (LLP 1003.001 D9).
+                Ok(Some(frame)) => presented(&mut p, frame, wall(), events, &mut first_pixel),
                 Ok(None) => {}
                 Err(e) => {
                     eprintln!("exact: {e}");
@@ -151,8 +150,8 @@ pub(crate) fn run<D: DataSource>(
         if p.delivery_pending() {
             timeout = if timeout < 0 { 50 } else { timeout.min(50) };
         }
-        if let Some(due) = check_due {
-            let wait = due.saturating_duration_since(Instant::now()).as_millis() as i32;
+        if let Some(due) = p.update_check_due() {
+            let wait = due.min(i32::MAX as f64) as i32;
             timeout = if timeout < 0 { wait } else { timeout.min(wait) };
         }
         if events.idle() && timeout < 0 {
@@ -171,6 +170,13 @@ pub(crate) fn run<D: DataSource>(
         match display.wait(&fds, timeout) {
             Ok(true) => match display.ready() {
                 Ok(Some(frame)) => {
+                    // The flip's kernel timestamp, else when it was heard.
+                    #[cfg(target_os = "linux")]
+                    let at = display
+                        .last_flip()
+                        .map_or_else(wall, |at| monotonic_ms(at, wall()));
+                    #[cfg(not(target_os = "linux"))]
+                    let at = wall();
                     #[cfg(target_os = "linux")]
                     if !marks.done() {
                         if let Some(at) = display.last_flip() {
@@ -182,7 +188,7 @@ pub(crate) fn run<D: DataSource>(
                             );
                         }
                     }
-                    presented(&mut p, frame, events, &mut first_pixel, &mut check_due);
+                    presented(&mut p, frame, at, events, &mut first_pixel);
                     let paint = p.last_frame_ms().map(|(ms, _)| ms);
                     if let Some(line) = display
                         .sequence()
@@ -224,10 +230,6 @@ pub(crate) fn run<D: DataSource>(
         }
         p.poll_update();
         p.run_commands(data);
-        if check_due.is_some_and(|due| Instant::now() >= due) {
-            check_due = None;
-            p.check_update();
-        }
         events.turn(&mut p, wall);
 
         if let Some(e) = p.admit_idle_timer(wall()) {
@@ -269,34 +271,30 @@ pub(crate) fn run<D: DataSource>(
                 plan_seen = m.clone();
                 if let Ok(bytes) = std::fs::read(path) {
                     let t = Instant::now();
+                    let name = path
+                        .file_name()
+                        .map(|f| f.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                     let module = exact_painted::delivery::Module::local(path, &config.compat);
-                    let let_go = held.as_ref().is_some_and(|(at, t)| {
-                        *at == m && t.elapsed() >= exact_painted::host::LET_GO_AFTER
-                    });
+                    // A held candidate is the presenter's until its hold
+                    // clears (LLP 1029.000.002 D9); its end is said then.
+                    let later = name.clone();
                     match module
                         .map_err(exact_painted::host::HostError::Asset)
-                        .and_then(|module| p.reload_module(&bytes, data(), module, let_go))
-                    {
-                        Ok(e) => println!(
-                            "reloaded {} in {:.1} ms{}",
-                            path.file_name()
-                                .map(|f| f.to_string_lossy().into_owned())
-                                .unwrap_or_default(),
+                        .and_then(|module| {
+                            p.reload_with_outcome(&bytes, data(), module, false, move |outcome| {
+                                println!("reload of {later}, held: {outcome:?}")
+                            })
+                        }) {
+                        Ok(exact_painted::presenter::ReloadResult::Held(reason)) => {
+                            println!("reload of {name} held: {reason}")
+                        }
+                        Ok(exact_painted::presenter::ReloadResult::Applied(e)) => println!(
+                            "reloaded {name} in {:.1} ms{}",
                             t.elapsed().as_secs_f64() * 1000.0,
                             e.map(|e| format!(" — {e}")).unwrap_or_default()
                         ),
-                        Err(exact_painted::host::HostError::PreparingModule) => plan_seen = None,
-                        // Asked again each turn; after a second it lets the requests go (LLP 1007 §6).
-                        Err(exact_painted::host::HostError::RequestsPending) => {
-                            plan_seen = None;
-                            if held.as_ref().is_none_or(|(at, _)| *at != m) {
-                                held = Some((m.clone(), Instant::now()));
-                            }
-                        }
                         Err(e) => eprintln!("exact: reload: {e}"),
-                    }
-                    if plan_seen.is_some() {
-                        held = None;
                     }
                 }
             }
@@ -347,22 +345,41 @@ pub(super) fn work_timeout(pending: bool, animation: bool, due: Option<f64>, now
     }
 }
 
+/// A `CLOCK_MONOTONIC` instant (a DRM flip's) on the loop's clock, `wall`
+/// being that clock now: `Instant` reads `CLOCK_MONOTONIC` on Linux.
+#[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+fn monotonic_ms(at: Duration, wall: f64) -> f64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: `now` is a valid timespec for the call to fill.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    let now = now.tv_sec as f64 + now.tv_nsec as f64 / 1e9;
+    wall - (now - at.as_secs_f64()) * 1000.0
+}
+
 fn presented<D: DataSource>(
     p: &mut Presenter<D>,
     frame: SubmittedFrame,
+    at: f64,
     events: &mut impl Events<D>,
     first: &mut Option<Instant>,
-    check_due: &mut Option<Instant>,
 ) {
     // Pixels belong to this receipt, even if input/reload changed the live Host.
     events.publish(frame.pixels().clone());
     p.display_complete(&frame);
+    // What the picture carried starts at its present (LLP 1003.001 D9).
+    if let Some(e) = p.display_presented(&frame, at) {
+        eprintln!("exact: {e}");
+    }
     // Its boxes are the ones the pointer rests on now: their hover, and
     // their `:hover` looks (LLP 1121 D8), follow (#139).
     p.follow_pointer();
     if first.is_none() {
         *first = Some(Instant::now());
-        *check_due = Some(Instant::now() + Duration::from_secs(2));
+        p.update_launched();
     }
 }
 

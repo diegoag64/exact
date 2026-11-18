@@ -18,7 +18,7 @@ mod border;
 pub(crate) mod effects;
 mod engine;
 pub use crate::gradient::link as link_gradients;
-pub use effects::link as link_effects;
+pub use effects::{link as link_effects, link_clip_path, link_filter};
 mod grid;
 pub use crate::corner::link as link_corners;
 pub use grid::link as link_grid;
@@ -32,18 +32,26 @@ pub use stroke::link as link_text_stroke;
 pub use symbols::link as link_symbol_palette;
 pub mod calc;
 mod floor;
+mod keyword;
+pub use keyword::SizeKeyword;
 mod handles;
+pub(crate) use handles::less;
 mod intern;
+pub mod safe_area_properties;
 pub use calc::Comparison;
 use handles::calc_handle;
 pub(crate) use handles::{calc_handle_in, resolve_calc, tree_handle, LayoutEnv};
 pub mod env;
+pub mod targets;
 pub use env::link as link_segments;
 pub use env::{uses_env, Edge, Env, EnvRefusal, Rect, Region, SegmentVar, TitleBarVar};
 /// Link the wide colour forms (`lab()`, `lch()`, `oklab()`, `oklch()`,
 /// `color()`) into every colour row's grammar: native hosts and the compiler
 /// at start, a web artifact by use (LLP 1047 D2, LLP 1056 §8.2).
 pub use exact_motion::color::css::link_wide as link_wide_colors;
+
+mod link;
+pub use link::link_all;
 mod viewport;
 pub use viewport::ViewportUnit;
 pub mod cells;
@@ -104,13 +112,16 @@ pub enum Dimension {
     /// handle; resolved as `env()` is, or at layout against its basis when
     /// it holds a percentage ([`calc`]).
     Compare(Comparison),
+    /// A size keyword, on the rows that take it
+    /// (`StyleId::admits_size_keyword`).
+    Keyword(SizeKeyword),
 }
 
 impl Dimension {
     /// Whether the value is a finite number (or `Auto`).
     pub fn is_finite(&self) -> bool {
         match self {
-            Dimension::Auto | Dimension::Compare(_) => true,
+            Dimension::Auto | Dimension::Compare(_) | Dimension::Keyword(_) => true,
             Dimension::Points(v)
             | Dimension::Percent(v)
             | Dimension::Viewport(_, v)
@@ -355,6 +366,8 @@ impl StyleValue<'_> {
         let t = metrics::text(t).unwrap_or(t).trim();
         t.is_empty()
             || t.eq_ignore_ascii_case("unset")
+            || (t.eq_ignore_ascii_case("none")
+                && matches!(style, StyleId::PressTranslate | StyleId::PressTranslatePercent))
             || (t.eq_ignore_ascii_case("inherit") && StyleMask::INHERITED.has(style))
             || (t.eq_ignore_ascii_case("currentcolor") && style == StyleId::TextColor)
             // @ref LLP 1034 §8: a bound `normal` follows the surrounding
@@ -490,6 +503,12 @@ impl StyleValue<'_> {
             StyleValue::Percent(p) if (*p as f32).is_finite() => Ok(Dimension::Percent(*p as f32)),
             StyleValue::Auto if admits_auto => Ok(Dimension::Auto),
             StyleValue::Auto => Err(StyleValueError::AutoNotAdmitted { style }),
+            StyleValue::Text(t) if SizeKeyword::parse(t).is_some() => {
+                return match SizeKeyword::parse(t) {
+                    Some(k) if style.admits_size_keyword(k) => Ok(Dimension::Keyword(k)),
+                    _ => Err(StyleValueError::KeywordNotAdmitted { style }),
+                };
+            }
             // CSS's initial maximum, the unbounded one `auto` already names here (LLP 1102 §3.11).
             StyleValue::Text(t)
                 if matches!(style, StyleId::MaxWidth | StyleId::MaxHeight)
@@ -604,37 +623,6 @@ impl StyleValue<'_> {
             }),
         }
     }
-
-    pub(crate) fn vec2(&self, style: StyleId) -> Result<Vec2, StyleValueError> {
-        match self {
-            StyleValue::Vec2(x, y) if x.is_finite() && y.is_finite() => Ok(Vec2 { x: *x, y: *y }),
-            StyleValue::Text(t) if style == StyleId::TranslateVelocity => space::velocity(t),
-            // @ref LLP 1077 D8 — each row sets its part of translate (lengths, percentages, z).
-            StyleValue::Text(t)
-                if style == StyleId::Translate || style == StyleId::TranslatePercent =>
-            {
-                space::translate(t)
-                    .map(|(px, pct)| if style == StyleId::Translate { px } else { pct })
-                    .ok_or(StyleValueError::WrongKind {
-                        style,
-                        expected: "one or two lengths in px or percentages of the box (unitless zero allowed)",
-                    })
-            }
-            // `translate: -50%`: one percentage, the x's, which the
-            // compiler and the runner pass as a percentage.
-            StyleValue::Percent(p)
-                if p.is_finite()
-                    && (style == StyleId::Translate || style == StyleId::TranslatePercent) =>
-            {
-                let x = if style == StyleId::Translate { 0.0 } else { *p as f32 };
-                Ok(Vec2 { x, y: 0.0 })
-            }
-            _ => Err(StyleValueError::WrongKind {
-                style,
-                expected: "vec2",
-            }),
-        }
-    }
 }
 
 /// Whether `set_dynamic` reads any text on row `style` besides the CSS-wide
@@ -662,6 +650,8 @@ pub fn takes_text(style: StyleId) -> bool {
                         | TextStrokeWidth
                         | ShapeMargin
                         | FontStretch
+                        | MinZoom
+                        | MaxZoom
                 )
         }
         StyleCodec::U16 | StyleCodec::U32 | StyleCodec::I32 => false,
@@ -916,6 +906,8 @@ pub enum RowValue<'a> {
     AnimationRange(&'a crate::timeline::AnimationRange),
     /// CSS `timeline-scope` (LLP 1057.003 D4).
     TimelineScope(&'a crate::timeline::TimelineScope),
+    /// A node's runtime custom properties (LLP 1123 D5).
+    SafeAreaProperties(&'a crate::style::safe_area_properties::SafeAreaProperties),
     /// CSS `scroll-timeline-name` or `view-timeline-name` (LLP 1057.003 D5).
     TimelineName(&'a crate::timeline::TimelineName),
     /// CSS `view-timeline-inset` (LLP 1057.003 D5).
@@ -1270,12 +1262,12 @@ impl StyleProps {
             height: self.height.floor_taffy(env),
         };
         s.min_size = taffy::geometry::Size {
-            width: self.min_width.floor_lpa(env),
-            height: self.min_height.floor_lpa(env),
+            width: self.min_width.floor_taffy(env),
+            height: self.min_height.floor_taffy(env),
         };
         s.max_size = taffy::geometry::Size {
-            width: self.max_width.floor_lpa(env),
-            height: self.max_height.floor_lpa(env),
+            width: self.max_width.floor_taffy(env),
+            height: self.max_height.floor_taffy(env),
         };
         s.aspect_ratio = self.rare.aspect_ratio.preferred();
         s.aspect_ratio_content_box = self.rare.aspect_ratio.content_box();
@@ -1448,6 +1440,10 @@ pub fn taffy_style(arena: &NodeArena, slot: u32) -> taffy::style::Style {
     crate::grouped::apply_card_margins(arena, slot, &mut s);
     // After the mirror: a table's sides are what they cancel, physically.
     table::apply(arena, slot, &mut s);
+    // After the mirror and a table's padding: a reservation is physical
+    let reserved = crate::kernel::block::reservation::lay_out(arena, slot, &style, &env, &mut s);
+    crate::kernel::bar::lay_out(arena, slot, reserved, &mut s);
+    crate::kernel::ignore::lay_out(arena, slot, &mut s);
     // @ref LLP 1115.002 D8.2 — the containing block a host gave the subtree.
     crate::kernel::apply_block(arena, slot, &mut s);
     // @ref LLP 1074 T1 — a root is the containing block of every absolutely
@@ -1458,6 +1454,25 @@ pub fn taffy_style(arena: &NodeArena, slot: u32) -> taffy::style::Style {
     }
     lowering.finish(&mut s);
     s
+}
+
+/// `side` with `points` more.
+pub(crate) fn plus(
+    side: taffy::style::LengthPercentage,
+    points: f32,
+) -> taffy::style::LengthPercentage {
+    use taffy::style::{CompactLength, LengthPercentage};
+    let raw = side.into_raw();
+    match raw.tag() {
+        CompactLength::LENGTH_TAG => length(raw.value() + points),
+        CompactLength::PERCENT_TAG => LengthPercentage::calc(handles::calc_handle_in(
+            raw.value() * 100.0,
+            0.0,
+            false,
+            points,
+        )),
+        _ => LengthPercentage::calc(handles::plus(raw.calc_value(), points)),
+    }
 }
 
 mod decoration;

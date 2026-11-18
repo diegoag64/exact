@@ -5,6 +5,19 @@
 #[macro_export]
 macro_rules! canvas_jni_start {
     () => {
+        /// The running generation's asset directory, or null for the APK's
+        /// own (`delivery::reader_root`, LLP 1030.006 D1).
+        #[no_mangle]
+        pub unsafe extern "system" fn Java_dev_exact_canvas_Native_assetRoot(
+            env: *mut JNIEnv,
+            _class: jclass,
+        ) -> jstring {
+            match $crate::delivery::reader_root() {
+                Some(dir) => $crate::canvas::field::java(env, &dir.to_string_lossy()),
+                None => std::ptr::null_mut(),
+            }
+        }
+
         /// The process environment the host reads, from the reader's files
         /// directory `dir`.
         unsafe fn environment(env: *mut JNIEnv, dir: jstring, live: jboolean) {
@@ -22,6 +35,8 @@ macro_rules! canvas_jni_start {
         /// Boot the app, with its update store under `store` (the reader's
         /// no-backup directory) when the library links one.
         fn boot(size: (u32, u32), scale: f32, store: &str) -> Result<Host, String> {
+            static LAUNCH: std::sync::Once = std::sync::Once::new();
+            LAUNCH.call_once(launch_parts);
             let updates = updates().map(|open| (open, std::path::Path::new(store)));
             Host::boot(PLAN, COMPAT, size, scale, hatches(), updates)
         }
@@ -49,6 +64,7 @@ macro_rules! canvas_jni_start {
             $crate::canvas::field::attach(env, scale);
             $crate::canvas::legacy::attach(env);
             $crate::canvas::presence::attach(env);
+            $crate::canvas::secrets::attach(env);
             environment(env, dir, live);
             let store = string(env, store);
             match boot((width as u32, height as u32), scale, &store) {
@@ -105,6 +121,7 @@ macro_rules! canvas_jni_start {
             $crate::canvas::field::attach(env, scale);
             $crate::canvas::legacy::attach(env);
             $crate::canvas::presence::attach(env);
+            $crate::canvas::secrets::attach(env);
             // The environment is set here, before any other thread reads it.
             environment(env, dir, live);
             let store = string(env, store);

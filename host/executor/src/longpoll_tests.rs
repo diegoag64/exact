@@ -4,6 +4,10 @@
 //! test's to make.
 use super::super::super::{Core, WORKERS};
 use exact_runner::{FailureKind, Outcome, Request, RequestOut};
+
+/// The host work these tests hand out (LLP 1047.001 D12).
+struct TestWork;
+impl exact_runner::HostWork for TestWork {}
 use ibex2::{
     boundary::HostError,
     stdlib::{
@@ -117,6 +121,7 @@ fn poll(ticket: u64, same_cursor_event: bool, ceiling: u32) -> RequestOut {
         p.same_cursor_event = same_cursor_event;
     }
     RequestOut {
+        completion: None,
         class: exact_runner::RequestClass::Ordered,
         ticket,
         target: "live".into(),
@@ -503,6 +508,7 @@ fn a_long_poll_that_is_not_a_bodiless_http_get_is_refused() {
         // Refused at admission, before any path (the host settles it as an admission refusal).
         let refused = core.run_owned(
             RequestOut {
+                completion: None,
                 class: exact_runner::RequestClass::Ordered,
                 ticket: 1,
                 target: "live".into(),
@@ -677,11 +683,12 @@ fn a_long_poll_on_other_work_is_refused_at_admission_and_fences_ordered_work() {
     for request in [
         Request::native(b"x".to_vec()).long_poll("since", "seq"),
         Request::storage(b"{}".to_vec()).long_poll("since", "seq"),
-        Request::continuation(7).long_poll("since", "seq"),
+        Request::continuation::<TestWork>(7).long_poll("since", "seq"),
     ] {
         let (core, script, _woke) = setup(vec![Reply::Is(200, vec![JSON], r#"{"other":1}"#)]);
         let ordered = request.is_ordered();
         let first = RequestOut {
+            completion: None,
             class: exact_runner::RequestClass::Ordered,
             ticket: 1,
             target: "live".into(),
@@ -698,6 +705,7 @@ fn a_long_poll_on_other_work_is_refused_at_admission_and_fences_ordered_work() {
         let next = Request::get("https://example.test/changes?since=0")
             .header("accept", "application/json");
         let second = RequestOut {
+            completion: None,
             class: exact_runner::RequestClass::Ordered,
             ticket: 2,
             target: "read".into(),

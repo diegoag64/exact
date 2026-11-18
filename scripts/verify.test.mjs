@@ -516,15 +516,14 @@ test.skipIf(!!chromium().unavailable)('verify on a server app: its own server on
     assert.doesNotMatch(clean.stdout, /^ +lost /m);
     assert.ok(readFileSync(resolve(dir, 'data.db')).equals(before), 'the builder\'s data.db is as it was');
     assert.deepEqual(['data.db-wal', '.exact/verify/db.sqlite'].filter((f) => existsSync(resolve(dir, f))), []);
-    // LLP 1116.007 D2: `test` runs the same server on the same terms (it was the builder's to start, and `api-test`'s to know),
-    // and an older app's api-test, whose test.mjs runs `test` under `withAppServer`, still passes on the one server it started.
+    // LLP 1116.007 D2: test and an app's API-test wrapper share the server the wrapper starts.
     const plain = (verb = 'test') => spawnSync(process.execPath, [resolve(dir, 'exact.mjs'), verb, 'web'], { cwd: dir, encoding: 'utf8', timeout: 240_000, env: { ...process.env, EXACT_FEEDBACK: '0' } });
     const tested = plain();
     assert.equal(tested.status, 0, tested.stdout + tested.stderr);
     assert.match(tested.stderr, new RegExp(`^test: bun server\\.ts at http://127\\.0\\.0\\.1:${port}, on an empty database for each test \\(\\.exact/test/db\\.sqlite, removed after\\)$`, 'm'));
     assert.match(tested.stdout, /^3 passed, 0 failed$/m);
     assert.ok(readFileSync(resolve(dir, 'data.db')).equals(before), 'test leaves the builder\'s data.db as it was');
-    writeFileSync(resolve(dir, 'test.mjs'), "const { withAppServer } = await import(`${process.env.EXACT}/scripts/verify.mjs`);\nprocess.exit(await withAppServer(import.meta.dir, () =>\n  Bun.spawn(['bun', 'exact.mjs', 'test', ...process.argv.slice(2)], { cwd: import.meta.dir, stdio: ['inherit', 'inherit', 'inherit'] }).exited));\n");
+    writeFileSync(resolve(dir, 'test.mjs'), "const { withAppServer } = await import(`${process.env.EXACT}/scripts/verify.mjs`);\nconst built = await Bun.spawn(['bun', 'exact.mjs', 'web-build'], { cwd: import.meta.dir, stdio: ['inherit', 'inherit', 'inherit'] }).exited;\nif (built) process.exit(built);\nprocess.exit(await withAppServer(import.meta.dir, () =>\n  Bun.spawn(['bun', 'exact.mjs', 'test', ...process.argv.slice(2)], { cwd: import.meta.dir, stdio: ['inherit', 'inherit', 'inherit'] }).exited));\n");
     writeFileSync(resolve(dir, 'app.json'), JSON.stringify({ ...JSON.parse(readFileSync(resolve(dir, 'app.json'), 'utf8')), commands: { 'api-test': ['bun', 'test.mjs'] } }, null, 2));
     writeFileSync(resolve(dir, 'app.test.contract'), 'test "the wrapper’s server"\n  expect tree has "empty-add"\n');
     const old = plain('api-test');
@@ -545,11 +544,11 @@ test.skipIf(!!chromium().unavailable)('verify on a server app: its own server on
       assert.match(held.stderr, new RegExp(`^test: http://127\\.0\\.0\\.1:${port} already answers \\(pid ${dev.pid}: .*server\\.ts\\)`, 'm'));
       assert.equal(dev.exitCode, null, 'the dev server runs on');
     } finally { dev.kill(); await dev.exited; }
-    // LLP 1116.008 D1: a server.ts that hardcodes its database stops both before anything builds or runs: one line on
+    // LLP 1116.008 D1: a server.ts that hardcodes its database stops both before a server starts: one line on
     // stderr naming the entry and the fix, a non-zero exit, no output, and no server started.
     const server = readFileSync(resolve(dir, 'server.ts'), 'utf8');
     writeFileSync(resolve(dir, 'server.ts'), server.replace("process.env.DB ?? 'data.db'", "'data.db'"));
-    const line = /^(test|verify): server\.ts does not read its database's path from DB, so it cannot be run on an empty one: write new Database\(process\.env\.DB \?\? 'data\.db'\) in it .*app\.json: "commands": \{ "server": \["bun", "server\/index\.ts"\] \}\n$/;
+    const line = /^(test|verify): server\.ts does not read its database's path from DB, so it cannot be run on an empty one: write new Database\(process\.env\.DB \?\? 'data\.db'\) in it .*app\.json: "commands": \{ "server": \["bun", "server\/index\.ts"\] \}\n$/m;
     for (const r of [plain(), verify()]) {
       assert.equal(r.status, 1, r.stdout + r.stderr);
       assert.deepEqual([r.stdout, line.test(r.stderr)], ['', true], r.stdout + r.stderr);
@@ -583,6 +582,8 @@ test('agent\'s server: started on a database of its own, shared by overlapping d
   try {
     mkdirSync(dir, { recursive: true });
     writeFileSync(resolve(dir, 'app.ts'), `export const API = '${url}';\n`);
+    mkdirSync(resolve(dir, '.exact'), { recursive: true });
+    writeFileSync(resolve(dir, '.exact/typescript-inputs.json'), JSON.stringify({ modules: [['app.ts', resolve(dir, 'app.ts')]], types: [] }));
     // Without a server entry there is nothing to start; one that does not read DB is refused, as test refuses it.
     const { driveServer } = await import('./verify.mjs');
     assert.equal(await driveServer(dir, 's'), null);
@@ -716,7 +717,9 @@ test.skipIf(!!chromium().unavailable)('verify on a new app: clean, a failing tes
     assert.deepEqual([warned(quiet.stderr), warned(quiet.stdout)], [[], []]);
     const clean = verify('--shots', 'out/shots');
     assert.equal(clean.status, 0, clean.stdout + clean.stderr);
-    assert.ok(clean.lines.length <= 10, clean.stdout);
+    // Verify builds into a publication of its own, so its report starts with that build.
+    assert.match(clean.lines[0], /^built web \(/, clean.stdout);
+    assert.ok(clean.lines.length <= 11, clean.stdout);
     assert.ok(clean.lines.includes("largest text size (root font size 53 px at 390x844, iOS's body at its largest), 5 screens: nothing spills"), clean.stdout); // 4, and 1 the tests pass through
     assert.ok(!clean.lines.some((l) => l.startsWith('compiler:')), clean.stdout);
     assert.ok(clean.lines.includes('tests: 2 passed, 0 failed'), clean.stdout);
@@ -782,8 +785,8 @@ test.skipIf(!!chromium().unavailable)('verify on a new app: clean, a failing tes
     assert.deepEqual(warned(tested.stdout), []);
     const found = verify();
     assert.equal(found.status, 0, found.stdout + found.stderr);
-    assert.equal(found.lines[0], 'compiler: 1 warning', found.stdout);
-    assert.match(found.lines[1].trim(), warning);
+    assert.deepEqual([found.lines[0].replace(/\(.*\)$/, '(…)'), found.lines[1]], ['built web (…)', 'compiler: 1 warning'], found.stdout);
+    assert.match(found.lines[2].trim(), warning);
     assert.match(found.stdout, /^ {2}\(light only\) contrast Text "Faint"#\d+ \[.*\]: 1\.\d:1 \(#dddddd on #ffffff(?:, [^)]*)?\), needs 4\.5:1/m);
     assert.match(found.lines.at(-1), /^verify: 2 problems \(2 findings; the tests passed\) in /);
 
@@ -800,7 +803,7 @@ test.skipIf(!!chromium().unavailable)('verify on a new app: clean, a failing tes
     const r = JSON.parse(json.stdout);
     assert.equal(r.semantics.exit, 0);
     assert.match(r.semantics.output, /^verify receipt — reproduce:/m);
-    assert.deepEqual([r.host, r.built, r.tests.passed, r.tests.failed, r.problems, r.exit, r.screenshots.length, r.compiler.length], ['web', null, 2, 0, 2, 0, 7, 1]);
+    assert.deepEqual([r.host, r.built.warnings, r.tests.passed, r.tests.failed, r.problems, r.exit, r.screenshots.length, r.compiler.length], ['web', [], 2, 0, 2, 0, 7, 1]);
     // Each screen at each width and scheme: the first screen, the two test ends (in their own sessions), the relaunch.
     const onScreen = (screen) => r.checks.filter((c) => c.screen === screen).map((c) => `${c.size.join('x')} ${c.scheme} ${c.findings.map((f) => f.kind).join(',')}`);
     for (const screen of ['first screen', 'the greeting loads', "the header's button likes it", 'relaunch']) assert.deepEqual(onScreen(screen), ['390x844 light contrast', '390x844 dark ', '1280x900 light contrast', '1280x900 dark '], screen);
@@ -931,7 +934,7 @@ test('the largest text pass leaves native menu substitutes out of page scrolling
     { id: 11, type: 'Text', props: { testId: 'below-fold' } },
   ];
   const observation = { viewport: { w: 390, h: 844 }, items: [{ id: 1 }], advice: [{ kind: 'menu', id: 9 }] };
-  const s = { host: 'web', resize: async () => {}, prefer: async () => {}, clock: async () => {},
+  const s = { host: 'web', state: async () => ({}), resize: async () => {}, prefer: async () => {}, clock: async () => {},
     op: async req => req.op === 'tree' ? { nodes } : observation,
     carrier: { reveal: async id => { revealed.push(id); return { scrolled: false }; } } };
   const result = await largestText(s, 'menu open');
@@ -1300,7 +1303,8 @@ test.each(['moved clock', 'resource date', 'pinned date', 'duplicate names', 'ex
       startServer:async()=>({fresh:reset,beforeTest:async()=>{if(used)await reset();used=true;},check(){},stop:async()=>{},exited:()=>${scenario === 'signal exit' ? 143 : 'died'},exits:()=>${scenario === 'signal exit' ? "['server.ts exited (signal SIGTERM) during the run']" : "died == null ? [] : ['server.ts exited (code 23) during the run']"},tail:()=>''})}));
     mock.module(at('evidence.mjs'),()=>({recordRun(){}}));
     const captures = {};
-    mock.module(at('agent-check.mjs'),()=>({checkOp:async(s,args,{shots})=>{
+    const check = await real('agent-check.mjs');
+    mock.module(at('agent-check.mjs'),()=>({...check,checkOp:async(s,args,{shots})=>{
       const vp = {w:s.width,h:844}, path=shots?.(vp,'light');
       if(path){captures[path]=(captures[path]??0)+1;writeFileSync(path,String(captures[path]));writeFileSync(dir+'/captures.json',JSON.stringify(captures));}
       if(${scenario === 'first screen crash'} && path?.endsWith('390x844-light.png'))died=23;
@@ -1377,6 +1381,9 @@ test.each(['ios', 'windows'])('verify %s captures a fresh server after replay', 
     const cp=await import('node:child_process'), spawn=cp.spawn;
     mock.module('node:child_process',()=>({...cp,spawn:()=>spawn(process.execPath,['-e','console.log("[]")'])}));
     mock.module(at('agent-build.mjs'),()=>({...build,buildFirst:async()=>0,windowsBuildFirst:async()=>0,windowsBuild:()=>({bin:'unused'})}));
+    // Seeding a native build takes an OS file lock, which under the win32 this preload claims is Win32's LockFileEx.
+    const webBuild=await real('web-build.mjs');
+    mock.module(at('web-build.mjs'),()=>({...webBuild,privateNativeBuild:(...args)=>({...webBuild.privateNativeBuild(...args),seed:async()=>{}})}));
     let rows=[],used=false,passes=0;
     const reset=async()=>{rows=[];used=false;};
     mock.module(at('app-server.mjs'),()=>({...server,appServer:()=>({entry:'server.ts',args:[],url:'http://127.0.0.1:1',port:1,database:false}),answering:async()=>false,
@@ -1423,20 +1430,25 @@ test('verify retains an earlier tour server crash after a later tour test succee
     const ports=await real('port-lock.mjs');
     mock.module(at('port-lock.mjs'),()=>({...ports,holderOf:async()=>null,takePort:async()=>()=>{}}));
     mock.module('node:net',()=>({createServer:()=>({once(){},listen(o,done){done();},close(done){done();}})}));
-    let child=null, end=null, launches=0, touring=false, tours=0;
+    let child=null, group=null, token=null, launches=0, touring=false, tours=0;
+    // The server's supervisor is substituted: its group holds one server, whose start and exit it reports on stdout, and whose end it records.
+    const supervised=()=>{
+      let say, out, end;
+      const group={alive:true,exit(status){if(!group.alive)return;group.alive=false;say(new TextEncoder().encode(JSON.stringify(status)+'\\n'));}};
+      child={pid:65000,exitCode:null,signalCode:null,stdout:new ReadableStream({start(c){out=c;say=b=>c.enqueue(b);say(new TextEncoder().encode('{"started":true,"group":65000}\\n'));}}),stderr:new ReadableStream({start(c){c.close();}}),
+        exited:new Promise(done=>{end=done;}),kill(){group.exit({exitCode:null,signalCode:'SIGKILL'});writeFileSync(dir+'/.exact/verify/ended-65000',JSON.stringify({group:65000,token}));out.close();child.exitCode=0;end(0);}};
+      return group;
+    };
     const spawnServer=Bun.spawn;
     spyOn(Bun,'spawn').mockImplementation((args,o)=>{
-      if(args[1]!=='server.ts')return spawnServer(args,o);
-      launches++;
-      child={pid:65000,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),exited:new Promise(done=>{end=done;})};
-      return child;
+      if(args[2]!=='supervise')return spawnServer(args,o);
+      launches++;token=args[5];group=supervised();return child;
     });
     spyOn(process,'kill').mockImplementation((pid,signal)=>{
-      assert.equal(pid,-65000);child.signalCode=signal;end(143);return true;
+      assert.equal(pid,-65000);
+      if(!signal){if(group.alive)return true;throw Object.assign(new Error('no such group'),{code:'ESRCH'});}
+      group.exit({exitCode:null,signalCode:signal});return true;
     });
-    const cp=await import('node:child_process'), spawn=cp.spawnSync;
-    mock.module('node:child_process',()=>({...cp,spawnSync:(cmd,args,o)=>cmd==='ps'
-      ? {status:0,stdout:child?.exitCode==null && !child?.signalCode && child ? '65000 65000 S original' : ''} : spawn(cmd,args,o)}));
     spyOn(globalThis,'fetch').mockImplementation(async()=>{if(!child)throw new Error('not ready');return new Response('ok');});
     const server=await real('app-server.mjs');
     mock.module(at('app-server.mjs'),()=>({...server,appServer:()=>({entry:'server.ts',args:[],url:'http://127.0.0.1:1',port:1,database:false})}));
@@ -1444,9 +1456,9 @@ test('verify retains an earlier tour server crash after a later tour test succee
     mock.module(at('agent-check.mjs'),()=>({judge:()=>[],checkOp:async()=>({text:'check web · light: no findings (text fits)',check:[{viewport:{w:390,h:844},scheme:'light',findings:[]}]})}));
     mock.module(at('agent.mjs'),()=>({open:async()=>{
       const tour=touring ? ++tours : 0;
-      if(tour===2)writeFileSync(dir+'/later.json',JSON.stringify({launches,alive:child.exitCode==null && !child.signalCode}));
+      if(tour===2)writeFileSync(dir+'/later.json',JSON.stringify({launches,alive:group.alive}));
       return {host:'web',now:0,carrier:{reset:async()=>{}},
-        clock:async()=>{if(tour===1 && child.exitCode==null){child.exitCode=23;end(23);}return{};},
+        clock:async()=>{if(tour===1)group.exit({exitCode:23,signalCode:null});return{};},
         state:async()=>({mutationRequests:0,resources:{},background:{done:0,failed:0}}),tree:async()=>({nodes:[]}),
         op:async()=>({clock:0,nodes:[],lines:[],viewport:{w:390,h:844}}),logs:async()=>({lines:[]}),prefer:async()=>({}),resize:async()=>{},screenshot:async()=>{},close:async()=>{}};
     }}));

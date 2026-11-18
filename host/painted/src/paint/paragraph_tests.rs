@@ -9,7 +9,7 @@ fn fixture(text: &str) -> Presenter<()> {
 
 fn program(source: &str) -> Presenter<()> {
     let plan = contract::compile(source).unwrap();
-    let (presenter, error) = Presenter::boot_with(
+    let (presenter, error) = Presenter::boot_with_fixture_fonts(
         &plan.encode(),
         (),
         (300.0, 300.0),
@@ -206,6 +206,7 @@ fn scene_frame(p: &Presenter<()>, dark: bool, backend: Box<dyn Backend>) -> Fram
         hidden: &|_| false,
         presented: &|_| Presented::IDENTITY,
         paths: &|_| None,
+        filters: &|_| None,
         scroll: &BTreeMap::new(),
         page: (0.0, 0.0),
         images: &BTreeMap::new(),
@@ -361,7 +362,7 @@ fn identical_fonts_keep_distinct_run_colors_and_source_nodes() {
             source: 2,
         },
     ];
-    let mut engine = TextEngine::new();
+    let mut engine = crate::text::fixtures::engine();
     let paragraph = engine.paragraph(&spec, Some(260.0));
     let batches = engine.glyph_runs(&paragraph, &palette);
     assert_eq!(
@@ -411,6 +412,7 @@ fn styled_paragraph_pixels_on_real_gpu_when_available() {
         hidden: &|_| false,
         presented: &|_| Presented::IDENTITY,
         paths: &|_| None,
+        filters: &|_| None,
         scroll: &BTreeMap::new(),
         page: (0.0, 0.0),
         images: &BTreeMap::new(),
@@ -875,14 +877,17 @@ fn hidden_markdown_casts_no_decoration_shadow() {
 /// (CSS Text Decoration 3 §4).
 #[test]
 fn a_later_markdown_spans_shadow_paints_over_an_earlier_spans_glyphs() {
-    let draw = |color, shadow| {
+    let draw = |text, color, shadow| {
         decoration_frame(&format!(
-            "      text \"~~HH~~ ~~........~~\" markup=\"markdown\" color=\"{color}\" font-size=40 text-shadow=\"{shadow}\"\n"
+            "      text \"{text}\" markup=\"markdown\" color=\"{color}\" font-size=40 text-shadow=\"{shadow}\"\n"
         ))
     };
-    let glyphs = draw("#000000", "none");
-    let shadows = draw("transparent", "-100px 0px 0px #00ff00");
-    let both = draw("#000000", "-100px 0px 0px #00ff00");
+    let text = "~~HH~~ ~~........~~";
+    // The reference is the earlier span alone: the later span's shadow can
+    // also fall on the later span's own strike, which paints over it.
+    let glyphs = draw("~~HH~~", "#000000", "none");
+    let shadows = draw(text, "transparent", "-100px 0px 0px #00ff00");
+    let both = draw(text, "#000000", "-100px 0px 0px #00ff00");
     let mut overlap = 0;
     for ((glyph, shadow), actual) in glyphs
         .data()
@@ -1070,7 +1075,7 @@ fn a_later_runs_glyph_shadow_is_not_painted_with_an_ancestors_decoration_shadow(
 #[test]
 fn html_maxlength_is_enforced_by_linux_typing() {
     let plan = contract::compile("component App\n  state draft = \"\"\n  action edit(value: string)\n    draft = value\n  view\n    input value=draft input=edit maxlength=3 testId=\"limited\"\n").unwrap();
-    let (mut p, error) = Presenter::boot_with(
+    let (mut p, error) = Presenter::boot_with_fixture_fonts(
         &plan.encode(),
         (),
         (300.0, 300.0),
@@ -1322,4 +1327,147 @@ fn a_shadow_follows_aligned_glyphs_past_the_widest_advance() {
         }
         assert!(covered > 20, "text-align={align}: the glyph is drawn");
     }
+}
+
+/// An inline box's border paints on each of its fragments, over its
+/// background, around its padding box (CSS 2 §8.6, Appendix E). Sliced, as
+/// `box-decoration-break: slice` is, the start border and corners are on the
+/// first line alone and the end ones on the last: left then right under
+/// `ltr`, the other way about under `rtl`. A dashed or dotted side leaves gaps.
+#[test]
+fn an_inline_border_paints_on_each_fragment_sliced() {
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    for (direction, style) in [
+        ("ltr", "solid"),
+        ("rtl", "solid"),
+        ("ltr", "dashed"),
+        ("rtl", "dotted"),
+    ] {
+        let mut p = fixture(&format!(
+            "      text width=110 font-size=20 line-height=\"44px\" color=\"transparent\" direction=\"{direction}\"\n        text \"aaaaaa bbbbbb\" border-width=4 border-style=\"{style}\" border-color=\"#ff0000\" background-color=\"#0000ff\" padding=2 border-radius=10\n"
+        ));
+        let frame = p.frame().clone();
+        let width = frame.width() as usize;
+        let px = |x: usize, y: usize| {
+            let c = frame.pixels()[y * width + x];
+            [c.red(), c.green(), c.blue(), c.alpha()]
+        };
+        let painted = |y: usize| (0..width).filter(move |&x| matches!(px(x, y), RED | BLUE));
+        // Each fragment's rows, top to bottom.
+        let mut bands: Vec<(usize, usize)> = Vec::new();
+        for y in 0..frame.height() as usize {
+            if painted(y).next().is_none() {
+                continue;
+            }
+            match bands.last_mut() {
+                Some(band) if band.1 + 1 == y => band.1 = y,
+                _ => bands.push((y, y)),
+            }
+        }
+        let case = format!("{direction} {style}");
+        assert_eq!(bands.len(), 2, "{case}: one fragment a line: {bands:?}");
+        for (line, &(top, bottom)) in bands.iter().enumerate() {
+            let middle = (top + bottom) / 2;
+            let (left, right) = (
+                painted(middle).next().unwrap(),
+                painted(middle).next_back().unwrap(),
+            );
+            let starts_left = (direction == "ltr") == (line == 0);
+            let (bordered, open) = if starts_left {
+                (left, right)
+            } else {
+                (right, left)
+            };
+            if style == "solid" {
+                assert_eq!(
+                    px(bordered, middle),
+                    RED,
+                    "{case} line {line}: its own side's border"
+                );
+                let across = (left + right) / 2;
+                assert_eq!(
+                    px(across, top + 1),
+                    RED,
+                    "{case} line {line}: the top border"
+                );
+                assert_eq!(
+                    px(across, bottom - 1),
+                    RED,
+                    "{case} line {line}: the bottom border"
+                );
+                assert_eq!(
+                    px(across, middle),
+                    BLUE,
+                    "{case} line {line}: the background inside"
+                );
+                // The rounded corner is on the bordered side; the sliced one is square.
+                assert_eq!(
+                    px(open, top + 1),
+                    RED,
+                    "{case} line {line}: a square sliced corner"
+                );
+                assert_ne!(
+                    px(bordered, top),
+                    RED,
+                    "{case} line {line}: a rounded corner"
+                );
+            } else {
+                let top_row: Vec<_> = (left + 12..right - 12).map(|x| px(x, top + 1)).collect();
+                assert!(
+                    top_row.contains(&RED) && top_row.iter().any(|c| *c != RED),
+                    "{case} line {line}: gaps"
+                );
+            }
+            assert_eq!(
+                px(open, middle),
+                BLUE,
+                "{case} line {line}: no border where it is sliced"
+            );
+        }
+    }
+}
+
+#[test]
+fn an_empty_padded_run_paints_its_box_between_its_neighbours() {
+    // Chrome paints `text ""` with padding 3px 5px and a 2px border as a 14 px
+    // wide box between the words, its background inside its border.
+    const RED: [u8; 4] = [255, 0, 0, 255];
+    const BLUE: [u8; 4] = [0, 0, 255, 255];
+    let mut p = fixture(
+        "      text font-size=20 line-height=\"44px\" color=\"transparent\"\n        text \"Hi\"\n        text \"\" padding=\"3px 5px\" border-width=2 border-style=\"solid\" border-color=\"#ff0000\" background-color=\"#0000ff\"\n        text \" there\"\n",
+    );
+    let frame = p.frame().clone();
+    let width = frame.width() as usize;
+    let px = |x: usize, y: usize| {
+        let c = frame.pixels()[y * width + x];
+        [c.red(), c.green(), c.blue(), c.alpha()]
+    };
+    let rows: Vec<usize> = (0..frame.height() as usize)
+        .filter(|&y| (0..width).any(|x| px(x, y) == RED))
+        .collect();
+    let (top, bottom) = (rows[0], *rows.last().unwrap());
+    let middle = (top + bottom) / 2;
+    // The box may start between pixels; a column it touches is not white.
+    let columns: Vec<usize> = (0..width).filter(|&x| px(x, middle)[1] < 255).collect();
+    let (left, right) = (columns[0], *columns.last().unwrap());
+    assert!(left > 10, "the box follows \"Hi\": {left}");
+    assert_eq!(columns.len(), right + 1 - left, "one box: {columns:?}");
+    assert!(
+        (14..=15).contains(&columns.len()),
+        "its border box is 2 + 5 + 5 + 2 wide: {columns:?}"
+    );
+    assert!(
+        px(left, middle) == RED || px(left + 1, middle) == RED,
+        "its start border"
+    );
+    assert!(
+        px(right, middle) == RED || px(right - 1, middle) == RED,
+        "its end border"
+    );
+    assert_eq!(
+        px((left + right) / 2, middle),
+        BLUE,
+        "its background inside"
+    );
 }

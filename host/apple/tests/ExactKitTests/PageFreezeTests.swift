@@ -306,7 +306,7 @@ final class PageFreezeIOSTests: XCTestCase {
         // Register the page observer first: notification registration order cannot grant stale eligibility.
         XCTAssertNil(session.boot(plan: try fixturePlan("PAGE_FREEZE"), size: CGSize(width: 390, height: 844)).error)
         let view = NodeView(id: 100, kind: "canvas", presenter: session.presenter)
-        let entry = CanvasesHost.Entry(view: view, name: "fixture", values: [])
+        let entry = CanvasesHost.Entry(view: view, name: "fixture", values: Data("[]".utf8))
         entry.id = 1
         session.surfaceHost.entries[100] = entry
         let lifecycle = session.surfaceHost.lifecycle
@@ -504,6 +504,20 @@ final class PageFreezeIOSTests: XCTestCase {
         XCTAssertFalse(PageFacts.frozen, "a new start reacquires the session")
         capture.unlease()
         XCTAssertFalse(PageFacts.frozen, "the recovered engine still has its original lease")
+    }
+
+    func testAJoiningOwnerKeepsBackgroundEligibilityAfterTheFirstLeaves() throws {
+        audioMode = true
+        AudioSession.configuration = .init("playback")
+        let first = NSObject(), next = NSObject()
+        try AudioSession.hold(ObjectIdentifier(first))
+        try AudioSession.hold(ObjectIdentifier(next))
+        AudioSession.release(ObjectIdentifier(first))
+        defer { AudioSession.release(ObjectIdentifier(next)); move(false) }
+        move(true)
+        XCTAssertFalse(PageFacts.frozen, "the joining owner shares the active session")
+        AudioSession.release(ObjectIdentifier(next))
+        XCTAssertTrue(PageFacts.frozen)
     }
 
     func testAFailedOwnerDoesNotInheritAnotherOwnersActivation() throws {

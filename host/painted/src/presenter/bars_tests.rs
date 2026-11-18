@@ -559,6 +559,7 @@ fn the_largest_font_scale_clips_neither_bar() {
     let device = Device {
         night: false,
         font_scale: 2.0,
+        screen_reader: exact_runner::ScreenReader::Unknown,
         locale: "en-US".into(),
         rtl: false,
         hour24: false,
@@ -664,6 +665,7 @@ fn tv() -> Device {
     Device {
         night: false,
         font_scale: 1.0,
+        screen_reader: exact_runner::ScreenReader::Unknown,
         locale: "en-US".into(),
         rtl: false,
         hour24: false,
@@ -986,17 +988,16 @@ fn a_reselected_tabs_scroll_to_the_top_gives_way_to_a_request_its_press_made() {
     );
 }
 
-/// A reload before anyone touched the app boots the new kernel to the
-/// epoch the old one had: the bars are read from the new tree all the same.
+/// A reload advances the epoch and reads the bars from the new tree.
 #[test]
-fn a_reload_at_the_same_epoch_reads_the_bars_again() {
+fn a_reload_advances_the_epoch_and_reads_the_bars_again() {
     let (mut p, _) = barred(APP);
     assert_eq!(top(&mut p).title, "Home");
     let epoch = p.host().kernel().epoch();
     let next = APP.replace("text \"Home\" role", "text \"Start\" role");
     p.reload(&crate::test_plan(&next), Nothing).unwrap();
     settle(&mut p);
-    assert_eq!(p.host().kernel().epoch(), epoch, "the case: the same epoch");
+    assert!(p.host().kernel().epoch() > epoch);
     assert_eq!(text(&p, "home-title"), "Start");
     assert_eq!(top(&mut p).title, "Start");
 }

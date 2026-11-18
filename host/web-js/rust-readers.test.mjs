@@ -97,10 +97,9 @@ test('a built store reader replaces its placeholder when the delayed Rust module
   const write = (path, content) => writeFileSync(resolve(dir, path), content);
   let browser, server, release;
   try {
-    for (const path of ['data/src', 'bake/src', 'web']) mkdirSync(resolve(dir, path), { recursive: true });
-    write('app.json', JSON.stringify({ name: 'Reader', app: { id: 'test.reader', name: 'Reader' }, host: { web: {} } }));
+    for (const path of ['data/src', 'bake/src']) mkdirSync(resolve(dir, path), { recursive: true });
+    write('app.json', JSON.stringify({ name: 'Reader', app: { id: 'test.reader', name: 'Reader' }, host: { web: {} }, rust: { data: { crate: 'startup-data', type: 'startup_data::Reader', source: 'startup_data::Reader' } } }));
     write('app.contract', 'component App\n  resource session = session() as shape string else preview()\n  action export\n    saveFile("export", "app:/data/note.txt", "note.txt")\n  view\n    column\n      text session testId="session"\n      button "Export" id="export" testId="export" press=export\n');
-    write('web/build.rs', 'fn main() { contract::bake(plan, startup_data::Reader); }');
     write('Cargo.toml', `[workspace]\nmembers = ["data", "bake"]\nresolver = "2"\n[patch.crates-io]\n${patchLines(dir).join('\n')}\n`);
     cpSync(resolve(ROOT, 'Cargo.lock'), resolve(dir, 'Cargo.lock'));
     write('data/Cargo.toml', `[package]\nname = "startup-data"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\nexact-runner = { path = "${ROOT}/runner" }\n`);

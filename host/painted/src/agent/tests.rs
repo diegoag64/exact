@@ -3,6 +3,10 @@ use super::*;
 use crate::presenter::PainterChoice;
 use exact_runner::{DataError, Value};
 
+/// The host work these tests hand out (LLP 1047.001 D12).
+struct TestWork;
+impl exact_runner::HostWork for TestWork {}
+
 // The clipboard, keys, modifiers and mouse contacts.
 mod input;
 // An orderly exit's wait for the work the app must finish.
@@ -12,6 +16,7 @@ mod overrun;
 mod polls;
 // A canvas input's samples across a seek.
 mod sensors;
+mod visibility;
 
 #[test]
 fn a_seek_past_the_discrete_instant_cap_reports_where_it_stopped() {
@@ -64,7 +69,7 @@ impl DataSource for Hung {
     ) -> Result<exact_runner::Answer, DataError> {
         Ok(match source {
             "fallback" => exact_runner::Answer::Now(Value::Bool(false)),
-            _ => exact_runner::Answer::Later(exact_runner::Request::continuation(1)),
+            _ => exact_runner::Answer::Later(exact_runner::Request::continuation::<TestWork>(1)),
         })
     }
     fn dispatch(&mut self, _: u64, _: &exact_runner::Store) -> exact_runner::Dispatch {
@@ -86,7 +91,7 @@ impl DataSource for Echo {
         _: &[Value],
     ) -> Result<exact_runner::Answer, DataError> {
         Ok(exact_runner::Answer::Later(
-            exact_runner::Request::continuation(1),
+            exact_runner::Request::continuation::<TestWork>(1),
         ))
     }
     fn dispatch(&mut self, _: u64, _: &exact_runner::Store) -> exact_runner::Dispatch {
@@ -416,7 +421,7 @@ impl DataSource for Slow {
     ) -> Result<exact_runner::Answer, DataError> {
         Ok(match source {
             "fallback" => exact_runner::Answer::Now(Value::Number(0.0)),
-            _ => exact_runner::Answer::Later(exact_runner::Request::continuation(1)),
+            _ => exact_runner::Answer::Later(exact_runner::Request::continuation::<TestWork>(1)),
         })
     }
     fn dispatch(&mut self, _: u64, _: &exact_runner::Store) -> exact_runner::Dispatch {
@@ -1204,7 +1209,7 @@ impl DataSource for Saving {
             return None;
         }
         self.out = true;
-        Some(exact_runner::Request::continuation(
+        Some(exact_runner::Request::continuation::<TestWork>(
             exact_runner::BACKGROUND,
         ))
     }

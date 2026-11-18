@@ -122,7 +122,7 @@ final class RouteScrollIOSTests: XCTestCase {
 
     func testAPushedRouteOpensAtItsTopAndBackFindsTheListWhereItWasLeft() throws {
         let session = try fixture()
-        let tabs = try XCTUnwrap(session.presenter.navigation.tabController, "the tabs are a UITabBarController")
+        let tabs = try XCTUnwrap(session.presenter.navigationHost.tabController, "the tabs are a UITabBarController")
         for (tab, root, pushed) in [("scrolls", "scrolls", "scrollsPushed"), ("grouped", "grouped", "groupedPushed")] {
             try tap("tab-\(tab)")
             spin(0.6)

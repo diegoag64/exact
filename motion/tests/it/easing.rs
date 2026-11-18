@@ -294,6 +294,7 @@ fn invalid_easings_are_refused_by_name() {
 /// read, not taken as the two before it.
 #[test]
 fn steps_takes_at_most_two_arguments() {
+    exact_motion::link_animations();
     use exact_motion::{Animations, Keyframes};
     for steps in ["steps(4)", "steps(4, end)"] {
         assert!(Transitions::parse(&format!("opacity 1s {steps}")).is_ok());

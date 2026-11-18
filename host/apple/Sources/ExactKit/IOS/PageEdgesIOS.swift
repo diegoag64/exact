@@ -58,7 +58,7 @@ extension Presenter {
             var found = Bands(), own = UIEdgeInsets.zero
             if let sv = v.scrollView, (sv as? ScrollView)?.scrollsY ?? true, v.window != nil {
                 let edgeEffect = v.style["scroll_edge_effect"]?.string != "none"
-                if let route = ViewPresentation.controllers(for: v, layout: true).lazy.compactMap({ $0 as? RouteController }).first(where: { $0.host === navigation && v.isDescendant(of: $0.node) }) {
+                if let route = ViewPresentation.controllers(for: v, layout: true).lazy.compactMap({ $0 as? any RouteSurface }).first(where: { $0.hosting === navigation && v.isDescendant(of: $0.node) }) {
                     if let judge, edgeEffect { found = routeBands(of: v, sv, in: route, judge) }
                     #if os(iOS)
                     if route.edgeScroll === v, let top = keyboardTop,
@@ -83,10 +83,9 @@ extension Presenter {
         }
         #if os(iOS)
         // The bar's and the bottom bar's own edge effects follow a banded scroller (D2).
-        for c in navigation.controllers.values {
+        for c in navigation.routeSurfaces.values {
             let r = routes[ObjectIdentifier(c)]
-            if c.bandedTop !== r?.top { c.bandedTop = r?.top; c.projectContentScrollView(c.automaticTopScroll, for: .top) }
-            if c.bandedBottom !== r?.bottom { c.bandedBottom = r?.bottom; c.projectContentScrollView(c.automaticBottomScroll, for: .bottom) }
+            c.bandEdges(top: r?.top, bottom: r?.bottom)
         }
         #endif
         ControlBars.sync(bars, in: self)
@@ -130,7 +129,7 @@ extension Presenter {
     /// bar's collapse or the bottom edge already took is there already, so
     /// the collapse scroller is judged as its title's riders are. None under
     /// a large title unless the eligible top bars ride its safe area.
-    private func routeBands(of v: NodeView, _ sv: UIScrollView, in c: RouteController, _ judge: ControlBars) -> Bands {
+    private func routeBands(of v: NodeView, _ sv: UIScrollView, in c: any RouteSurface, _ judge: ControlBars) -> Bands {
         #if os(iOS)
         if let nav = c.navigationController, navigation.routeShowsBar(c, in: nav), c.navigationItem.largeTitleDisplayMode == .always, c.ridingBars.isEmpty { return Bands() }
         #endif
@@ -154,6 +153,15 @@ extension Presenter {
         guard let sv = v.scrollView else { return Bands() }
         let r = v.convert(v.bounds, to: route)
         let top = judge.bars(of: v, in: route, top: true), bottom = judge.bars(of: v, in: route, top: false)
+        // More than bars over the scroller keeps its top where it is; an open
+        // foot over the route's bottom cover (a tab bar), apart from a title's
+        // collapse, still reaches it, as a hand-built table under a fixed
+        // header runs under its tab bar. Bars under it keep both edges.
+        if top == nil, apart, bottom?.isEmpty == true, case .edges(let e)? = navigation.covers[route.id],
+           e.bottom > 0.5, route.bounds.height - r.maxY > 0.5 {
+            let band = UIEdgeInsets(top: 0, left: 0, bottom: route.bounds.height - r.maxY, right: 0)
+            return Self.drawn(band, v, sv) ? Bands(band: band) : Bands()
+        }
         guard let top, apart || bottom != nil else { return Bands() }
         let underBar = apart && top.isEmpty && r.minY > 0.5
         var overCover = false
@@ -171,7 +179,7 @@ extension Presenter {
 
     /// A virtualized list draws rows a port past its own (D5): a longer band is not taken.
     private static func drawn(_ band: UIEdgeInsets, _ v: NodeView, _ sv: UIScrollView) -> Bool {
-        guard v.presenter?.collections.entries[v.id] != nil else { return true }
+        guard v.presenter?.collections.owns(v.id) == true else { return true }
         let i = sv.adjustedContentInset, own = v.pageBand
         let port = v.bounds.height - (i.top - own.top) - (i.bottom - own.bottom)
         return band.top <= port + 0.5 && band.bottom <= port + 0.5
@@ -197,7 +205,7 @@ extension NodeView {
         // under the bar as the push lands, its port keeps its size, and the kept
         // scrollTop would only move the offset, which reads as the reader leaving
         // the end.
-        let follows = props["scrollFollowEnd"] == "true" || presenter?.collections.entries[id] != nil
+        let follows = props["scrollFollowEnd"] == "true" || presenter?.collections.owns(id) == true
         let atEnd = follows && sv.contentOffset.y >= end() - 1 && !authorOwnsScroll(sv)
         let oldOwn = bandInset, top = sv.contentOffset.y + scrollTopInset(sv)
         more.pageBand = band; more.bandInset = own

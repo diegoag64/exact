@@ -5,13 +5,216 @@ import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, toNamespacedPath } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { appServer, serverChoice, serverUrl } from './app-server.mjs';
+
+// Discovery consumes the module list recorded by a build; these unit fixtures supply that list.
+function sourceRecord(dir, modules = ['app.ts']) {
+  const path = resolve(dir,'.exact/typescript-inputs.json');
+  mkdirSync(resolve(path,'..'),{recursive:true});
+  writeFileSync(path,JSON.stringify({modules:modules.map(file=>[file,resolve(dir,file)]),types:[],edges:modules.slice(1).map(file=>['app.ts','./'+file,'import',file])}));
+}
 
 // LLP 1116.006 D3: the server an app calls, found where the rest pattern and the builders put it.
 // LLP 1116.008 D1: an entry that does not read DB (itself, or in a module it imports) is refused in one line naming it.
+test('server discovery resolves settings only in app.ts and its transitive imports', () => {
+  const dir = mkdtempSync(resolve(import.meta.dir, '../target/issue-859-server-'));
+  const put = (path, text) => { mkdirSync(resolve(dir, path, '..'), { recursive: true }); writeFileSync(resolve(dir, path), text); };
+  try {
+    put('app.json', JSON.stringify({ env: ['API_BASE_URL'], server: { database: false }, host: { macos: { resources: [{ from: 'bundled', to: 'Resources/bundled' }] } } }));
+    put('app.ts', "import { API } from 'api-client';\nexport const grants = 'net.fetch https:';\nexport const answer = () => API;\n");
+    put('tsconfig.json', JSON.stringify({compilerOptions:{paths:{'api-client':['./src/client.ts']}}}));
+    put('src/client.ts', "export { API } from './api';\n");
+    put('src/api.ts', "export const API = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:8080';\n");
+    put('server.ts', 'Bun.serve({});\n');
+    put('notes.ts', "export const debug = () => import.meta.env.DEBUG;\nconst note = 'see http://127.0.0.1:7777/docs';\n");
+    put('pictures.ts', "export const API = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:9999';\n");
+    // These trees are absent from the capture, including their defaults and literal URLs.
+    for (const tree of ['dist', 'dist.gen', 'target', '.cache', 'node_modules/client', 'bundled']) {
+      put(`${tree}/api.ts`, "export const API = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:7777';\n");
+    }
+    sourceRecord(dir, ['app.ts','src/client.ts','src/api.ts']);
+    assert.equal(serverUrl(dir, {}), 'http://127.0.0.1:8080');
+    const local = 'http://127.0.0.1:8899';
+    const server = appServer(dir, { API_BASE_URL: local });
+    assert.deepEqual([server.url, server.port, server.settings, server.note], [local, 8899, { API_BASE_URL: local }, undefined]);
+    put('.env', 'API_BASE_URL=http://localhost:9090\n');
+    assert.equal(serverUrl(dir, {}), 'http://localhost:9090');
+    const remote = appServer(dir, { API_BASE_URL: 'https://api.example.com' });
+    assert.equal(remote.url, null);
+    assert.deepEqual(remote.settings, { API_BASE_URL: 'https://api.example.com' });
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('server discovery reads the module list from a completed native build', async () => {
+  const {bakeOutput,resolveApp} = await import('./app.mjs');
+  const {bakedSettings} = await import('../js/bake/src/__exact_env.mjs');
+  const dir = mkdtempSync(resolve(import.meta.dir,'../target/issue-859-native-record-'));
+  const put = (file,code) => { mkdirSync(resolve(dir,file,'..'),{recursive:true}); writeFileSync(resolve(dir,file),code); };
+  try {
+    put('app.json',JSON.stringify({name:'Native record',app:{id:'dev.exact.native-record',name:'Native record'},env:['API_BASE_URL']}));
+    put('app.contract','component App\n  view\n    text "Ready"\n');
+    put('app.ts',"export { API } from './src/api';\n");
+    put('src/api.ts',"export const API = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:8787';\n");
+    const inputs = {modules:['app.ts','src/api.ts'].map(file=>[file,resolve(dir,file)]),types:[],edges:[['app.ts','./src/api','import','src/api.ts']]};
+    put('baked/app.module.json','{}');
+    put('baked/app.sources.json',JSON.stringify(inputs));
+    const app = resolveApp(dir), out = bakeOutput(app);
+    mkdirSync(out,{recursive:true});
+    writeFileSync(resolve(out,'macos-aarch64-apple-darwin.build.json'),JSON.stringify({version:1,compat:{inputs:{app:app.id}},...bakedSettings(resolve(dir,'baked'),dir)}));
+    assert.equal(serverUrl(dir,{}),'http://127.0.0.1:8787');
+    assert.equal(serverUrl(dir,{API_BASE_URL:'http://localhost:9000'}),'http://localhost:9000');
+  } finally { rmSync(dir,{recursive:true,force:true}); }
+});
+
+test('server discovery follows recorded imports in source order and gives app.ts settings priority', async () => {
+  const { configure } = await import('../js/bake/src/typescript.mjs');
+  const { parseSync } = await import('rolldown/utils');
+  const dir = mkdtempSync(resolve(import.meta.dir, '../target/issue-859-server-order-'));
+  const stage = resolve(dir, 'dist/.gen/typescript');
+  const put = (file, text) => {
+    for (const base of [dir, stage]) {
+      mkdirSync(resolve(base, file, '..'), {recursive:true});
+      writeFileSync(resolve(base, file), text);
+    }
+  };
+  const discover = async () => {
+    for (const file of ['app.ts','api.ts','b.ts','nested.ts']) if (existsSync(resolve(dir,file))) writeFileSync(resolve(stage,file),readFileSync(resolve(dir,file)));
+    await configure(stage, false, parseSync, true);
+    return serverUrl(dir, {});
+  };
+  try {
+    put('app.json', JSON.stringify({env:['API_BASE_URL','OTHER']}));
+    put('__exact_paths.json', JSON.stringify({app:dir,mounts:[]}));
+    put('api.ts', "export const API = import.meta.env.OTHER ?? 'http://127.0.0.1:9999';\n");
+    put('app.ts', "import './api';\nexport const API = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:8080';\n");
+    assert.equal(await discover(), 'http://127.0.0.1:8080');
+    put('app.json', JSON.stringify({env:['OTHER']}));
+    put('app.ts', "import './b';\nimport './api';\n");
+    put('b.ts', "import './nested';\nexport const API = 'http://127.0.0.1:2000';\n");
+    put('nested.ts', "export const API = 'http://127.0.0.1:3000';\n");
+    assert.equal(await discover(), 'http://127.0.0.1:9999');
+    put('app.json', '{}');
+    put('api.ts', "export const API = 'http://127.0.0.1:1000';\n");
+    assert.equal(await discover(), 'http://127.0.0.1:2000');
+    put('b.ts', "import './nested';\n");
+    assert.equal(await discover(), 'http://127.0.0.1:3000');
+    put('app.json', JSON.stringify({env:['API_BASE_URL','OTHER']}));
+    put('app.ts', "export const API = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:8080', OTHER = import.meta.env.OTHER ?? 'http://127.0.0.1:9999';\n");
+    await assert.rejects(discover, /API_BASE_URL.*8080.*OTHER.*9999.*app\.json/s);
+  } finally { rmSync(dir, {recursive:true,force:true}); }
+});
+
+test('server discovery reads the module list after a direct Cargo build', async () => {
+  const { recordBuiltSettings } = await import('../js/bake/src/__exact_env.mjs');
+  const dir = mkdtempSync(resolve(import.meta.dir, '../target/issue-859-cargo-record-'));
+  const put = (file, code) => { mkdirSync(resolve(dir, file, '..'), {recursive:true}); writeFileSync(resolve(dir, file), code); };
+  try {
+    const manifest = {env:['API_BASE_URL']};
+    put('app.json', JSON.stringify(manifest));
+    put('app.ts', "export { API } from './api';\n");
+    put('api.ts', "export const API = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:8787';\n");
+    put('build/test/out/app.module.json', JSON.stringify({env:{API_BASE_URL:{value:'http://127.0.0.1:8787',source:'default'}}}));
+    put('build/test/out/app.sources.json', JSON.stringify({modules:['app.ts','api.ts'].map(file=>[file,resolve(dir,file)]),types:[],edges:[['app.ts','./api','import','api.ts']]}));
+    const bin = resolve(dir, 'client');
+    put('client', 'executable');
+    put('client.d', `${bin}: ${resolve(dir, 'build/test/out/app.hbc')}\n`);
+    recordBuiltSettings(bin, {dir,manifest});
+    assert.equal(serverUrl(dir, {}), 'http://127.0.0.1:8787');
+  } finally { rmSync(dir, {recursive:true,force:true}); }
+});
+
+test('type-only imports do not reorder runtime imports in server discovery', async () => {
+  const { check, configure } = await import('../js/bake/src/typescript.mjs');
+  const { parseSync } = await import('rolldown/utils');
+  const libraries = resolve(fileURLToPath(import.meta.resolve(`@typescript/typescript-${process.platform}-${process.arch}/package.json`)), '../lib');
+  const dir = mkdtempSync(resolve(import.meta.dir, '../target/issue-859-type-order-')), stage = resolve(dir, 'dist/.gen/typescript');
+  const put = (file, code) => {
+    for (const base of [dir, stage]) {
+      mkdirSync(resolve(base, file, '..'), {recursive:true});
+      writeFileSync(resolve(base, file), code);
+    }
+  };
+  try {
+    put('app.json', JSON.stringify({env:['ISSUE_859_A','ISSUE_859_B']}));
+    put('__exact_paths.json', JSON.stringify({app:dir,mounts:[]}));
+    put('__exact_entry.ts', "export * from './app';\n");
+    const a = "export type Client = string;\nexport const API = import.meta.env.ISSUE_859_A ?? 'http://127.0.0.1:8001';\n";
+    const b = "export const API = import.meta.env.ISSUE_859_B ?? 'http://127.0.0.1:8002';\n";
+    for (const edge of [
+      "import type { Client } from './a';",
+      "import { type Client } from './a';",
+      "export type { Client } from './a';",
+      "export { type Client } from './a';",
+      "export type * from './a';",
+      "import { Client } from './a'; export type Selected = Client;",
+    ]) {
+      put('a.ts', a); put('b.ts', b);
+      put('app.ts', `${edge}\nimport './b';\nexport { API } from './a';\n`);
+      await configure(stage, false, parseSync, true);
+      await check(stage, resolve(libraries, 'tsc'), libraries);
+      assert.equal(serverUrl(dir, {}), 'http://127.0.0.1:8002', edge);
+    }
+    for (const edge of ["import './a';", "import { API, type Client } from './a'; export { API };", "export { API, type Client } from './a';"]) {
+      put('a.ts', a); put('b.ts', b);
+      put('app.ts', `${edge}\nimport './b';\n`);
+      await configure(stage, false, parseSync, true);
+      assert.equal(serverUrl(dir, {}), 'http://127.0.0.1:8001', edge);
+    }
+  } finally { rmSync(dir, {recursive:true,force:true}); }
+});
+
+test('web, Linux and Apple builds publish the same discovery record', async () => {
+  const { createApp } = await import('../game/new.mjs');
+  const { appSourceInputs } = await import('./app-imports.mjs');
+  const { sourceInputChanges } = await import('../js/bake/src/__exact_env.mjs');
+  const root = resolve(import.meta.dir, '..'), home = mkdtempSync(resolve(root, 'target/issue-859-hosts-'));
+  const dir = resolve(home, `record-${home.split('-').at(-1).toLowerCase()}`);
+  try {
+    createApp(dir, {with:process.platform === 'darwin' ? ['linux','macos'] : ['linux']});
+    const manifest = JSON.parse(readFileSync(resolve(dir,'app.json'),'utf8'));
+    manifest.env = ['ISSUE_859_API'];
+    writeFileSync(resolve(dir,'app.json'), JSON.stringify(manifest));
+    writeFileSync(resolve(dir,'app.contract'), 'component App\n  resource message = message() as shape string\n  view\n    text message\n');
+    writeFileSync(resolve(dir,'app.ts'), "import { API } from './api';\nexport const grants = '';\nexport const answer = () => API;\n");
+    writeFileSync(resolve(dir,'api.ts'), "export const API = import.meta.env.ISSUE_859_API ?? 'http://127.0.0.1:8787';\n");
+    const env = {...process.env,EXACT_APP_DIR:dir,EXACT_IDENTITY:'-',CARGO_TARGET_DIR:resolve(root,'target')};
+    env.EXACT_WEB_DIST = resolve(dir,'dist');
+    delete env.ISSUE_859_API;
+    const builds = [['host/web/build.mjs',dir,'--js','--render','none'],['scripts/build-linux.mjs',dir]];
+    if (process.platform === 'darwin') builds.push(['host/apple/build.mjs','--no-install']);
+    for (const args of builds) {
+      rmSync(resolve(dir,'.exact/typescript-inputs.json'), {force:true});
+      assert.equal(appSourceInputs(dir), null);
+      const built = spawnSync(process.execPath,args,{cwd:root,env,encoding:'utf8',timeout:300_000});
+      assert.equal(built.status,0,`${args.join(' ')}\n${built.stdout}\n${built.stderr}`);
+      assert.ok(appSourceInputs(dir).modules.some(([file])=>file==='api.ts'));
+      assert.deepEqual(sourceInputChanges(appSourceInputs(dir)), []);
+      assert.equal(serverUrl(dir,{}),'http://127.0.0.1:8787');
+    }
+  } finally { rmSync(home,{recursive:true,force:true}); }
+}, 600_000);
+
+test('server discovery excludes type-only edges and declarations, even after a setting refusal', () => {
+  const dir = mkdtempSync(resolve(import.meta.dir, '../target/issue-859-server-types-'));
+  const put = (file, code) => writeFileSync(resolve(dir, file), code);
+  try {
+    put('app.json', JSON.stringify({env:['API_BASE_URL']}));
+    put('types.ts', "export type Client = string;\nexport const API = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:8877';\n");
+    put('model.d.ts', "export type Model = 'http://127.0.0.1:9988';\n");
+    sourceRecord(dir);
+    for (const edge of ["import type { Client } from './types';", "import { type Client } from './types';", "export type { Client } from './types';"]) {
+      put('app.ts', edge + "\nimport { Model } from './model.d.ts';\n");
+      assert.equal(serverUrl(dir, {}), null);
+      put('app.ts', edge + "\nconst API = import.meta.env.API_BASE_URL ?? 'http://127.0.0.1:8080';\n");
+      assert.equal(serverUrl(dir, {}), 'http://127.0.0.1:8080');
+    }
+  } finally { rmSync(dir, {recursive:true,force:true}); }
+});
+
 test('the app\'s server: its entry, the URL app.ts calls, and why it cannot be run on an empty database', () => {
   const dir = mkdtempSync(resolve(tmpdir(), 'exact-server-'));
-  const put = (files) => { rmSync(dir, { recursive: true, force: true }); for (const [path, text] of Object.entries(files)) { mkdirSync(resolve(dir, path, '..'), { recursive: true }); writeFileSync(resolve(dir, path), text); } };
+  const put = (files) => { rmSync(dir, { recursive: true, force: true }); for (const [path, text] of Object.entries(files)) { mkdirSync(resolve(dir, path, '..'), { recursive: true }); writeFileSync(resolve(dir, path), text); } sourceRecord(dir, ['app.ts',...files['api.ts'] ? ['api.ts'] : []]); };
   const reads = "const db = new Database(process.env.DB ?? 'data.db');\n";
   try {
     put({ 'app.ts': "const API = 'http://127.0.0.1:6810'; // a phone reaches http://192.168.1.2:6810\n", 'server/index.ts': reads });
@@ -105,6 +308,7 @@ function stubServerRun(body) {
     save();
     writeFileSync(resolve(dir, 'app.contract'), 'component App\\n  view\\n    text "Test"\\n');
     writeFileSync(resolve(dir, 'app.ts'), 'export const origin = "http://127.0.0.1:4790";');
+    (${sourceRecord.toString()})(dir);
     const ready = resolve(dir, 'ready.json');
     const serving = ${JSON.stringify("import { writeFileSync } from 'node:fs';\nwriteFileSync('ready.json', JSON.stringify({ argv: process.argv.slice(2), db: process.env['D' + 'B'] ?? null, port: process.env.PORT }));\nsetInterval(() => {}, 1000);\n")};
     writeFileSync(resolve(dir, 'server.ts'), serving);
@@ -117,16 +321,27 @@ function stubServerRun(body) {
       if (!existsSync(ready)) throw new Error('not ready');
       return new Response('ready');
     });
-    const children = [], spawn = Bun.spawn;
-    spyOn(Bun, 'spawn').mockImplementation((...args) => { const child = spawn(...args); children.push(child); return child; });
+    const children = [], spawn = Bun.spawn, groups = new Map();
     const processes = await import('node:child_process'), spawnSyncReal = processes.spawnSync;
-    mock.module('node:child_process', () => ({ ...processes, spawnSync: (command, args, options) => command === 'ps' && !args.includes('pid=,pgid=,stat=,lstart=')
-      ? { stdout: children.some((child) => child.pid === Number(args.at(-1))) ? 'bun server.ts' : '' }
-      : spawnSyncReal(command, args, options) }));
+    // Each handle is the server's supervisor; its child, the keeper, has the pid that is the server's group's id.
+    const keeperOf = (child) => Number(spawnSyncReal('pgrep', ['-P', String(child.pid)], { encoding: 'utf8' }).stdout.trim().split('\\n')[0]) || null;
+    const groupOf = (child) => { if (!groups.get(child)) groups.set(child, keeperOf(child)); return groups.get(child); };
+    spyOn(Bun, 'spawn').mockImplementation((...args) => {
+      const child = spawn(...args); children.push(child);
+      (async () => { while (!groups.get(child) && child.exitCode === null && child.signalCode === null) { groups.set(child, keeperOf(child)); await Bun.sleep(5); } })();
+      return child;
+    });
+    mock.module('node:child_process', () => ({ ...processes, spawnSync: (command, args, options) => command === 'ps' && args.includes('command=') && children.some((child) => child.pid === Number(args.at(-1)))
+      ? { stdout: 'bun server.ts' } : spawnSyncReal(command, args, options) }));
     const { appServer, startServer, withAppServer, driveServer } = await import(resolve(scripts, 'verify.mjs'));
+    const groupAlive = (child) => { try { process.kill(-groupOf(child), 0); return true; } catch (e) { return e.code !== 'ESRCH'; } };
+    const serverPid = (child = children.at(-1)) => Number(spawnSyncReal('pgrep', ['-g', String(groupOf(child))], { encoding: 'utf8' }).stdout.trim().split('\\n')[0]);
+    // Ended: a killed process the supervisor held is a zombie until its new parent reaps it, after the supervisor exits.
+    const ended = async (pid) => { for (let i = 0; i < 100; i++) { try { process.kill(pid, 0); } catch (e) { if (e.code === 'ESRCH') return true; } await Bun.sleep(20); } return false; };
+    const crash = async (running, signal) => { process.kill(serverPid(), signal); while (running.exited() == null) await Bun.sleep(10); };
     process.env.DB = resolve(dir, 'inherited.db');
     try { ${body} }
-    finally { for (const child of children) { try { process.kill(-child.pid, 'SIGKILL'); } catch {} await child.exited; } }
+    finally { for (const child of children) { for (const pid of [-groupOf(child), groupOf(child), child.pid]) try { if (pid) process.kill(pid, 'SIGKILL'); } catch {} await child.exited; } }
     writeFileSync(resolve(dir, 'completed'), 'yes');
   `;
   try {
@@ -260,6 +475,17 @@ test('an agent drive passes server arguments without DB or a scratch database', 
   `);
 });
 
+// A drive's server has no owner process to stop its supervisor.
+test('a drive server\'s supervisor ends once the server and its group have', () => {
+  stubServerRun(`
+    const running = await driveServer(dir, 'one', () => {});
+    process.kill(serverPid(), 'SIGKILL');
+    assert.equal(await children[0].exited, 137);
+    await running.stop();
+    assert.equal(existsSync(resolve(dir, '.exact/agent-server')), false);
+  `);
+});
+
 test('fixture drives isolate checkouts, refuse foreign servers and clean overlapping ports', async () => {
   const parent = mkdtempSync(resolve(tmpdir(), 'exact-fixture-checkouts-')), running = [], fixturePids = new Map();
   const { backendOriginSelection } = await import('../js/bake/src/typescript.mjs');
@@ -296,6 +522,7 @@ process.exit(0);`;
       let probe; try { probe = Bun.serve({ hostname: '127.0.0.1', port, fetch: () => new Response('') }); } catch { continue; }
       probe.stop(true); ports.add(port);
       writeFileSync(resolve(dir, 'fixture/server.ts'), `Bun.serve({hostname:'127.0.0.1', port:Number(process.env.PORT), fetch:()=>Response.json({world:${JSON.stringify(dir)}})});\n`);
+      sourceRecord(dir);
       fixtures.push(dir);
     }
     assert.equal(fixtures.length, 2, 'two unused checkout ports');
@@ -400,7 +627,7 @@ test('shutdown waits for a delayed descendant before clearing storage or launchi
     let release, killed;
     const forced = new Promise(done => { killed = done; });
     spyOn(process, 'kill').mockImplementation((pid, signal) => {
-      if (signal === 'SIGKILL' && pid === -children[0]?.pid) {
+      if (signal === 'SIGKILL' && children[0] && pid === -groupOf(children[0])) {
         release = () => kill(pid, signal); killed(); return true;
       }
       return kill(pid, signal);
@@ -428,8 +655,8 @@ test('a launch ignores stderr still draining from the previous child', () => {
     spyOn(Bun, 'spawn').mockImplementation((...args) => {
       const child = spawn(...args); children.push(child);
       if (children.length !== 1) return child;
-      return { pid: child.pid, get exitCode() { return child.exitCode; }, exited: child.exited,
-        stderr: { async *[Symbol.asyncIterator]() { await gate; yield new TextEncoder().encode('error: previous child\\n'); drained(); } } };
+      return { pid: child.pid, get exitCode() { return child.exitCode; }, get signalCode() { return child.signalCode; }, exited: child.exited,
+        stdout: child.stdout, kill: (signal) => child.kill(signal), stderr: { async *[Symbol.asyncIterator]() { await gate; yield new TextEncoder().encode('error: previous child\\n'); drained(); } } };
     });
     const running = await startServer(dir, appServer(dir), 'test');
     await running.beforeTest();
@@ -473,50 +700,44 @@ test('a shutdown that cannot finish refuses cleanup and can be retried', () => {
     delete manifest.server; save();
     writeFileSync(resolve(dir, 'server.ts'), "import { writeFileSync } from 'node:fs'; process.on('SIGTERM', () => {}); writeFileSync(process.env.DB, 'held');\\n" + serving);
     const running = await startServer(dir, appServer(dir), 'test');
+    // The group outlives SIGKILL, as a member stuck in the kernel would.
     const kill = process.kill.bind(process), now = Date.now.bind(Date);
-    let forced = false, time = now();
-    const signal = spyOn(process, 'kill').mockImplementation((pid, kind) => {
-      if (kind === 'SIGKILL') {forced=true;return kill(pid,kind);}
-      if (forced && kind === 0) return true;
-      return kill(pid,kind);
-    });
-    const table = spawnSyncReal('ps',['-A','-o','pid=,pgid=,stat=,lstart='],{encoding:'utf8'});
-    mock.module('node:child_process',()=>({...processes,spawnSync:(cmd,args,opts)=>forced && cmd==='ps' && args.includes('pid=,pgid=,stat=,lstart=') ? table : spawnSyncReal(cmd,args,opts)}));
-    const date = spyOn(Date, 'now').mockImplementation(()=>forced ? (time+=4000) : now());
+    let stuck = true, time = now();
+    const signal = spyOn(process, 'kill').mockImplementation((pid, kind) => stuck && kind === 'SIGKILL' ? true : kill(pid, kind));
+    const date = spyOn(Date, 'now').mockImplementation(() => time += 1000);
     try {
       await assert.rejects(running.stop(), /shutdown did not finish: process group .* still alive or port .* still in use/);
+      assert.equal(groupAlive(children[0]), true);
       assert.equal(readFileSync(resolve(dir, '.exact/test/db.sqlite'), 'utf8'), 'held');
       assert.equal(existsSync(resolve(dir, '.exact/test/owner')), true);
       assert.equal(given, 0);
-    } finally {forced=false;signal.mockRestore(); date.mockRestore(); await running.stop();}
+    } finally { stuck = false; signal.mockRestore(); date.mockRestore(); await running.stop(); }
+    assert.equal(groupAlive(children[0]), false);
     assert.equal(given, 1);
   `);
 }, 30000);
 
-
 test('failed initial startup retains the port turn when shutdown also fails', () => {
   stubServerRun(`
     delete manifest.server; save();
-    mock.module('node:child_process',()=>({...processes,spawnSync:()=>({status:0,stdout:'65000 65000 S original'})}));
-    let time=0;
-    spyOn(Date,'now').mockImplementation(()=>time+=11000);
-    spyOn(Bun,'sleep').mockImplementation(async()=>{});
-    spyOn(globalThis,'fetch').mockImplementation(async()=>{throw new Error('not ready');});
-    spyOn(process,'kill').mockImplementation(()=>true);
-    spyOn(Bun,'spawn').mockImplementation((cmd, options)=>{
-      writeFileSync(options.env.DB,'held');
-      return {pid:65000,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),exited:new Promise(()=>{})};
-    });
-    await assert.rejects(startServer(dir,appServer(dir),'test'), /shutdown did not finish/);
-    assert.equal(readFileSync(resolve(dir,'.exact/test/db.sqlite'),'utf8'),'held');
-    assert.equal(existsSync(resolve(dir,'.exact/test/owner')),true);
-    assert.equal(given,0,'a surviving launch still holds the port turn');
+    // It never answers, and its group outlives SIGKILL.
+    writeFileSync(resolve(dir, 'server.ts'), "import { writeFileSync } from 'node:fs'; process.on('SIGTERM', () => {}); writeFileSync(process.env.DB, 'held'); setInterval(() => {}, 1000);\\n");
+    const db = resolve(dir, '.exact/test/db.sqlite'), kill = process.kill.bind(process), now = Date.now.bind(Date);
+    let stuck = true, time = now();
+    const signal = spyOn(process, 'kill').mockImplementation((pid, kind) => stuck && kind === 'SIGKILL' ? true : kill(pid, kind));
+    spyOn(Date, 'now').mockImplementation(() => existsSync(db) ? time += 11000 : now());
+    try {
+      await assert.rejects(startServer(dir, appServer(dir), 'test'), /shutdown did not finish/);
+      assert.equal(readFileSync(db, 'utf8'), 'held');
+      assert.equal(existsSync(resolve(dir, '.exact/test/owner')), true);
+      assert.equal(given, 0, 'a surviving launch still holds the port turn');
+    } finally { stuck = false; signal.mockRestore(); }
   `);
 });
 
 test('shutdown probes only the managed address when another address holds the same port', () => {
   stubServerRun(`
-    const other = Bun.serve({hostname:'::', port:0, fetch:()=>new Response('other')});
+    const other = Bun.serve({hostname:'::1', port:0, fetch:()=>new Response('other')});
     const managed = Bun.serve({hostname:'127.0.0.1', port:other.port, fetch:()=>new Response('managed')});
     managed.stop(true);
     mock.module(resolve(scripts, 'port-lock.mjs'), () => ({takePort:async()=>()=>{given++;}}));
@@ -530,11 +751,10 @@ test('shutdown probes only the managed address when another address holds the sa
 test('a signal exit fails the current test and is reported by exited', () => {
   stubServerRun(`
     const running = await startServer(dir, appServer(dir), 'test');
-    process.kill(children[0].pid, 'SIGTERM');
-    const code = await children[0].exited;
+    await crash(running, 'SIGTERM');
     try {
       assert.throws(()=>running.check(), /exited.*SIGTERM.*during the test/);
-      assert.equal(running.exited(), code);
+      assert.equal(running.exited(), 143);
       rmSync(ready);
       await running.beforeTest();
       assert.equal(children.length, 2, 'a signal exit before the first test also restarts');
@@ -545,12 +765,9 @@ test('a signal exit fails the current test and is reported by exited', () => {
 test('a signal exit during startup reports death without waiting for the readiness deadline', () => {
   stubServerRun(`
     writeFileSync(resolve(dir, 'server.ts'), 'process.kill(process.pid, "SIGTERM");');
-    const sleep = Bun.sleep;
-    spyOn(Bun, 'sleep').mockImplementation(async(ms)=>{
-      if(children[0]?.signalCode) throw new Error('readiness polled after the signal exit');
-      await sleep(ms);
-    });
+    const started = Date.now();
     await assert.rejects(startServer(dir, appServer(dir), 'test'), /exited.*SIGTERM.*before it answered/);
+    assert.ok(Date.now() - started < 5000, 'the death ends readiness before its 10 s deadline');
   `);
 });
 
@@ -583,278 +800,273 @@ test('a database delete failure keeps stop retryable and retains its exit handle
   `);
 });
 
-test.each(['test', 'drive'])('Windows identification failure stops the spawned child and releases %s ownership', (mode) => {
-  stubServerRun(`
+// Windows: the supervisor and the kernel32 job calls (processes.mjs) are substituted; the job is a table entry.
+const windowsJobs = `
     Object.defineProperty(process, 'platform', {value:'win32'});
+    mock.module('node:child_process',()=>({...processes,spawnSync:(cmd)=>{throw new Error('no process-table query or taskkill: '+cmd);}}));
+    mock.module('node:net',()=>({createServer:()=>({once(){},listen(options,done){done();},close(done){done();}})}));
+    const real=await import(resolve(scripts,'processes.mjs'));
+    // jobs: name to {active, stuck}; a handle is the name. joins: the supervisor creates its job and says it started.
+    const jobs=new Map(), calls=[]; let joins=true, finish, out, launches=[], launched=null;
+    const child={pid:65000,exitCode:null,signalCode:null,stdout:new ReadableStream({start(c){out=c;}}),stderr:new ReadableStream({start(c){c.close();}}),
+      exited:new Promise(done=>{finish=done;}),kill(signal){calls.push('kill '+signal);exit();}};
+    const exit=()=>{if(child.exitCode!=null)return;child.exitCode=1;out.close();finish(1);};
+    spyOn(Bun,'spawn').mockImplementation((args,options)=>{
+      launches.push({args,options});
+      launched='exact-app-server-'+args[5];
+      if(joins){jobs.set(launched,{active:3,stuck:false});out.enqueue(new TextEncoder().encode('{"started":true,"group":65000}\\n'));}
+      return child;
+    });
+    mock.module(resolve(scripts,'processes.mjs'),()=>({...real,
+      openJob:(name)=>{calls.push('open');return jobs.has(name)?name:null;},
+      jobActive:(handle)=>jobs.get(handle).active,
+      jobHas:(handle,pid)=>jobs.get(handle)?.holds===pid,
+      endJob:(handle)=>{calls.push('end');const job=jobs.get(handle);if(job.stuck)return;job.active=0;if(handle===launched)exit();},
+      // The job goes with its last handle, once it has no process left.
+      closeJob:(handle)=>{calls.push('close');if(!jobs.get(handle)?.active)jobs.delete(handle);},
+    }));
+`;
+
+test.each(['test', 'drive'])('Windows %s runs the server in its supervisor\'s job and stops it by ending the job', (mode) => {
+  stubServerRun(windowsJobs + `
+    let probes=0;
+    spyOn(globalThis,'fetch').mockImplementation(async()=>{if(probes++===0)throw new Error('not yet');return new Response('ok');});
+    const running=await ${mode === 'test' ? "startServer(dir,appServer(dir),'test')" : "driveServer(dir,'one',()=>{})"};
+    assert.equal(launches.length,1);
+    assert.equal(launches[0].args[2],'supervise');
+    assert.equal(launches[0].args[3],${mode === 'test' ? "'1'" : "'0'"},'a drive\\'s server has no owner');
+    assert.equal(launches[0].options.stdin,${mode === 'test' ? "'pipe'" : "'ignore'"},'an owner\\'s end ends its server through the supervisor\\'s stdin');
+    assert.equal(launches[0].options.detached,true,'Bun\\'s own job would end the supervisor with this process');
+    assert.deepEqual(calls,['open'],'the job is opened once its supervisor has started the server');
+    await running.stop();
+    assert.deepEqual(calls.slice(1),['end','close'],'one call ends every member; the handle closes after');
+    assert.equal(given,${mode === 'test' ? 1 : 0});
+  `);
+});
+
+test.each(['test', 'drive'])('Windows %s refuses a launch whose supervisor exits before its job exists', (mode) => {
+  stubServerRun(windowsJobs + `
     spyOn(globalThis,'fetch').mockImplementation(async()=>{throw new Error('not ready');});
-    mock.module('node:child_process',()=>({...processes,spawnSync:(cmd)=>{
-      assert.equal(cmd,'powershell.exe'); return {status:1,stdout:'',stderr:'query failed'};
-    }}));
-    let ended, killed=0;
-    const child={pid:65000,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),
-      exited:new Promise(done=>{ended=done;}),kill(signal){assert.equal(signal,'SIGKILL');killed++;this.signalCode=signal;ended(137);}};
-    spyOn(Bun,'spawn').mockImplementation(()=>child);
-    await assert.rejects(${mode === 'test' ? "startServer(dir,appServer(dir),'test')" : "driveServer(dir,'one',()=>{})"}, /cannot read the Windows process table/);
-    assert.equal(killed,1,'the unidentified launch is killed through its child handle');
+    joins=false; setTimeout(exit,50);
+    await assert.rejects(${mode === 'test' ? "startServer(dir,appServer(dir),'test')" : "driveServer(dir,'one',()=>{})"}, /exited \\(code 1\\) before it answered/);
     assert.equal(existsSync(resolve(dir,'.exact/test/owner')),false);
     assert.equal(given,${mode === 'test' ? 1 : 0});
     assert.equal(existsSync(resolve(dir,'.exact/agent-server')),false);
   `);
 });
 
-test.each(['test', 'drive'])('Windows %s launch waits for its root to appear in CIM', (mode) => {
-  stubServerRun(`
-    Object.defineProperty(process, 'platform', {value:'win32'});
-    let reads=0, ended, killed=0;
-    const child={pid:65000,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),
-      exited:new Promise(done=>{ended=done;}),kill(){killed++;this.signalCode='SIGKILL';ended(137);}};
-    spyOn(Bun,'spawn').mockImplementation(()=>child);
+test('Windows: the last drive out stops a server another drive started, by the job its record names', () => {
+  stubServerRun(windowsJobs + `
+    // The drive that started it has gone. Its record names supervisor 65001, whose job holds the listener, pid 7000.
+    const lease=resolve(dir,'.exact/agent-server'), {realpathSync}=await import('node:fs');
+    mkdirSync(lease,{recursive:true});
+    writeFileSync(resolve(lease,'server-65001'),JSON.stringify({directory:realpathSync(dir),origin:'http://127.0.0.1:4790',db:null,token:'earlier'}));
+    jobs.set('exact-app-server-earlier',{active:3,stuck:false,holds:7000});
     mock.module('node:child_process',()=>({...processes,spawnSync:(cmd,args)=>{
-      if(cmd==='powershell.exe')return {status:0,stdout:'1 0 1'+(++reads > 1 && !child.signalCode ? '\\n65000 1 2' : '')};
-      assert.equal(cmd,'taskkill'); child.signalCode='SIGKILL';ended(137);return {status:0,stdout:''};
-    }}));
-    mock.module('node:net',()=>({createServer:()=>({once(){},listen(options,done){done();},close(done){done();}})}));
-    let probes=0;
-    spyOn(globalThis,'fetch').mockImplementation(async()=>{if(probes++===0)throw new Error('not yet');return new Response('ok');});
-    const running=await ${mode === 'test' ? "startServer(dir,appServer(dir),'test')" : "driveServer(dir,'one',()=>{})"};
-    await running.stop();
-    assert.ok(reads > 1);
-    assert.equal(killed,0,'the root was identified before readiness');
-    assert.equal(given,${mode === 'test' ? 1 : 0});
-  `);
-});
-
-test.each([false, true])('Windows never adopts an orphan older than its reused parent PID: newborn=%s', (newborn) => {
-  stubServerRun(`
-    Object.defineProperty(process, 'platform', {value:'win32'});
-    const root=65000, worker=65001, orphan=65002, leaf=65003, born=65004;
-    const stamp=638987654321000000n;
-    const table=new Map([[root,{parent:1,created:stamp}], [worker,{parent:root,created:stamp+1n}],
-      [orphan,{parent:root,created:stamp-1n}], [leaf,{parent:orphan,created:stamp+2n}]]);
-    const kills=[]; let ended;
-    mock.module('node:child_process',()=>({...processes,spawnSync:(cmd,args)=>{
-      if(cmd==='powershell.exe')return {status:0,stdout:[...table].map(([pid,p])=>[pid,p.parent,p.created].join(' ')).join('\\n')};
-      assert.equal(cmd,'taskkill');
-      const pid=Number(args[args.indexOf('/PID')+1]);
-      const selected=new Set([pid]);
-      if(args.includes('/T')) {
-        let added;
-        do {added=false;for(const [id,p] of table)if(selected.has(p.parent) && !selected.has(id)){selected.add(id);added=true;}} while(added);
-      }
-      for(const id of selected) {
-        assert.ok(id !== orphan && id !== leaf, 'a tree kill reaches the unrelated older orphan');
-        kills.push(id);table.delete(id);
-        if(id===worker && ${newborn})table.set(born,{parent:root,created:stamp+3n});
-        if(id===root){child.exitCode=0;ended(0);}
-      }
+      assert.equal(cmd,'powershell.exe');
+      const query=args.at(-1);
+      if(query.includes('Get-NetTCPConnection'))return {status:0,stdout:'7000\\r\\n'};
+      if(query.includes('ProcessId=65001'))return {status:0,stdout:'bun processes.mjs supervise 0 '+lease+' bun server.ts\\r\\n'};
       return {status:0,stdout:''};
     }}));
-    mock.module('node:net',()=>({createServer:()=>({once(){},listen(options,done){done();},close(done){done();}})}));
-    const child={pid:root,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),exited:new Promise(done=>{ended=done;})};
-    spyOn(Bun,'spawn').mockImplementation(()=>child);
-    let probes=0;
-    spyOn(globalThis,'fetch').mockImplementation(async()=>{if(probes++===0)throw new Error('not yet');return new Response('ok');});
-    const running=await startServer(dir,appServer(dir),'test');
+    const kill=process.kill.bind(process);
+    spyOn(process,'kill').mockImplementation((pid,signal)=>pid===65001&&!signal?true:kill(pid,signal));
+    spyOn(globalThis,'fetch').mockImplementation(async()=>new Response('ok'));
+    const running=await driveServer(dir,'one',()=>{});
+    assert.equal(launches.length,0,'the drive uses the server that answers');
     await running.stop();
-    assert.deepEqual(kills,${newborn ? '[worker,born,root]' : '[worker,root]'}, 'only owned descendants are stopped, leaves first');
-    assert.equal(table.has(orphan),true);
-    assert.equal(table.has(leaf),true);
-    assert.equal(given,1);
+    assert.equal(jobs.get('exact-app-server-earlier'),undefined,'its job is ended and closed');
+    assert.deepEqual(calls,['open','close','open','end','close'],'the record\\'s job is found, then opened to be ended');
+    assert.equal(existsSync(lease),false);
   `);
 });
 
-test.each([false, true])('Windows shutdown checks descendant creation times after ancestors exit: reused=%s', (reused) => {
-  stubServerRun(`
-    Object.defineProperty(process, 'platform', {value:'win32'});
-    const root=65000, worker=65001, leaf=65002, foreign=65003;
-    let table=new Map([[root,1],[worker,root],[leaf,worker],[foreign,1]]), ended;
-    const kills=[]; let reusedRoot=false,reusedWorker=false;
-    spyOn(process, 'kill').mockImplementation((pid, signal)=>{
-      assert.equal(signal, 0);
-      if(!table.has(pid)) throw Object.assign(new Error('gone'), {code:'ESRCH'});
-      return true;
-    });
-    mock.module('node:child_process',()=>({...processes,spawnSync:(cmd,args)=>{
-      if(cmd==='powershell.exe') return {status:0,stdout:[...table].map(([pid,parent])=>[pid,parent,pid===root && reusedRoot || pid===worker && reusedWorker ? '638987654321000001' : '638987654321000000'].join(' ')).join('\\n')};
-      assert.equal(cmd,'taskkill'); assert.ok(!args.includes('/T') && args.includes('/F'));
-      const pid=Number(args[args.indexOf('/PID')+1]); kills.push(pid);
-      table.delete(pid); if(pid===worker)table.delete(leaf);
-      return {status:0,stdout:''};
-    }}));
-    mock.module('node:net',()=>({createServer:()=>({once(){},listen(options,done){done();},close(done){done();}})}));
-    const child={pid:root,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),exited:new Promise(done=>{ended=done;})};
-    spyOn(Bun,'spawn').mockImplementation(()=>child);
-    writeFileSync(ready,'{}');
-    let probes=0;
-    spyOn(globalThis,'fetch').mockImplementation(async()=>{if(probes++===0)throw new Error('not yet');return new Response('ok');});
-    const running=await startServer(dir,appServer(dir),'test');
-    // Startup's readiness walk observed the descendants while the launcher lived.
-    await running.beforeTest();
-    table.delete(root); table.delete(worker); child.exitCode=0; ended(0);
-    if(${reused}){reusedRoot=true;reusedWorker=true;table.set(root,1);table.set(worker,1);table.set(65004,worker);}
-    await running.stop();
-    assert.ok(kills.includes(leaf), 'the orphan is killed independently of the launcher');
-    assert.equal(table.has(leaf),false);
-    assert.equal(table.has(foreign),true,'an unrelated process is left alone');
-    if(${reused}){assert.equal(table.has(root),true,'a reused launcher PID is left alone');assert.equal(table.has(worker),true,'a reused worker PID is left alone');assert.ok(!kills.includes(65004),'a reused worker grants no authority over its children');}
-  `);
-});
-
-test('Windows shutdown rechecks a PID reused after an earlier kill', () => {
-  stubServerRun(`
-    Object.defineProperty(process, 'platform', {value:'win32'});
-    const root=65000, worker=65001, leaf=65002, foreign=65003;
-    let table=new Map([[root,{parent:1,created:'638987654321000000'}],[worker,{parent:root,created:'638987654321000000'}],[leaf,{parent:worker,created:'638987654321000000'}],[foreign,{parent:1,created:'638987654321000000'}]]), ended;
-    const kills=[];
-    mock.module('node:child_process',()=>({...processes,spawnSync:(cmd,args)=>{
-      if(cmd==='powershell.exe')return {status:0,stdout:[...table].map(([pid,p])=>[pid,p.parent,p.created].join(' ')).join('\\n')};
-      assert.equal(cmd,'taskkill');
-      const pid=Number(args[args.indexOf('/PID')+1]);kills.push(pid);table.delete(pid);
-      if(pid===leaf)table.set(worker,{parent:1,created:'638987654321000001'});
-      if(pid===root){child.exitCode=0;ended(0);}
-      return {status:0,stdout:''};
-    }}));
-    mock.module('node:net',()=>({createServer:()=>({once(){},listen(options,done){done();},close(done){done();}})}));
-    const child={pid:root,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),exited:new Promise(done=>{ended=done;})};
-    spyOn(Bun,'spawn').mockImplementation(()=>child);
-    let probes=0;
-    spyOn(globalThis,'fetch').mockImplementation(async()=>{if(probes++===0)throw new Error('not yet');return new Response('ok');});
-    const running=await startServer(dir,appServer(dir),'test');
-    await running.stop();
-    assert.deepEqual(kills,[leaf,root],'a preceding kill can release a descendant PID for reuse');
-    assert.equal(table.get(worker)?.created,'638987654321000001','the unrelated replacement survives');
-    assert.equal(given,1);
-  `);
-});
-
-test.each(['before shutdown', 'during shutdown'])('Windows stops an owned replacement reusing an observed PID %s', (when) => {
-  stubServerRun(`
-    Object.defineProperty(process, 'platform', {value:'win32'});
-    const root=65000, worker=65001, stamp=638987654321000000n;
-    const table=new Map([[1,{parent:0,created:stamp-1n}],[root,{parent:1,created:stamp}],[worker,{parent:root,created:stamp+1n}]]);
-    const kills=[]; let ended;
-    mock.module('node:child_process',()=>({...processes,spawnSync:(cmd,args)=>{
-      if(cmd==='powershell.exe')return {status:0,stdout:[...table].map(([pid,p])=>[pid,p.parent,p.created].join(' ')).join('\\n')};
-      assert.equal(cmd,'taskkill'); assert.ok(!args.includes('/T'));
-      const pid=Number(args[args.indexOf('/PID')+1]);
-      const created=table.get(pid).created;
-      kills.push([pid,String(created)]);table.delete(pid);
-      if(pid===worker && created===stamp+1n && ${when === 'during shutdown'})table.set(worker,{parent:root,created:stamp+2n});
-      if(pid===root){child.exitCode=0;ended(0);}
-      return {status:0,stdout:''};
-    }}));
-    mock.module('node:net',()=>({createServer:()=>({once(){},listen(options,done){done();},close(done){done();}})}));
-    const child={pid:root,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),exited:new Promise(done=>{ended=done;})};
-    spyOn(Bun,'spawn').mockImplementation(()=>child);
-    let probes=0;
-    spyOn(globalThis,'fetch').mockImplementation(async()=>{if(probes++===0)throw new Error('not yet');return new Response('ok');});
-    const running=await startServer(dir,appServer(dir),'test');
-    if(${when === 'before shutdown'})table.set(worker,{parent:root,created:stamp+2n});
-    await running.stop();
-    assert.deepEqual(kills,${when === 'during shutdown' ? "[[worker,String(stamp+1n)],[worker,String(stamp+2n)],[root,String(stamp)]]" : "[[worker,String(stamp+2n)],[root,String(stamp)]]"});
-    assert.deepEqual([...table.keys()],[1],'only the unrelated process survives cleanup');
-    assert.equal(given,1);
-  `);
-});
-
-test.each(['SIGTERM', 'SIGKILL'])('Windows repeated worker replacements respect the %s shutdown deadline', (phase) => {
-  stubServerRun(`
-    Object.defineProperty(process, 'platform', {value:'win32'});
-    delete manifest.server;save();
+test('Windows shutdown that a job member outlives keeps the database, owner and port turn, and can be retried', () => {
+  stubServerRun(windowsJobs + `
+    delete manifest.server; save();
     writeFileSync(resolve(dir,'server.ts'),'const db=process.env.DB;');
-    const root=65000, worker=65001, stamp=638987654321000000n;
-    const table=new Map([[1,{parent:0,created:stamp-1n}],[root,{parent:1,created:stamp}],[worker,{parent:root,created:stamp+1n}]]);
-    let ended, time=0, replacements=0, respawning=true;
-    spyOn(Date,'now').mockImplementation(()=>time);
-    spyOn(Bun,'sleep').mockImplementation(async(ms)=>{time+=ms;});
-    mock.module('node:child_process',()=>({...processes,spawnSync:(cmd,args)=>{
-      if(cmd==='powershell.exe')return {status:0,stdout:[...table].map(([pid,p])=>[pid,p.parent,p.created].join(' ')).join('\\n')};
-      assert.equal(cmd,'taskkill');
-      const pid=Number(args[args.indexOf('/PID')+1]);
-      if(respawning && ${phase === 'SIGKILL'} && time<3000)return {status:0,stdout:''};
-      const created=table.get(pid).created;table.delete(pid);
-      if(pid===worker && respawning){
-        if(++replacements>20)throw new Error('replacement loop exceeded the shutdown deadline');
-        time+=250;table.set(worker,{parent:root,created:created+1n});
-      }
-      if(pid===root){child.exitCode=0;ended(0);}
-      return {status:0,stdout:''};
-    }}));
-    mock.module('node:net',()=>({createServer:()=>({once(){},listen(options,done){done();},close(done){done();}})}));
-    const child={pid:root,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),exited:new Promise(done=>{ended=done;})};
-    spyOn(Bun,'spawn').mockImplementation(()=>child);
     let probes=0;
     spyOn(globalThis,'fetch').mockImplementation(async()=>{if(probes++===0)throw new Error('not yet');return new Response('ok');});
     const running=await startServer(dir,appServer(dir),'test'), db=resolve(dir,'.exact/test/db.sqlite');
     writeFileSync(db,'held');
+    jobs.get(launched).stuck=true;
+    const now=Date.now.bind(Date); let time=now();
+    const date=spyOn(Date,'now').mockImplementation(()=>time+=500);
     try {
-      await assert.rejects(running.stop(),/shutdown did not finish: process group 65000/);
-      assert.equal(time,${phase === 'SIGTERM' ? 3000 : 6000},'the phase deadline bounds the kill loop');
-      assert.equal(replacements,12,'repeated replacements were observed');
-      assert.equal(table.has(root),true,'the respawning launcher survives the failed shutdown');
+      await assert.rejects(running.stop(),/shutdown did not finish: the job of supervisor 65000 is still alive/);
       assert.equal(readFileSync(db,'utf8'),'held');
       assert.equal(existsSync(resolve(dir,'.exact/test/owner')),true);
       assert.equal(given,0,'failed shutdown retains the port turn');
-    } finally {respawning=false;await running.stop();}
+      assert.equal(calls.includes('close'),false,'the handle stays open for a retry');
+    } finally { date.mockRestore(); jobs.get(launched).stuck=false; await running.stop(); }
     assert.equal(existsSync(db),false);
-    assert.equal(existsSync(resolve(dir,'.exact/test/owner')),false);
-    assert.equal(given,1,'a successful retry releases the port turn');
+    assert.equal(given,1);
+    assert.equal(calls.at(-1),'close');
   `);
 });
 
-test('POSIX shutdown retains storage and its port turn after an unobserved worker handoff', () => {
+test('shutdown stops a worker the server forks while handling SIGTERM, after the server exits', () => {
   stubServerRun(`
-    delete manifest.server;save();
-    writeFileSync(resolve(dir,'server.ts'),'const db=process.env.DB;');
-    const root=65000, worker=65001;
-    let table=root+' '+root+' S original', ended;
-    mock.module('node:child_process',()=>({...processes,spawnSync:()=>({status:0,stdout:table})}));
-    const child={pid:root,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),exited:new Promise(done=>{ended=done;})};
-    spyOn(Bun,'spawn').mockImplementation(()=>child);
-    spyOn(process,'kill').mockImplementation((pid,signal)=>{
-      assert.equal(pid,-root);assert.equal(signal,'SIGTERM');
-      table=worker+' '+root+' S worker';child.exitCode=0;ended(0);return true;
-    });
-    mock.module('node:net',()=>({createServer:()=>({once(){},listen(options,done){done();},close(done){done();}})}));
-    let probes=0;
-    spyOn(globalThis,'fetch').mockImplementation(async()=>{if(probes++===0)throw new Error('not yet');return new Response('ok');});
-    const running=await startServer(dir,appServer(dir),'test'), db=resolve(dir,'.exact/test/db.sqlite');
-    writeFileSync(db,'held');
-    try {
-      await assert.rejects(running.stop(),/cannot verify.*process group 65000/);
-      assert.equal(readFileSync(db,'utf8'),'held');
-      assert.equal(existsSync(resolve(dir,'.exact/test/owner')),true);
-      assert.equal(given,0,'an unknown live group retains the port turn');
-    } finally {table='';await running.stop();}
+    delete manifest.server; save();
+    writeFileSync(resolve(dir, 'worker.ts'), "import { writeFileSync } from 'node:fs'; process.on('SIGTERM', () => {}); writeFileSync(process.env.DB, 'worker'); setInterval(() => {}, 1000);\\n");
+    // The server exits as soon as its worker is forked, before any observation of the process table could see it.
+    writeFileSync(resolve(dir, 'server.ts'), "const db = process.env.DB;\\nprocess.on('SIGTERM', () => { writeFileSync('worker.pid', String(Bun.spawn([process.execPath, 'worker.ts'], { stdio: ['ignore', 'ignore', 'inherit'] }).pid)); process.exit(0); });\\n" + serving);
+    const running = await startServer(dir, appServer(dir), 'test'), db = resolve(dir, '.exact/test/db.sqlite');
+    await running.stop();
+    const worker = Number(readFileSync(resolve(dir, 'worker.pid'), 'utf8'));
+    assert.ok(await ended(worker), 'the worker is stopped with its server');
+    assert.equal(groupAlive(children[0]), false);
+    assert.equal(existsSync(db), false, 'its database is removed after it ends');
+    assert.equal(existsSync(resolve(dir, '.exact/test/owner')), false);
+    assert.equal(given, 1);
+    assert.equal(await children[0].exited, 0, 'the supervisor reports the server ending on its own');
   `);
-});
+}, 30_000);
 
-test('shutdown refuses a reused POSIX process group after its observed members exit', () => {
+test('a server group outlives its exited leader under its supervisor, and is refused without one', () => {
   stubServerRun(`
-    const root=65000, foreign=65001;
-    let reused=false, ended;
-    const kills=[];
-    mock.module('node:child_process',()=>({...processes,spawnSync:(cmd,args)=>({status:0,stdout:args.includes('pid=,pgid=,stat=,lstart=')
-      ? root+' '+root+' S '+(reused?'new':'original')+'\\n'+(reused?foreign+' '+root+' S new':'') : ''})}));
-    spyOn(process,'kill').mockImplementation((pid,signal)=>{
-      if(signal===0)return true;
-      kills.push([pid,signal]);
-    });
-    const child={pid:root,exitCode:null,signalCode:null,stderr:new ReadableStream({start(c){c.close();}}),exited:new Promise(done=>{ended=done;})};
-    spyOn(Bun,'spawn').mockImplementation(()=>child);
-    mock.module('node:net',()=>({createServer:()=>({once(){},listen(options,done){done();},close(done){done();}})}));
-    let probes=0;
-    spyOn(globalThis,'fetch').mockImplementation(async()=>{if(probes++===0)throw new Error('not yet');return new Response('ok');});
-    const running=await startServer(dir,appServer(dir),'test');
-    reused=true;child.exitCode=0;ended(0);
-    let time=0;spyOn(Date,'now').mockImplementation(()=>time+=4000);
+    delete manifest.server; save();
+    // The launcher exits once its worker answers, leaving the worker in its group.
+    writeFileSync(resolve(dir, 'worker.ts'), "const db = process.env.DB; process.on('SIGTERM', () => {}); writeFileSync('worker.pid', String(process.pid));\\n" + serving);
+    writeFileSync(resolve(dir, 'server.ts'), "const db = process.env.DB;\\nBun.spawn([process.execPath, 'worker.ts'], { stdio: ['ignore', 'ignore', 'inherit'] }).unref(); await Bun.sleep(1000); process.exit(0);\\n");
+    const running = await startServer(dir, appServer(dir), 'test'), db = resolve(dir, '.exact/test/db.sqlite');
+    while (running.exited() == null) await Bun.sleep(10);
+    const worker = Number(readFileSync(resolve(dir, 'worker.pid'), 'utf8'));
+    writeFileSync(db, 'held');
+    // The group's id is the supervisor's pid, which no other process can take while it runs.
+    assert.throws(() => running.check(), /exited \\(code 0\\) during the test/);
+    await running.stop();
+    assert.ok(await ended(worker), 'the worker left behind is stopped');
+    assert.equal(existsSync(db), false);
+    assert.equal(given, 1);
+
+    rmSync(ready); rmSync(resolve(dir, 'worker.pid'));
+    const again = await startServer(dir, appServer(dir), 'test');
+    while (again.exited() == null) await Bun.sleep(10);
+    writeFileSync(db, 'held');
+    // Without its supervisor, a group of that id may be another program's.
+    process.kill(groupOf(children[1]), 'SIGKILL'); await children[1].exited;
     try {
-      await assert.rejects(running.stop(),/cannot verify.*process group 65000/);
-      assert.deepEqual(kills,[],'the new group has no observed member from our launch');
-      assert.equal(given,0,'uncertain ownership retains the port turn');
-    } finally {reused=false;mock.module('node:child_process',()=>({...processes,spawnSync:()=>({status:0,stdout:''})}));await running.stop();}
+      await assert.rejects(again.stop(), /cannot verify ownership of process group \\d+: its keeper exited/);
+      assert.equal(readFileSync(db, 'utf8'), 'held');
+      assert.equal(existsSync(resolve(dir, '.exact/test/owner')), true);
+      assert.equal(given, 1, 'uncertain ownership retains the port turn');
+    } finally { process.kill(-groupOf(children[1]), 'SIGKILL'); while (groupAlive(children[1])) await Bun.sleep(10); }
+    // On Linux the supervisor also held what left the group, and it ended without saying it had ended that.
+    if (process.platform === 'linux') {
+      await assert.rejects(again.stop(), /cannot verify that the keeper of process group \\d+ ended every process the server started/);
+      assert.equal(given, 1);
+    } else { await again.stop(); assert.equal(given, 2); }
   `);
-});
+}, 30_000);
+
+test('shutdown stops a launcher that respawns its worker, and the worker of a parent that exited at once', () => {
+  stubServerRun(`
+    delete manifest.server; save();
+    const keep = "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);";
+    writeFileSync(resolve(dir, 'orphan.ts'), "import { writeFileSync } from 'node:fs'; writeFileSync('orphan.pid', String(process.pid)); " + keep + "\\n");
+    // The orphan's parent exits as soon as it has forked, before the server answers.
+    writeFileSync(resolve(dir, 'parent.ts'), "Bun.spawn([process.execPath, 'orphan.ts'], { stdio: ['ignore', 'ignore', 'inherit'] }).unref(); process.exit(0);\\n");
+    writeFileSync(resolve(dir, 'worker.ts'), "import { appendFileSync } from 'node:fs'; appendFileSync('workers', process.pid + '\\\\n'); " + keep + "\\n");
+    writeFileSync(resolve(dir, 'server.ts'), "const db = process.env.DB; process.on('SIGTERM', () => {});\\nBun.spawn([process.execPath, 'parent.ts'], { stdio: ['ignore', 'ignore', 'inherit'] });\\nconst work = () => Bun.spawn([process.execPath, 'worker.ts'], { stdio: ['ignore', 'ignore', 'inherit'], onExit: work });\\nwork();\\n" + serving);
+    const workers = () => existsSync(resolve(dir, 'workers')) ? readFileSync(resolve(dir, 'workers'), 'utf8').trim().split('\\n').map(Number) : [];
+    const running = await startServer(dir, appServer(dir), 'test');
+    while (!existsSync(resolve(dir, 'orphan.pid')) || !workers().length) await Bun.sleep(10);
+    process.kill(workers()[0], 'SIGKILL');
+    while (workers().length < 2) await Bun.sleep(10);
+    await running.stop();
+    for (const pid of [Number(readFileSync(resolve(dir, 'orphan.pid'), 'utf8')), ...workers()])
+      assert.ok(await ended(pid), 'process ' + pid + ' is stopped with its server');
+    assert.equal(groupAlive(children[0]), false);
+    assert.equal(existsSync(resolve(dir, '.exact/test/db.sqlite')), false);
+    assert.equal(given, 1);
+  `);
+}, 30_000);
+
+test.skipIf(process.platform !== 'linux').each(['a worker', 'the server'])('on Linux shutdown stops %s that left the server\'s process group', (who) => {
+  stubServerRun(`
+    // setsid: a new session and process group, as a daemon makes (Bun's detached).
+    const daemon = "import { writeFileSync } from 'node:fs'; process.on('SIGTERM', () => {}); writeFileSync('daemon.pid', String(process.pid));\\n";
+    if (${JSON.stringify(who)} === 'a worker') {
+      writeFileSync(resolve(dir, 'daemon.ts'), daemon + "setInterval(() => {}, 1000);\\n");
+      writeFileSync(resolve(dir, 'server.ts'), "Bun.spawn([process.execPath, 'daemon.ts'], { detached: true, stdio: ['ignore', 'ignore', 'inherit'] }).unref();\\n" + serving);
+    } else {
+      writeFileSync(resolve(dir, 'server.ts'), daemon + serving);
+      manifest.commands.server = ['setsid', ...manifest.commands.server]; save();
+    }
+    const running = await startServer(dir, appServer(dir), 'test');
+    while (!existsSync(resolve(dir, 'daemon.pid'))) await Bun.sleep(10);
+    const pid = Number(readFileSync(resolve(dir, 'daemon.pid'), 'utf8'));
+    try {
+      assert.notEqual(Number(spawnSyncReal('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim()), groupOf(children[0]), 'it left the group');
+      await running.stop();
+      assert.ok(await ended(pid), 'the supervisor, its subreaper, stops it');
+      assert.equal(given, 1);
+    } finally { try { process.kill(pid, 'SIGKILL'); } catch {} }
+  `);
+}, 30_000);
+
+// A real owner in a process group of its own, whose whole group is then killed, as a CI timeout kills a job's.
+const ownerProcess = `
+    const ownerScript = (call) => [
+      "import { mock, spyOn } from 'bun:test';",
+      "import { existsSync, writeFileSync } from 'node:fs';",
+      "mock.module(" + JSON.stringify(scripts + '/port-lock.mjs') + ", () => ({ holderOf: async () => null, takePort: async () => () => {} }));",
+      "spyOn(globalThis, 'fetch').mockImplementation(async () => { if (!existsSync('ready.json')) throw new Error('not ready'); return new Response('ready'); });",
+      "const { appServer, startServer, driveServer } = await import(" + JSON.stringify(scripts + '/verify.mjs') + ");",
+      "await " + call + ";",
+      "writeFileSync('owned', 'yes'); setInterval(() => {}, 1000);",
+    ].join('\\n');
+    const killedOwner = async (call) => {
+      writeFileSync(resolve(dir, 'owner.mjs'), ownerScript(call));
+      const owner = Bun.spawn([process.execPath, 'owner.mjs'], { cwd: dir, detached: true, stdio: ['ignore', 'ignore', 'inherit'] });
+      while (!existsSync(resolve(dir, 'owned')) || !existsSync(resolve(dir, 'worker.pid'))) { assert.equal(owner.exitCode, null, 'the owner runs'); await Bun.sleep(10); }
+      process.kill(-owner.pid, 'SIGKILL'); await owner.exited;
+    };
+    writeFileSync(resolve(dir, 'worker.ts'), "import { writeFileSync } from 'node:fs'; process.on('SIGTERM', () => {}); writeFileSync('worker.pid', String(process.pid)); setInterval(() => {}, 1000);\\n");
+    const worker = () => Number(readFileSync(resolve(dir, 'worker.pid'), 'utf8'));
+`;
+
+test('a test server ends when its owner\'s whole process group is killed, and the next run starts clean', () => {
+  stubServerRun(ownerProcess + `
+    delete manifest.server; save();
+    writeFileSync(resolve(dir, 'server.ts'), "const db = process.env.DB;\\nBun.spawn([process.execPath, 'worker.ts'], { stdio: ['ignore', 'ignore', 'inherit'] });\\n" + serving);
+    await killedOwner("startServer(process.cwd(), appServer(process.cwd()), 'test')");
+    assert.ok(await ended(worker()), 'the supervisor, in a session of its own, ends the server when its owner is gone');
+    const run = resolve(dir, '.exact/test');
+    for (let i = 0; i < 100 && !readdirSync(run).some((f) => f.startsWith('ended-')); i++) await Bun.sleep(20);
+    assert.ok(readdirSync(run).some((f) => f.startsWith('ended-')), 'its keeper records the end');
+    rmSync(ready);
+    const running = await startServer(dir, appServer(dir), 'test');
+    await running.stop();
+    assert.equal(given, 1);
+    assert.deepEqual(existsSync(resolve(dir, '.exact/test')) ? readdirSync(resolve(dir, '.exact/test')) : [], []);
+  `);
+}, 30_000);
+
+// Unrecorded only on Linux: on macOS the keeper holds nothing outside the group, so no record is asked for.
+test.each(process.platform === 'linux' ? ['recorded', 'unrecorded'] : ['recorded'])('a drive\'s server outlives its drive\'s killed process group; the next drive stops it, its end %s', (record) => {
+  stubServerRun(ownerProcess + `
+    // The listener lets the next drive prove the server is this checkout's (lsof, the group, the keeper's cwd).
+    writeFileSync(resolve(dir, 'server.ts'), "Bun.serve({ hostname: '127.0.0.1', port: Number(process.env.PORT), fetch: () => new Response('ok') });\\nBun.spawn([process.execPath, 'worker.ts'], { stdio: ['ignore', 'ignore', 'inherit'] });\\n" + serving);
+    await killedOwner("driveServer(process.cwd(), 'one', () => {})");
+    const lease = resolve(dir, '.exact/agent-server'), group = Number(readdirSync(lease).find((f) => f.startsWith('server-')).slice(7));
+    try {
+      await Bun.sleep(300);
+      process.kill(worker(), 0);
+      if (${JSON.stringify(record)} === 'unrecorded') mkdirSync(resolve(lease, 'ended-' + group));
+      const running = await driveServer(dir, 'one', () => {});
+      if (${JSON.stringify(record)} === 'unrecorded') {
+        // The keeper cannot write its record: what it held outside the group is not known to have ended.
+        await assert.rejects(running.stop(), new RegExp('cannot verify that the keeper of process group ' + group + ' ended every process'));
+      } else {
+        await running.stop();
+        assert.ok(await ended(worker()), 'the last drive out stops it');
+        assert.equal(existsSync(lease), false, 'its record of the end read and removed with the lease');
+      }
+    } finally { for (const pid of [-group, worker()]) try { process.kill(pid, 'SIGKILL'); } catch {} }
+  `);
+}, 30_000);
 
 test('an agent drive retains its server record until its address is free', () => {
   stubServerRun(`
@@ -881,8 +1093,7 @@ test('unexpected server exits survive later healthy restarts and intentional sto
     const running = await startServer(dir, appServer(dir), 'verify');
     try {
       for (const signal of ['SIGTERM','SIGKILL']) {
-        process.kill(children.at(-1).pid,signal);
-        await children.at(-1).exited;
+        await crash(running, signal);
         rmSync(ready);
         await running.beforeTest();
       }
@@ -903,8 +1114,7 @@ test('withAppServer fails after a crash even when its replacement passes', () =>
     const code = await withAppServer(dir, async (server) => {
       running = server;
       await server.beforeTest(); server.check();
-      process.kill(children.at(-1).pid, 'SIGKILL');
-      await children.at(-1).exited;
+      await crash(server, 'SIGKILL');
       rmSync(ready);
       await server.beforeTest(); server.check();
       assert.equal(children.length, 2, 'the replacement passed');
@@ -939,7 +1149,7 @@ test('agent --test reports a crash between passing tests on a replacement server
       let tests=0;
       const before=running.beforeTest;
       running.beforeTest=async()=>{
-        if(++tests===2){children[0].kill('SIGKILL');await children[0].exited;}
+        if(++tests===2){const keeper=Number(require('node:child_process').spawnSync('pgrep',['-P',String(children[0].pid)],{encoding:'utf8'}).stdout.trim());process.kill(-keeper,'SIGKILL');while(running.exited()==null)await Bun.sleep(10);}
         await before();
       };
       return fn(running);
@@ -953,6 +1163,7 @@ test('agent --test reports a crash between passing tests on a replacement server
     }}));
     mock.module(at('evidence.mjs'),()=>({recordRun(){}}));
   `);
+  sourceRecord(dir);
   try {
     const r = spawnSync(process.execPath, ['--preload', script, resolve(import.meta.dir, 'agent.mjs'), 'web', '--browser', 'firefox', '--app', dir, '--test', resolve(dir, 'app.test.contract')], {encoding:'utf8',timeout:20000});
     assert.equal(existsSync(resolve(dir, 'replacement')), true, r.stdout+r.stderr);

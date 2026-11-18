@@ -83,23 +83,6 @@ final class PlainTab: UIViewController {
     }
 }
 
-extension UIViewController {
-    /// The routes of a stack Exact built, its root first: a navigation
-    /// controller's, after what UIKit keeps before them (`stackFront`), or
-    /// the one a plain tab shows.
-    var stackRoutes: [UIViewController] {
-        if let nav = self as? UINavigationController { return Array(nav.viewControllers.drop { !($0 is RouteController) }) }
-        return ((self as? PlainTab)?.route).map { [$0] } ?? []
-    }
-
-    /// What UIKit keeps before a navigation controller's routes in
-    /// `viewControllers`: More's list, and a plain tab More pushed over it
-    /// (iOS). Every write of the routes keeps it.
-    var stackFront: [UIViewController] {
-        (self as? UINavigationController).map { Array($0.viewControllers.prefix { !($0 is RouteController) }) } ?? []
-    }
-}
-
 extension NavigationHost {
     /// Tab `index`'s controller.
     func tabStack(_ index: Int) -> UIViewController? { tabPanels.indices.contains(index) ? tabStacks[tabPanels[index]] : nil }
@@ -223,10 +206,7 @@ extension NavigationHost {
     func adoptMore(_ nav: UINavigationController) {
         #if os(iOS)
         guard nav !== adoptedMore else { return }
-        if let old = adoptedMore {
-            retireStack(old)
-            if old.delegate is NavigationDelegateProxy { old.delegate = nil }
-        }
+        if let old = adoptedMore { retireStack(old) }
         registerStack(nav)
         adoptedMore = nav
         #endif

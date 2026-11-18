@@ -1,6 +1,47 @@
 use super::*;
 use std::sync::mpsc::Receiver;
 
+/// The host work these tests hand out (LLP 1047.001 D12).
+struct TestWork;
+impl exact_runner::HostWork for TestWork {}
+
+#[test]
+fn response_fixture_uses_prefetch_and_retains_its_foreground_fallback() {
+    for asynchronous in [false, true] {
+        for refuse_pool in [false, true] {
+            let server = Server::new();
+            let (core, woke, _) = runtime(&server, asynchronous, true);
+            if refuse_pool {
+                core.preloads
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .destination
+                    .fail_pool
+                    .store(true, Ordering::Relaxed);
+            }
+            let calls = Arc::new(AtomicUsize::new(0));
+            let called = calls.clone();
+            core.run_owned(
+                job(1, server.request("/fixture").prefetch()),
+                Some(OwnedWork::HttpResponse(Arc::new(move || {
+                    called.fetch_add(1, Ordering::Relaxed);
+                    Outcome::Response(Response {
+                        status: 200,
+                        headers: vec![],
+                        body: b"fixture".to_vec(),
+                    })
+                }))),
+            )
+            .unwrap();
+            expect(&core, &woke, 1, b"fixture", !refuse_pool);
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+            assert_eq!(server.count(), 0);
+        }
+    }
+}
+
 fn runtime(
     server: &Server,
     asynchronous: bool,
@@ -226,7 +267,7 @@ fn a_prefetch_after_a_made_handoff_starts_a_hold_before_the_sends_reply() {
         let server = Server::new();
         let (core, woke, _) = runtime(&server, asynchronous, false);
         let (handed, replies) = channel();
-        let mut send = job(1, Request::continuation(1));
+        let mut send = job(1, Request::continuation::<TestWork>(1));
         send.class = RequestClass::Ordered;
         core.run_owned(
             send,

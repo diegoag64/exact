@@ -8,7 +8,21 @@
 // (emit.rs, LLP 1047.002 D1), so a command no action names is never linked.
 // The compiler reads this file's `export const` names as it is built.
 import { popoverCommand, appRootFontSize, liveById, declaredScheme, setFieldSelection, setFieldRangeText } from "./navigation.js";
-import { Kept, DEVELOPMENT_STORE } from "./rt.js";
+import { Kept, DEVELOPMENT_STORE, Hosts, KeyEvent, Propagating } from './rt.js';
+// A launch service can install its handlers before app() links the commands (LLP 1172.011 E1).
+export const observe = say => Hosts.observe ?? (name => say(`observe ${name}`));
+export const observeAttributes = () => Hosts.observeAttributes ?? (() => {});
+export const observeError = say => Hosts.observeError ?? (message => say(`observeError ${message}`));
+// Commands run before the handler returns; beforeunload also needs Safari's returnValue.
+export const preventDefault = () => () => {
+  KeyEvent?.preventDefault();
+  if (KeyEvent?.type === 'beforeunload') KeyEvent.returnValue = '';
+  if (!KeyEvent && Propagating?.type === 'pointerdown') Propagating.preventDefault();
+};
+export const stopPropagation = () => () => {
+  const event = KeyEvent ?? Propagating;
+  if (event) event.$stopped = true;
+};
 // A development page may hold a fact over the app's own (LLP 1122 T7, theme2's F2 ruling: a copy the design tool pins):
 // the app's choice kept as asked, with how to apply it, and applied only when the fact is not held.
 const asked = (fact, value, apply, deferred = false) => { const x = globalThis.exact ?? (deferred ? (globalThis.exact = {}) : null); if (!x) return apply(); (x.asked ??= {})[fact] = { value, apply }; if (!x.held?.[fact] && !deferred) apply(); else x.onAsked?.(); };

@@ -81,7 +81,7 @@ final class FaceSymbolIOSTests: XCTestCase {
 
     @MainActor func testABarItemsPathIsItsInstalledTemplateImage() throws {
         let session = try fixture("face-symbol-bar")
-        let nav = try XCTUnwrap(session.presenter.navigation.primaryNavigation)
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
         func compose() -> UIBarButtonItem? {
             let item = nav.topViewController?.navigationItem
             return ((item?.rightBarButtonItems ?? []) + (item?.leftBarButtonItems ?? [])).first { $0.accessibilityLabel == "Compose" }
@@ -101,7 +101,7 @@ final class FaceSymbolIOSTests: XCTestCase {
 
     @MainActor func testARootTabsPathIsItsInstalledTabBarItemImage() throws {
         let session = try fixture("face-symbol-tab")
-        let tabs = try XCTUnwrap(session.presenter.navigation.tabController, "the fixture's root tabs")
+        let tabs = try XCTUnwrap(session.presenter.navigationHost.tabController, "the fixture's root tabs")
         func home() -> UITabBarItem? { tabs.tabControllers?.first?.tabBarItem }
         XCTAssertTrue(home()?.image?.isSymbolImage == true)
         try drawPath(session, under: "tab-home")

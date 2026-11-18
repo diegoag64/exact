@@ -2,14 +2,15 @@
 import Foundation
 #if os(macOS)
 import AppKit
-typealias MediaPlatformView = NSView
 #else
 import UIKit
-typealias MediaPlatformView = UIView
 #endif
 private typealias MediaCallback = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int) -> Void
+private typealias MediaConfiguring = @convention(c) (UnsafeMutableRawPointer?, UnsafeMutableRawPointer?) -> Void
 private final class VideoModule {
-    typealias Create = @convention(c) (UnsafeMutableRawPointer?, MediaCallback?) -> UnsafeMutableRawPointer?
+    typealias Create = @convention(c) (
+        UnsafeMutableRawPointer?, MediaCallback?, MediaConfiguring?, UnsafeMutablePointer<UnsafeMutableRawPointer?>?
+    ) -> UnsafeMutableRawPointer?
     typealias View = @convention(c) (UnsafeMutableRawPointer?) -> UnsafeMutableRawPointer?
     typealias Update = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, Int) -> Void
     typealias Handle = @convention(c) (UnsafeMutableRawPointer?) -> Void
@@ -82,13 +83,14 @@ struct OffscreenAutoplay {
     }
 }
 
-final class VideoView {
+final class VideoView: VideoPlaying, VisibilityRefreshing {
     weak var owner: NodeView?
     #if os(iOS) || os(tvOS)
     // Player creation and the first source update together include AVKit's presentation view.
     private var creationSeconds: TimeInterval?
     #endif
     private var handle: UnsafeMutableRawPointer?
+    private(set) weak var platform: AnyObject?
     private var platformView: MediaPlatformView?
     private var last: [String: String] = [:]
     private var observed: [String: Any] = ["unavailable": true]
@@ -170,12 +172,19 @@ final class VideoView {
         self.owner = owner
         guard let module = VideoModule.shared else { return }
         let context = Unmanaged.passUnretained(self).toOpaque()
+        var player: UnsafeMutableRawPointer?
         handle = module.create(context, { context, bytes, length in
             guard let context, let bytes else { return }
             let video = Unmanaged<VideoView>.fromOpaque(context).takeUnretainedValue()
             guard let message = try? JSONSerialization.jsonObject(with: Data(bytes: bytes, count: length)) as? [String: Any] else { return }
             video.receive(message)
-        })
+        }, { context, raw in
+            guard let context, let raw else { return }
+            let video = Unmanaged<VideoView>.fromOpaque(context).takeUnretainedValue()
+            guard let owner = video.owner else { return }
+            owner.presenter?.elements.configuring(owner, Unmanaged<AnyObject>.fromOpaque(raw).takeUnretainedValue())
+        }, &player)
+        if let player { platform = Unmanaged<AnyObject>.fromOpaque(player).takeUnretainedValue() }
         #if os(iOS) || os(tvOS)
         if handle != nil, !ExactEnv.agentMode { AudioSession.playerCame(ObjectIdentifier(self)) }
         #endif
@@ -195,6 +204,7 @@ final class VideoView {
             return
         }
         self.handle = nil
+        platform = nil
         VideoModule.shared?.destroy(handle)
         platformView?.removeFromSuperview()
         platformView = nil
@@ -229,7 +239,8 @@ final class VideoView {
         // Radius, borders and padding are style, not player props. Refresh
         // their geometry even when the AVKit update below is deduplicated.
         layout()
-        guard let owner, let module = VideoModule.shared, let handle else { return }
+        guard let owner, let module = VideoModule.shared, let handle,
+              owner.presenter?.elements.waits(owner) != true else { return }
         var props = owner.props
         if props["src"] != autoplaySource {
             autoplaySource = props["src"]
@@ -383,92 +394,3 @@ final class VideoView {
 }
 
 
-extension Presenter {
-    /// `fastSeek(id, seconds)` and `load(id)` on the video or audio with that
-    /// HTML `id`, as `focus(id)` names one.
-    func mediaCommand(_ name: String, _ args: [Any]) {
-        if name == "requestPictureInPicture" { return pictureInPicture(args) }
-        if name == "exitPictureInPicture" { return PictureInPictureHost.exit(session) }
-        let id = args.first as? String ?? ""
-        let node = views.values.sorted(by: { $0.id < $1.id }).first(where: { $0.props["id"] == id })
-        guard let video = node?.video else {
-            session?.log("\(name) \"\(id)\" refused: \(node == nil ? "no live node with that id" : "not a video or audio")")
-            return
-        }
-        video.command(name, seconds: (args.count > 1 ? args[1] as? Double : nil) ?? .nan)
-    }
-}
-
-/// Optional media policy. Scroll/layout notifications coalesce without app actions
-/// or a frame clock; only a threshold crossing changes the player's paused request.
-final class VideoVisibilityHost {
-    private final class WeakVideo {
-        weak var value: VideoView?
-        init(_ value: VideoView) { self.value = value }
-    }
-    private var videos: [ObjectIdentifier: WeakVideo] = [:]
-    private var queued = false
-    func track(_ video: VideoView) {
-        let key = ObjectIdentifier(video)
-        if videos[key] == nil { videos[key] = WeakVideo(video) }
-        changed()
-    }
-    func remove(_ video: VideoView) { videos.removeValue(forKey: ObjectIdentifier(video)) }
-    func reset() { videos.removeAll() }
-    func changed() {
-        AnimatedRasters.shared.poke()
-        guard !videos.isEmpty, !queued else { return }
-        queued = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.queued = false
-            for (key, entry) in self.videos {
-                if let video = entry.value { video.refreshVisibility() }
-                else { self.videos.removeValue(forKey: key) }
-            }
-        }
-    }
-    /// Rectangular intersection, as IntersectionObserver without trackVisibility:
-    /// ancestor clipping and the viewport count; sibling occlusion/opacity do not.
-    static func fraction(_ view: MediaPlatformView) -> CGFloat {
-        guard let window = view.window, view.bounds.width > 0, view.bounds.height > 0 else { return 0 }
-        #if os(macOS)
-        guard let root = window.contentView else { return 0 }
-        let box = view.convert(view.bounds, to: root)
-        var clipped = box.intersection(root.bounds)
-        var ancestor: NSView? = view
-        while let current = ancestor {
-            if current.isHidden { return 0 }
-            if current !== view && (current is NSClipView || current.clipsToBounds || current.layer?.masksToBounds == true) {
-                clipped = clipped.intersection(current.convert(current.bounds, to: root))
-            }
-            ancestor = current.superview
-        }
-        #else
-        let box = view.convert(view.bounds, to: window)
-        var clipped = box.intersection(window.bounds)
-        var ancestor: UIView? = view
-        while let current = ancestor {
-            if current.isHidden { return 0 }
-            if current !== view && current.clipsToBounds {
-                clipped = clipped.intersection(current.convert(current.bounds, to: window))
-            }
-            ancestor = current.superview
-        }
-        #endif
-        guard !clipped.isNull, box.width > 0, box.height > 0 else { return 0 }
-        return min(1, max(0, clipped.width * clipped.height / (box.width * box.height)))
-    }
-}
-
-#if !os(macOS)
-/// An optional module in the app's Frameworks: wrapped as `<Name>.framework`
-/// when the bundle is built for distribution (the App Store refuses loose
-/// dylibs, ITMS-90171), otherwise the loose `lib….dylib` a development build
-/// places there.
-package func embeddedModule(framework: String, dylib: String) -> String {
-    let directory = Bundle.main.privateFrameworksPath ?? Bundle.main.bundlePath
-    let wrapped = directory + "/" + framework + ".framework/" + framework
-    return FileManager.default.fileExists(atPath: wrapped) ? wrapped : directory + "/" + dylib
-}
-#endif

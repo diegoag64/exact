@@ -327,11 +327,11 @@ final class NativeButtonMac: NSButton {
 
 extension NodeView {
     /// A `button appearance="auto"` (LLP 1069.011 D3).
-    var isNativeButton: Bool { kind == "control" && props["type"] == "button" }
+    package var isNativeButton: Bool { kind == "control" && props["type"] == "button" }
 
     /// Where a native control sits: the isolation container's content when
     /// the glass-group pass made one (D9), else the node.
-    var controlMount: NSView {
+    package var controlMount: NSView {
         if #available(macOS 26.0, *), let isolation = glassIsolation as? NSGlassEffectContainerView, let content = isolation.contentView {
             return content
         }
@@ -405,7 +405,7 @@ extension NodeView {
 
     /// Whether the author wrote the style row `key` on this node (it is false of a value the node only
     /// inherits and of a row the compiler implied), as iOS reads it.
-    func wrote(_ key: String) -> Bool {
+    package func wrote(_ key: String) -> Bool {
         guard case .array(let rows)? = style["written"] else { return false }
         return rows.contains(.string(key))
     }
@@ -490,7 +490,7 @@ extension ControlHost {
                 "symbol": FaceSymbol.observed(face.symbol, icon: face.symbolIcon) as Any, "enabled": button.isEnabled,
                 "rows": rows, "standIns": standIns, "imagePosition": button.imagePosition.rawValue,
                 "pointerEvents": button.written?.interactive == false ? "none" : "auto",
-                "size": [Agent.r2(button.frame.width), Agent.r2(button.frame.height)]]
+                "size": [InspectionValue.r2(button.frame.width), InspectionValue.r2(button.frame.height)]]
     }
 }
 extension Presenter {

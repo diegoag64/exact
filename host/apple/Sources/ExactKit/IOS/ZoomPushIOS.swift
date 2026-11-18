@@ -22,7 +22,7 @@ extension NavigationHost {
         // dispatches it); it begins only where an edge swipe may.
         options.interactiveDismissShouldBegin = { [weak self] context in
             guard let self, context.willBegin else { return false }
-            return landing.dismissal(begins: back != nil && !changing && !presenter.modals.inTransition)
+            return landing.dismissal(begins: back != nil && !changing && !presenter.modalHost.inTransition)
         }
         top.appeared = landing.appeared
         let resolve: (UIView, NodeView?) -> CGRect? = { [weak self, weak route] zoomed, sourceView in

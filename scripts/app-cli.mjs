@@ -66,10 +66,20 @@ export function compilerWarnings(text, cwd = process.cwd()) {
   return [...lines];
 }
 
+/** Whether `line` begins one of the compiler's errors as `contract build` prints it, `file:line:col [id] text`: a
+ * surface that shows part of a failed build's output starts at the first, the cause the later ones may follow from. */
+export const compilerError = (line) => /^.+:\d+:\d+ \[[\w-]+\] /.test(line);
+
+/** Which Exact checkout an app's command runs, and its commit: the launcher's own answer (`help`, each build). */
+export const checkoutLine = (exact2) => {
+  const commit = spawnSync('git', ['-C', exact2, 'rev-parse', '--short=9', 'HEAD'], { encoding: 'utf8' }).stdout?.trim();
+  return `Exact checkout: ${exact2}${commit ? ` at ${commit}` : ''}`;
+};
+
 /** What a failed JS-target web build (`host/web-js/build.mjs`) said that is the app's to act on, from its stderr: the
- * types app.ts imports when rewritten, warnings, the diagnostics, then the compiler's warnings. Cargo's progress, a
- * rustc warning's excerpt and Bun's trace (a frame and its version line) are left out; with no diagnostic, the last
- * three lines stand for one. */
+ * types app.ts imports when rewritten, warnings, the diagnostics, then the compiler's warnings. Every compiler error is
+ * kept with its quoted line and caret, as `contract build` prints them. Cargo's progress, a rustc warning's excerpt and
+ * Bun's trace (a frame and its version line) are left out; with no diagnostic, the last three lines stand for one. */
 export function webBuildFailure(stderr) {
   const ambientDiagnostic = (l) => /^.+:\d+:\d+: .+ is unavailable in data sources[;:]/.test(l);
   const all = (stderr ?? '').trim().split('\n').filter((l) => ambientDiagnostic(l) || !/^\s*(Compiling|Finished|Running)/.test(l) && !compilerWarnings(l).length);
@@ -79,11 +89,22 @@ export function webBuildFailure(stderr) {
   // refusals of package code (js/bake/src/typescript.mjs `capturedSources`).
   const packageRefusal = (l) => / (?:requires peer|imports Node's built-in|uses the DOM's|uses Node's|loads a module by a computed name|loads code from a string|uses the page's)|, (?:which is not installed|a native addon|which the checked capture did not resolve)|: not an npm package name and version| must be a constant the build reads without running|^(?:Error: )?(?:package declarations: )?two copies of |^(?:Error: )?package (?:declarations exceed|code exceeds) 64 MiB/.test(l);
   const marker = /^(error|[A-Z]\w*Error|E[A-Z]+)\b:?/;
-  const kept = (l) => marker.test(l.trim()) || /\): error TS\d+:|^(?:Error: )?(?:tsconfig: |module outside captured app: |source links are not captured: )|^note: /.test(l) || ambientDiagnostic(l) || packageRefusal(l) || /\bunoptimized$|\bnot on PATH\b|import\.meta\.env/.test(l);
+  const kept = (l) => marker.test(l.trim()) || /\): error TS\d+:|^(?:Error: )?(?:tsconfig: |module outside captured app: |source links are not captured: )|^note: /.test(l) || ambientDiagnostic(l) || compilerError(l) || packageRefusal(l) || /\bunoptimized$|\bnot on PATH\b|import\.meta\.env/.test(l);
   const message = [];
+  let last = -1; // the last line taken
   for (let i = 0; i < lines.length; i++) {
     if (!kept(lines[i])) continue;
+    // The type check says its error above its closing line (host/web-js/build.mjs), in whatever form the checker or
+    // its launch failed in: the lines since the last one taken are that error, so a form no pattern here knows is
+    // still said (LLP 1156.006.000 D16). Bun's trace stays out.
+    if (/^error: .*failed the type check\b/.test(lines[i])) message.push(...lines.slice(last + 1, i).filter((l) => l.trim() && !/^\s+at |^Bun v\d/.test(l)).slice(-40));
     message.push(lines[i]);
+    last = i;
+    // Its excerpt (contract/cli/src/excerpt.rs): the source line, then the caret under it.
+    if (compilerError(lines[i])) {
+      if (/^ \d+ \| /.test(lines[i + 1] ?? '')) message.push(...lines.slice(i + 1, i + 3)), i += 2, last = i;
+      continue;
+    }
     // A marker with nothing after it says its message below, to the next diagnostic or Bun's trace: wasm-bindgen's
     // schema mismatch is `error: `, a blank line, then paragraphs.
     if (!/^\s*(error|[A-Z]\w*Error|E[A-Z]+)\b:\s*$/.test(lines[i])) continue;
@@ -91,7 +112,7 @@ export function webBuildFailure(stderr) {
     while (end < lines.length && !kept(lines[end]) && !/^\s+at |^Bun v\d/.test(lines[end])) end++;
     while (end > i + 1 && !lines[end - 1].trim()) end--;
     message.push(...lines.slice(i + 1, end));
-    i = end - 1;
+    i = last = end - 1;
   }
   // The bundler's refusal, in the words the type check uses (`Error: ` is its wrapper).
   const reason = (message.length ? message : lines.slice(-3)).map((l) => l.replace(/^Error: (?=module outside captured app: )/, '')).join('\n');
@@ -175,6 +196,7 @@ export function appVerbs(name, dir, { host = 'web', game = false, os = process.p
     windows: ['host/windows/build.mjs', name],
     // The APK on the Canvas reader, installed (LLP 1107 D1); `--headless` the Linux host for Android instead.
     android: ['scripts/agent-android.mjs', 'build', name, '--apk', '--install'],
+    ...game ? {} : { deploy: ['scripts/deploy.mjs', dir], push: ['scripts/push.mjs', name] },
     update: ['scripts/exact.mjs', 'new', dir, '--update'],
     lock: ['scripts/app-cli.mjs', '--lock', dir],
     add: ['scripts/exact.mjs', 'add'],
@@ -206,7 +228,7 @@ export function appVerbs(name, dir, { host = 'web', game = false, os = process.p
 export const beforeBuild = {
   status: false, web: true, 'web-build': true, serve: true, test: false, agent: false, verify: true, ios: true, mac: true, share: true,
   linux: true, windows: true, android: true, update: false, lock: false, hatch: false, snapback: true, backend: false, docs: false,
-  feedback: false, add: false,
+  feedback: false, add: false, deploy: true, push: true,
   contract: ([command, ...rest]) => ['build', 'types', 'rust', 'verify', 'test', 'lean', 'symbols', 'gallery'].includes(command)
     || command === 'forma' && checksDesign(rest),
   forma: (rest) => checksDesign(rest),
@@ -256,6 +278,13 @@ async function verbRun({ dir, name, game = false, exact2, args }, reply) {
     if (staged) { dir = staged.dir; args = [args[0], ...staged.args]; }
   }
   const [verb, ...rest] = args;
+  // `--variant <name>` selects one of app.json's variants for every process below (LLP 1030.008 D3): taken out here,
+  // the one place every verb passes, so no child sees the flag.
+  if (rest.includes('--variant')) {
+    const { takeVariant } = await import(resolve(exact2, 'scripts/help.mjs'));
+    try { takeVariant(rest); } catch (error) { console.error(`exact ${verb}: ${error.message}`); return 2; }
+  }
+  if (process.env.EXACT_VARIANT) process.env.EXACT_VARIANT_APP ??= realpathSync(dir); // variants.mjs `claimVariant`
   // The app's own verbs (paint, minesweeper, ledger: a regenerated file dropped the ones added to it): app.json's
   // `commands`, each a command as argv (`"seed": ["bun", "seed.mjs"]`), run in the app's directory with the
   // arguments after the verb. A game's app.json is optional.
@@ -289,7 +318,9 @@ async function verbRun({ dir, name, game = false, exact2, args }, reply) {
   if (asked !== null) {
     const help = await import(resolve(exact2, 'scripts/help.mjs')).catch(() => null);
     if (!help) { console.error(`no Exact checkout at ${exact2}: EXACT names the checkout`); return 1; }
-    return help.printHelp(asked, { verbs: Object.keys(verbs), own, all: rest.includes('all') });
+    const code = help.printHelp(asked, { verbs: Object.keys(verbs), own, all: rest.includes('all') });
+    if (asked === '' && code === 0) console.log(`\n${checkoutLine(exact2)}`);
+    return code;
   }
   if (verb === 'web' && rest.includes('--ready') && !game) {
     console.error('web --ready waits for a game\'s dev loop, which serves while it builds; an app\'s web prints its URL once it serves');
@@ -374,6 +405,9 @@ async function verbRun({ dir, name, game = false, exact2, args }, reply) {
     const error = (await import(resolve(exact2, 'scripts/help.mjs'))).appleBuildRefusal(rest);
     if (error) { console.error(error); reply?.({ code: 'build_failed', error }); return log(2); }
   }
+  // A long build says which Exact it builds with: a worktree's launcher can resolve the main tree's checkout, and a
+  // fix tested against another one is not in the build (LLP 1156.006.000 D12).
+  if (['ios', 'mac', 'linux', 'windows', 'android', 'share', 'web-build'].includes(verb)) console.error(`exact: ${checkoutLine(exact2)}`);
   // A native verb names its platform in app.json the first time, after that platform's setup rows, and keeps the
   // generated workspace current unless the app authored one (LLP 1153 D1.2; scripts/app-shells.mjs). A drive's
   // host counts (`test ios`). Absent from a checkout that lacks the module (the scaffold's test SDK), it is skipped.
@@ -516,14 +550,19 @@ if (verb === 'contract') {
     if (!found.length) { console.error(`no test file matches ${named}`); return log(2); }
     tests.push(...found);
   }
+  if (drivesWeb || drivesNative || verb === 'verify' && ['web', 'ios', 'windows'].includes(host)) {
+    const { resolveApp } = await import(resolve(exact2, 'scripts/app.mjs'));
+    const { privateWebBuild, privateNativeBuild } = await import(resolve(exact2, 'scripts/web-build.mjs'));
+    const build = (host === 'web' ? privateWebBuild : privateNativeBuild)(resolveApp(dir), verb);
+    Object.assign(process.env, build.env);
+    if (host !== 'web') await build.seed(host);
+    process.once('exit', build.close);
+  }
   if (drivesWeb || drivesNative) {
     // A flag the drive does not take is refused before the build, not after it (scripts/help.mjs).
     // Its refusal ends here, so the command is logged like any other.
     const refused = await refusedFlag();
     if (refused != null) return log(refused);
-    // A server entry that does not read DB is refused before the build too, not after it (verify.mjs `withAppServer`, LLP 1116.008 D1).
-    const refusal = verb === 'test' ? (await import(resolve(exact2, 'scripts/verify.mjs'))).appServer(dir)?.refusal : null;
-    if (refusal) { console.error(`test: ${refusal}`); return log(1); }
     const prepared = await prepare();
     if (prepared) return log(prepared);
     // An `agent` drive's check hashes the build's inputs, and the driver need not again (LLP 1012.001.000 D1: once a drive).
@@ -534,13 +573,15 @@ if (verb === 'contract') {
       : await script(['scripts/agent-build.mjs', host, '--app', name], [], [0, 2, 2]);
     if (checked) { delete process.env.EXACT_BUILD_CHECK_OUT; try { process.env.EXACT_BUILD_CHECKED = readFileSync(checked, 'utf8'); rmSync(checked); } catch {} }
     if (built) return log(await withCargoFault(built));
+    const refusal = verb === 'test' ? (await import(resolve(exact2, 'scripts/verify.mjs'))).appServer(dir)?.refusal : null;
+    if (refusal) { console.error(`test: ${refusal}`); return log(1); }
   }
   // A verb that builds, runs, compiles or checks the app prepares first (`beforeBuild`); a drive prepared above. An
   // app's own command keeps its name (a game's verify, an app's check) and prepares nothing.
   const prepares = beforeBuild[verb];
   if (declared.before_build !== undefined && !own[verb] && (typeof prepares === 'function' ? prepares(rest) : prepares)) {
     // The verbs whose scripts refuse a flag they do not take (`guardFlags`)
-    if (['web', 'web-build', 'serve', 'verify', 'ios', 'mac', 'linux', 'android', 'snapback', 'pattern', 'share'].includes(verb)) {
+    if (['web', 'web-build', 'serve', 'verify', 'ios', 'mac', 'linux', 'android', 'snapback', 'pattern', 'share', 'deploy', 'push'].includes(verb)) {
       const refused = await refusedFlag();
       if (refused != null) return log(refused);
     }
@@ -637,10 +678,9 @@ export function gpuBindgen(metadata, roots) {
   };
 }
 
-/** A note when the app's GPU modules link a wasm-bindgen other than the CLI the web build runs (`exact setup` installs
- * the version exact2 pins in game/Cargo.toml), which refuses any other; null otherwise. The modules are `<app>-gpu`,
- * in gpu/, and `<app>-gpu-<module>` for each of app.json's `gpu.modules`; with no gpu/ crate the web build
- * (host/web-js/build.mjs) builds none of them. */
+/** A note when the app's own GPU crates link a wasm-bindgen other than the web build's CLI (`exact setup` installs
+ * the version exact2 pins in game/Cargo.toml); null otherwise. This checks gpu/ and app.json's `gpu.modules`.
+ * Package GPU modules build separately, from their generated workspaces, even when the app has no gpu/ crate. */
 function bindgenFinding(dir, workspace, options) {
   const game = resolve(import.meta.dir, '../game/Cargo.toml');
   const pin = existsSync(game) ? String(Bun.TOML.parse(readFileSync(game, 'utf8')).workspace?.dependencies?.['wasm-bindgen'] ?? '').replace(/^=/, '') : '';
@@ -664,6 +704,12 @@ function bindgenFinding(dir, workspace, options) {
 /** Explicit app lock repair: preserve selected versions and resolve only manifest drift. An app without a workspace of
  * its own resolves its generated one (LLP 1153.003 D1.4), capturing a lock only when its crates leave exact2's. */
 export async function lockApp(dir) {
+  const { readManifest } = await import('./app.mjs');
+  const { lockSwiftPackages } = await import('../host/apple/compose.mjs');
+  const swift = lockSwiftPackages({ dir, manifest: readManifest(dir, basename(dir)) });
+  return [await lockRustApp(dir), swift].filter(Boolean).join('\n');
+}
+async function lockRustApp(dir) {
   const { cargoEnvironment } = await import('./app.mjs');
   const { appCrates, authoredWorkspace, shellsDir } = await import('./cargo-check.mjs');
   const { GPU_LOCK, ensureGpuShells, ensureShells, lockShells, lockChanges } = await import('./app-shells.mjs');

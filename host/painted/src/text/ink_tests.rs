@@ -7,25 +7,7 @@ use tiny_skia::{Color, FillRule, PathBuilder, Rect};
 #[path = "../../../../apps/messages-stress/data/src/model.rs"]
 pub(super) mod messages_envelope_model;
 
-fn engine() -> TextEngine {
-    TextEngine::from_font_files(
-        &[
-            Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/../../scripts/fixtures/fonts/assets"
-            )),
-            Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fonts/NotoColorEmoji-subset.ttf"
-            )),
-            Path::new(concat!(
-                env!("CARGO_MANIFEST_DIR"),
-                "/tests/fonts/NotoSansCJKsc-subset.otf"
-            )),
-        ],
-        "DejaVu Sans",
-    )
-}
+use super::fixtures::engine;
 
 fn spec(text: &str) -> Spec {
     crate::paint::text_spec(&StyleProps::default(), text)
