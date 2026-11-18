@@ -72,6 +72,8 @@ impl<D: DataSource> Presenter<D> {
             return false;
         }
         self.scroll.insert(id, next);
+        self.scroll_end_moved(id, Completion::Instant);
+        self.collection_scrolled(id);
         true
     }
 }
