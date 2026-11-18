@@ -445,7 +445,6 @@ fn caret_reveal_reports_scroll(choice: PainterChoice) {
             "a fallback does not qualify this painter"
         );
     };
-    eprintln!("painter: {:?}", p.painter);
     let named = |p: &Presenter<()>, name: &str| {
         let k = p.host().kernel();
         k.node_by_key(k.find_by_test_id(name)[0]).unwrap().id
@@ -462,11 +461,6 @@ fn caret_reveal_reports_scroll(choice: PainterChoice) {
     paint(&mut p);
     let end = p.scroll_of(editor).1;
     assert!(end > 20., "the selection must reveal the last line");
-    eprintln!(
-        "selection: scrollTop={end}, reports={}, reportedTop={}",
-        number(&p, "reports"),
-        number(&p, "top")
-    );
     assert_eq!(number(&p, "top"), end as f64);
     assert_eq!(number(&p, "reports"), 1.);
 
