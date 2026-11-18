@@ -221,6 +221,7 @@ enum ReplyState {
 pub(super) struct Held {
     generation: usize,
     pub(super) prefetch: bool,
+    fixture: Option<ResponseWork>,
     name: String,
     origin: String,
     secrets: Vec<String>,
@@ -289,6 +290,7 @@ impl Held {
         Self {
             generation,
             prefetch: false,
+            fixture: None,
             key: if definition.request.body.len() <= MAX_BODY_BYTES {
                 Equal::of(&definition.request)
             } else {
@@ -385,7 +387,7 @@ enum Message {
 
 struct Startup {
     receive: mpsc::Receiver<Message>,
-    host: StreamHost,
+    lane: Arc<Lane>,
 }
 
 /// Owns the launch work until adoption. Dropping it cancels every exchange;
@@ -394,6 +396,9 @@ pub struct Preloads {
     startup: Arc<Mutex<Option<Startup>>>,
     destination: Arc<Location>,
     send: mpsc::Sender<Message>,
+    /// The transport its exchanges run on, which the executor that adopts
+    /// it takes for its independent lane (`lane.rs`).
+    lane: Arc<Lane>,
 }
 impl Preloads {
     /// Start the first eight definitions off the caller's thread, with the
@@ -403,12 +408,17 @@ impl Preloads {
         grants: &str,
         host: impl Fn() -> ibex2::host::Host + Send + Sync + 'static,
     ) -> Self {
-        Self::start_clock(definitions, grants, Arc::new(host), Arc::new(Instant::now))
+        Self::start_clock(
+            definitions,
+            grants,
+            Lane::new(Arc::new(host)),
+            Arc::new(Instant::now),
+        )
     }
     fn start_clock(
         definitions: Vec<Definition>,
         grants: &str,
-        host: StreamHost,
+        lane: Arc<Lane>,
         clock: Arc<dyn Fn() -> Instant + Send + Sync>,
     ) -> Self {
         let mut cache = cache::Cache::new(grants.into());
@@ -439,9 +449,13 @@ impl Preloads {
         });
         let (send, receive) = mpsc::channel();
         let set = Self {
-            startup: Arc::new(Mutex::new(Some(Startup { receive, host }))),
+            startup: Arc::new(Mutex::new(Some(Startup {
+                receive,
+                lane: lane.clone(),
+            }))),
             destination,
             send,
+            lane,
         };
         if !indices.is_empty() {
             update(&set.destination, |cache| {
@@ -511,7 +525,7 @@ impl Control {
         if !cache.preloads_open {
             return false;
         }
-        let Some(Startup { receive, host }) = self.startup.lock().unwrap().take() else {
+        let Some(Startup { receive, lane }) = self.startup.lock().unwrap().take() else {
             return true;
         };
         let destination = self.destination.clone();
@@ -521,7 +535,7 @@ impl Control {
             .name("exact-preload".into())
             .spawn(move || {
                 let _guard = thread_guard;
-                run(&destination, &send, receive, &host)
+                run(&destination, &send, receive, &lane)
             });
         spawned.is_ok()
     }
@@ -792,6 +806,12 @@ impl Core {
             self.machine.as_ref().map(|m| Arc::downgrade(&m.timer)),
         );
         drop(destination);
+        // Its exchanges' connections serve the lane's reads (`lane.rs`):
+        // no worker has started, so none holds another transport. The
+        // machine made its transports when the core was made, and keeps them.
+        if self.machine.is_none() {
+            *self.lane.lock().unwrap() = set.lane.clone();
+        }
         *owned = Some(set);
         Ok(())
     }
@@ -957,13 +977,17 @@ fn waiting_for_name(cache: &cache::Cache, request: &Request) -> bool {
         })
 }
 pub(super) fn waiting(state: &State, job: &Job) -> bool {
-    eligible(&job.request, job.class, job.forced, job.work.is_some())
-        && state.cache.as_ref().is_some_and(|c| {
-            let now = (c.clock)();
-            matches!(c.preload_wait, NameWait::Definitions(due) if now < due)
-                || waiting_for_name(c, &job.request)
-                || find(c, &job.request).is_some_and(|i| can_take(c, &job.request, i))
-        })
+    eligible(
+        &job.request,
+        job.class,
+        job.forced,
+        super::reads::opaque(&job.work),
+    ) && state.cache.as_ref().is_some_and(|c| {
+        let now = (c.clock)();
+        matches!(c.preload_wait, NameWait::Definitions(due) if now < due)
+            || waiting_for_name(c, &job.request)
+            || find(c, &job.request).is_some_and(|i| can_take(c, &job.request, i))
+    })
 }
 // The earliest queued request keeps room to finish before later replies
 // can fill its lane. A preload failure still needs that room (D1).
@@ -1005,7 +1029,8 @@ pub(super) fn effect_count(state: &State) -> usize {
         - state.jobs[0]
             .iter()
             .filter(|job| {
-                waiting(state, job) && reads::safe_read(&job.request, job.work.is_some(), job.class)
+                waiting(state, job)
+                    && reads::safe_read(&job.request, super::reads::opaque(&job.work), job.class)
             })
             .count()
 }
@@ -1035,7 +1060,10 @@ pub(super) fn serve_ready(state: &mut State) {
             state.bytes[0] -= job.charge;
             continue;
         }
-        if job.class != RequestClass::Read || !job.request.is_plain_http() || job.work.is_some() {
+        if job.class != RequestClass::Read
+            || !job.request.is_plain_http()
+            || super::reads::opaque(&job.work)
+        {
             break;
         }
         if !eligible(&job.request, job.class, job.forced, false) {
@@ -1084,7 +1112,7 @@ pub(super) fn serve_ready(state: &mut State) {
         }
         let job = state.jobs[0].remove(index).expect("preload read");
         state.bytes[0] = state.bytes[0] - job.charge + bytes;
-        let light = reads::safe_read(&job.request, job.work.is_some(), job.class);
+        let light = reads::safe_read(&job.request, super::reads::opaque(&job.work), job.class);
         state.light += usize::from(light);
         state.completed[0].push_back(Completed {
             cached,
@@ -1350,6 +1378,7 @@ pub fn launch_fetch(
     let fetch = reach::gate_fetch(host.endow(grants).fetch, request.reach);
     let mut req = fetch_request(request, false);
     req.max_body = Some(cache::MAX_ENTRY);
+    req.collected = true;
     let result = fetch
         .stream(req, &abort.signal())
         .and_then(check_headers)

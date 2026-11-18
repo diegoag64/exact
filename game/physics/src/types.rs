@@ -208,7 +208,7 @@ pub enum BounceCombine {
 }
 
 /// Collision material and filtering; a collider without a Body is static.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Data)]
 pub struct Collider {
     /// Local geometry.
     pub shape: Shape,
@@ -226,13 +226,12 @@ pub struct Collider {
     /// Accepted membership bits; defaults to all bits.
     pub mask: u32,
     /// How this collider's pairs combine restitution; defaults to the larger
-    /// value. Saved, hashed and serialized only when not the default.
+    /// value.
     pub bounce_combine: BounceCombine,
     /// More shapes on the same Body. They add no mass: the Body's mass and
     /// inertia are the primary shape's (or authored). A touch with one reports
     /// this entity. Queries (rays, sweeps, overlaps, capsules) see the primary
-    /// shape only, for now. Needs a Body. Saved, hashed and serialized only when
-    /// not empty.
+    /// shape only, for now. Needs a Body.
     pub extra: Vec<ExtraShape>,
 }
 impl Default for Collider {
@@ -250,16 +249,6 @@ impl Default for Collider {
         }
     }
 }
-record!(Collider {
-    shape,
-    offset,
-    friction,
-    bounce,
-    sensor,
-    layer,
-    mask,
-} named { bounce_combine, extra });
-
 /// One more shape on a collider's Body (`Collider::extra`), with its own
 /// material and filtering, and no mass. It may not be a mesh or a heightfield.
 #[derive(Clone, Debug, PartialEq, Data)]

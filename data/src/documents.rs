@@ -377,6 +377,24 @@ pub fn resolve(path: &str, owner: u64) -> std::io::Result<Resolved> {
     })
 }
 
+/// The folder a picker opens at for `path` (LLP 1173 D2, `startIn`): a
+/// chosen folder, or one beneath it, itself; a chosen file's, or a file
+/// beneath a chosen folder's, parent. `None` for a path `owner` does not
+/// hold, or a folder that is no longer there.
+pub fn folder(path: &str, owner: u64) -> Option<PathBuf> {
+    resolve(path, owner).ok()?;
+    let (real, _, chosen_folder) = entry(number(path)?)?;
+    let beneath = path.trim_end_matches('/').splitn(4, '/').nth(3);
+    let at = match beneath {
+        Some(beneath) if chosen_folder => real.join(beneath),
+        _ => real,
+    };
+    if at.is_dir() {
+        return Some(at);
+    }
+    at.parent().filter(|p| p.is_dir()).map(Path::to_path_buf)
+}
+
 /// The topic an answer watches for a document (LLP 1069.010.000 D1): the
 /// runner asks it again when the host announces this topic.
 pub fn watch_topic(path: &str, recursive: bool) -> String {
@@ -494,6 +512,30 @@ mod tests {
         assert!(resolve(&format!("{doc}/other.md"), 7203).is_err());
         forget(7203);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_picker_starts_in_a_handles_folder() {
+        let root = crate::TempDir(
+            std::env::temp_dir().join(format!("exact-docs-start-{}", std::process::id())),
+        );
+        std::fs::create_dir_all(root.join("notes/deep")).unwrap();
+        std::fs::write(root.join("notes/a.md"), "a").unwrap();
+        let real = std::fs::canonicalize(root.join("notes")).unwrap();
+        let notes = mint(&root.join("notes"), 7204).unwrap();
+        let file = mint(&root.join("notes/a.md"), 7204).unwrap();
+        assert_eq!(folder(&notes, 7204), Some(real.clone()));
+        assert_eq!(
+            folder(&format!("{notes}/deep"), 7204),
+            Some(real.join("deep"))
+        );
+        assert_eq!(folder(&format!("{notes}/a.md"), 7204), Some(real.clone()));
+        assert_eq!(folder(&file, 7204), Some(real.clone()));
+        assert_eq!(folder(&notes, 7205), None, "another session's handle");
+        assert_eq!(folder(&format!("{notes}/../x"), 7204), None);
+        assert_eq!(folder("doc:/999999/notes", 7204), None);
+        forget(7204);
+        assert_eq!(folder(&notes, 7204), None, "a forgotten handle");
     }
 
     #[test]

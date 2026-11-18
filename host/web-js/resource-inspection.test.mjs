@@ -1,14 +1,15 @@
 import { hostFixtureFile } from '../web/tests/glue-fixture.mjs';
-import { test, expect } from 'bun:test';
+import { test as bunTest, expect } from 'bun:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createHash } from 'node:crypto';
-import { suiteBrowser } from '../../scripts/agent-launch.mjs';
+import { chromium, suiteBrowser } from '../../scripts/agent-launch.mjs';
 import { open } from '../../scripts/agent.mjs';
 import { perfDelta } from '../../scripts/agent-inspect.mjs';
 import { browserMissing } from '../../scripts/agent-playwright.mjs';
 import { need } from '../../scripts/coverage.mjs';
 import { webCompiler } from './module.mjs';
+const test = need('chrome', chromium().unavailable, { test: bunTest });
 
 function runtimeServer(development = false, names = [[], [], []], types = [[], [], []], map = null) {
   const bytes = JSON.stringify(map);
@@ -679,7 +680,7 @@ test("refresh carries a Rust request's forced cache mode through runtime dispatc
     const observed = await page.evaluate(async () => {
       globalThis.__exactRender = true;
       const sent = [];
-      globalThis.fetch = async (_input, init) => { sent.push(init.cache); return new Response('reply'); };
+      globalThis.fetch = async (input, init) => { sent.push(new Request(input, init).cache); return new Response('reply'); };
       const rt = await import('/host/web-js/rt.js');
       const { createRequestExecutor, setAppGrantSet, appGrantSet } = await import('/host/web-js/admission.js');
       setAppGrantSet();
@@ -710,7 +711,7 @@ test("the ask made when the source becomes ready is not a refresh, and a refresh
     const observed = await page.evaluate(async () => {
       globalThis.__exactRender = true;
       const sent = [], callbacks = [];
-      globalThis.fetch = async (_input, init) => { sent.push(init.cache ?? 'default'); return new Response('reply'); };
+      globalThis.fetch = async (input, init) => { sent.push(new Request(input, init).cache ?? 'default'); return new Response('reply'); };
       const rt = await import('/host/web-js/rt.js');
       const { createRequestExecutor, setAppGrantSet, appGrantSet } = await import('/host/web-js/admission.js');
       setAppGrantSet();
@@ -746,7 +747,7 @@ test("a refused refresh while waiting leaves the launch's ask ordinary, and a fa
     const observed = await page.evaluate(async () => {
       globalThis.__exactRender = true;
       const sent = [], callbacks = [];
-      globalThis.fetch = async (_input, init) => { sent.push(init.cache ?? 'default'); return new Response('reply'); };
+      globalThis.fetch = async (input, init) => { sent.push(new Request(input, init).cache ?? 'default'); return new Response('reply'); };
       const rt = await import('/host/web-js/rt.js');
       const { createRequestExecutor, setAppGrantSet, appGrantSet } = await import('/host/web-js/admission.js');
       setAppGrantSet();
@@ -788,7 +789,7 @@ test("a refresh of a resource that slept through its source becoming ready is a 
     const observed = await page.evaluate(async () => {
       globalThis.__exactRender = true;
       const sent = [], callbacks = [];
-      globalThis.fetch = async (_input, init) => { sent.push(init.cache ?? 'default'); return new Response('reply'); };
+      globalThis.fetch = async (input, init) => { sent.push(new Request(input, init).cache ?? 'default'); return new Response('reply'); };
       const rt = await import('/host/web-js/rt.js');
       const { createRequestExecutor, setAppGrantSet, appGrantSet } = await import('/host/web-js/admission.js');
       setAppGrantSet();

@@ -54,12 +54,12 @@ final class RestartListIOSTests: XCTestCase {
         view.frame = host.view.bounds
         view.layoutIfNeeded()
         until("the list shows the rows it mounts, under the route's bar") {
-            (try? rows(session)).map { $0.mounted.count > 4 && $0.shown == $0.mounted } == true && !session.presenter.navigation.covers.isEmpty
+            (try? rows(session)).map { $0.mounted.count > 4 && $0.shown == $0.mounted } == true && !session.presenter.navigationHost.covers.isEmpty
         }
         let before = try rows(session)
         XCTAssertGreaterThan(before.mounted.count, 4, "the list mounts the rows its port shows")
         XCTAssertEqual(before.shown, before.mounted, "before the restart, every mounted row is shown")
-        XCTAssertFalse(session.presenter.navigation.covers.isEmpty, "the route's bar covers the list: the reset has covers to clear")
+        XCTAssertFalse(session.presenter.navigationHost.covers.isEmpty, "the route's bar covers the list: the reset has covers to clear")
         // What the reset reports (the old tree's covers cleared) reaches no runtime while the views go: the replacing
         // runtime applies nothing before its committed batch.
         // (The clearing report is the one whose covers are all gone; counted whatever the presenter's flag says.)

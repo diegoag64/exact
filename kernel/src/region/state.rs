@@ -273,7 +273,10 @@ impl RegionState {
             return Err(LayoutError::ContentRegion("region belongs to another root"));
         }
         // Preflight Auto flex axes before any shell mutation, as in the default path.
-        if arena.style(self.binding.owner.index).height == Dimension::Auto
+        if arena
+            .style(self.binding.owner.index)
+            .height
+            .is_content_sized()
             && ![outer.width, outer.height].into_iter().all(
                 |axis| matches!(axis, crate::AxisOffer::Definite(n) if n.is_finite() && n >= 0.),
             )
@@ -1007,6 +1010,9 @@ fn publish(
         arena.set_content(s, f.content);
         let inset = facts.insets.get(&f.node).copied().unwrap_or_default();
         arena.set_inset(s, (!inline).then_some(inset));
+        if let Some(&margins) = facts.margins.get(&f.node) {
+            arena.observations.set_margins(s, margins);
+        }
         if let Some(&content) = facts.field_content.get(&f.node) {
             arena.field_content.insert(s, content);
         } else {

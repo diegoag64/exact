@@ -243,7 +243,7 @@ public final class ExactLaunch: NSObject {
     /// A batch's op kinds and a few of the views it touched (test ID, else
     /// kind), or what it changed with no ops, for the TTI trace.
     private static func summary(_ batch: Batch, _ presenter: Presenter) -> String {
-        if batch.ops.isEmpty { return [batch.controls ? "controls" : nil, batch.facts ? "facts" : nil, batch.orientation != nil ? "orientation" : nil].compactMap { $0 }.joined(separator: " ") }
+        if batch.ops.isEmpty { return [batch.controls ? "controls" : nil, batch.facts ? "facts" : nil, batch.rootTabs != nil ? "rootTabs" : nil, batch.orientation != nil ? "orientation" : nil].compactMap { $0 }.joined(separator: " ") }
         var kinds: [String: Int] = [:], names: [String] = []
         for op in batch.ops {
             kinds[op.op.rawValue, default: 0] += 1
@@ -340,7 +340,7 @@ public final class ExactLaunch: NSObject {
     /// first and waits for the owner, so work sent there before it has
     /// published its batch when `hostOutstanding` reads the published queue.
     static func ledger(_ session: ExactSession) -> (items: [String], failed: [String], poisoned: Bool)? {
-        guard session.state != .destroyed, let data = session.agent("{\"op\":\"outstanding\"}").data(using: .utf8),
+        guard session.state != .destroyed, let data = session.runtime.ask(exact_outstanding, "").data(using: .utf8),
               let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any], o["error"] == nil else { return nil }
         var out: [String] = []
         for key in ["requests", "streams", "awaiting", "oneShots", "busy"] {

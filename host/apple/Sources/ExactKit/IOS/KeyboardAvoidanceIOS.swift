@@ -283,8 +283,8 @@ extension NodeView {
         default:
             guard scrollsVertically else { return .none }
             #if os(iOS)
-            let route = ViewPresentation.controllers(for: self, layout: true).lazy.compactMap { $0 as? RouteController }.first
-            if route?.search?.controller.searchBar.searchTextField.isEditing == true { return .onDrag }
+            let route = ViewPresentation.controllers(for: self, layout: true).lazy.compactMap { $0 as? any RouteSurface }.first
+            if route?.searchBarEditing == true { return .onDrag }
             #endif
             return .interactive
         }
@@ -368,39 +368,4 @@ extension Presenter {
     }
 }
 
-extension NavigationHost {
-    /// The primary controller keeps its allocation while route content avoids the keyboard.
-    func ownerFrame(_ owner: UIViewController, in root: UIView) -> CGRect {
-        let viewport = presenter.viewport
-        var frame: CGRect
-        if let node = container, node.scroll != nil {
-            // Content coordinates stay fixed when the authored scroller moves.
-            frame = CGRect(origin: .zero, size: node.bounds.size)
-        } else {
-            frame = !ExactEnv.authoredChrome && presenter.inDocument(root) ? viewport.convert(viewport.pageBounds, to: root) : root.bounds
-        }
-        frame.size.height += ownerKeyboardExtension(owner)
-        // The authored tablist the agent paints takes its own place in the
-        // root, as on the web; the routes end at its edge, not under it.
-        if owner === tabOwner, ExactEnv.authoredChrome, let list = adoptedTablist.flatMap({ presenter.views[$0] }),
-           list.style["display"]?.string != "none", list.isDescendant(of: root) {
-            let rect = list.convert(list.bounds, to: root)
-            if rect.height > 0, rect.minY >= frame.midY {
-                frame.size.height = max(0, min(frame.maxY, rect.minY) - frame.minY)
-            } else if rect.height > 0, rect.maxY <= frame.midY {
-                let cut = max(0, rect.maxY - frame.minY)
-                frame.origin.y += cut
-                frame.size.height = max(0, frame.height - cut)
-            }
-        }
-        return frame
-    }
-
-    func ownerKeyboardExtension(_ owner: UIViewController) -> CGFloat {
-        #if os(iOS)
-        if ExactEnv.authoredChrome, owner === primaryOwner, presenter.keyboardPolicy == "resizes-content" { return presenter.keyboardAccessoryHeight }
-        #endif
-        return 0
-    }
-}
 #endif

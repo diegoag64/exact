@@ -3,16 +3,26 @@ import CExact
 import Foundation
 
 extension Runtime {
+    package func collectionFixedSizes(_ view: UInt32, lead: Int, trail: Int) -> [Double]? {
+        guard let fixedSize = CoreExports.collectionFixedSize else { return nil }
+        return on(busy: nil) {
+            let sizes = (0..<2).map { fixedSize(rt, view, UInt32(lead), UInt32(trail), UInt32($0)) }
+            return sizes.allSatisfy { $0.isFinite && $0 >= 0 } ? sizes : nil
+        }
+    }
+
     func collectionSnap(_ view: UInt32, proposed: Double, port: Double, minimum: Double = 0, maximum: Double, distance: Double = .infinity) -> Double? {
-        on(busy: nil) {
-            let value = exact_collection_snap(rt, view, proposed, port, minimum, maximum, distance)
+        guard let snap = CoreExports.collectionSnap else { return nil }
+        return on(busy: nil) {
+            let value = snap(rt, view, proposed, port, minimum, maximum, distance)
             return value.isFinite ? value : nil
         }
     }
 
     func collectionSnapStop(_ view: UInt32, release: Double, rest: Double, port: Double, minimum: Double, maximum: Double) -> Double? {
-        on(busy: nil) {
-            let value = exact_collection_snap_stop(rt, view, release, rest, port, minimum, maximum)
+        guard let snapStop = CoreExports.collectionSnapStop else { return nil }
+        return on(busy: nil) {
+            let value = snapStop(rt, view, release, rest, port, minimum, maximum)
             return value.isFinite ? value : nil
         }
     }
@@ -20,13 +30,13 @@ extension Runtime {
     convenience init() {
         self.init(hooks: RuntimeHooks(
             decodeBatch: { Batch.decode($0, resolver: $1) },
-            prepareBatch: { $0.prepare() }, symbolMeasure: SymbolMeasure.measure,
-            prewarmIslands: { svg in
-                if svg & 1 != 0 { SvgRasterModule.prewarm() }
-                #if os(iOS) || os(tvOS)
-                if svg & 2 != 0 { SvgFilterMetal.prewarm() }
+            prepareBatch: { runtime, batch in
+                batch.prepare()
+                #if os(macOS)
+                batch.takeControls(runtime)
                 #endif
-            }))
+            }, symbolMeasure: SymbolMeasure.measure,
+            prewarmIslands: SvgLink.prewarm))
     }
 
     func holdBegin(_ view: UInt32, property: UInt32, now: Double) -> (NativeHold?, Batch) {
@@ -136,17 +146,10 @@ extension Runtime {
             return RoleKeys(json: Data(bytes: exact_out(rt), count: Int(len)))
         }
     }
-    /// A navigation root's tabs by the kernel's rule (LLP 1115.001 D11); nil for one stack.
-    func rootTabs(_ view: UInt32) -> RootTabs? {
-        return on(busy: nil) {
-            let len = exact_root_tabs(rt, view)
-            return RootTabs(json: Data(bytes: exact_out(rt), count: Int(len)))
-        }
-    }
     /// What native containers cover of boxes (LLP 1075.003 §3.5), under one
     /// layout: `edges` add to a box's padding; `whole` lays it out as
     /// `display: none`; nil clears.
-    func covers(_ covers: [(UInt32, HostCover?)]) -> Batch {
+    package func covers(_ covers: [(UInt32, HostCover?)]) -> Batch {
         return on(layout: true) {
             var bytes = Data(capacity: covers.count * 24)
             for (view, cover) in covers {
@@ -220,18 +223,48 @@ extension Runtime {
             return read(exact_host_covers(rt, write(bytes)))
         }
     }
-    func regionComplete(_ artifact: RegionArtifact) -> Batch {
-        return on {
-            let p = artifact.metadata
-            let retained = Unmanaged.passRetained(artifact).toOpaque()
-            return read(exact_region_complete(rt, artifact.id,
-                ExactMetrics(width: Float(p.width), height: Float(p.height), baseline: Float(p.firstBaseline)),
-                retained, { pointer in
-                    if let pointer { Unmanaged<RegionArtifact>.fromOpaque(pointer).release() }
-                }))
+}
+
+#if os(macOS)
+extension Batch {
+    /// The ops after which a native control's state may differ.
+    static let dropsFace: Set<BatchOp.Kind> = [.create, .renew, .props, .style, .children, .paragraph, .flow, .frame, .fieldContent]
+    /// On the owner as the batch is read, with the runtime as it made it, the
+    /// state of the native controls it may change that differs from what the
+    /// last batch read carried: the face of each button and the options of
+    /// each select it makes or has such an op on (every one when a control's
+    /// viewless contents changed, `controls`), and every radio's group when it
+    /// changes the tree or a control.
+    mutating func takeControls(_ runtime: Runtime) {
+        var asked = Set<UInt32>(), regroup = controls
+        for op in ops {
+            if op.op == .create, op.kind == "control" {
+                runtime.controlTypes[op.id] = op.props["type"] ?? ""; runtime.controlsRead[op.id] = nil; asked.insert(op.id)
+            } else if op.op == .destroy {
+                runtime.controlTypes[op.id] = nil; runtime.controlsRead[op.id] = nil
+            } else if Self.dropsFace.contains(op.op), runtime.controlTypes[op.id] != nil {
+                if let type = op.props["type"] { runtime.controlTypes[op.id] = type } else if op.clear.contains("type") { runtime.controlTypes[op.id] = "" }
+                asked.insert(op.id)
+            }
+            if BatchFootprint.structuralOps.contains(op.op) { regroup = true }
         }
-    }
-    func regionFallback(_ request: UInt64) -> Batch {
-        on { read(exact_region_fallback(rt, request)) }
+        if controls { asked.formUnion(runtime.controlTypes.keys) }
+        if regroup || !asked.isEmpty { asked.formUnion(runtime.controlTypes.filter { $0.value == "radio" }.keys) }
+        func json(_ length: UInt32) -> Data { Data(bytes: exact_out(runtime.rt), count: Int(length)) }
+        var reads: [UInt32: ControlRead] = [:]
+        for id in asked {
+            guard let type = runtime.controlTypes[id] else { continue }
+            let last = runtime.controlsRead[id] ?? ControlRead()
+            var now = ControlRead()
+            if type == "button" { now.face = json(exact_press_face(runtime.rt, id)) }
+            if type == "select" { now.select = json(exact_select_options(runtime.rt, id)) }
+            if type == "radio" { now.radio = json(exact_radio_group(runtime.rt, id)) }
+            runtime.controlsRead[id] = now
+            let changed = ControlRead(face: now.face == last.face ? nil : now.face, select: now.select == last.select ? nil : now.select,
+                                      radio: now.radio == last.radio ? nil : now.radio)
+            if changed != ControlRead() { reads[id] = changed }
+        }
+        controlReads = reads
     }
 }
+#endif

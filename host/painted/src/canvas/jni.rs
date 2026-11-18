@@ -11,6 +11,9 @@
 // FFI to the JNI, jnigraphics and AHardwareBuffer APIs.
 #![allow(unsafe_code)]
 
+#[path = "jni_agent.rs"]
+pub mod jni_agent;
+
 #[path = "jni_bytes.rs"]
 mod byte_arrays;
 pub use byte_arrays::{bytes, utf8};
@@ -44,6 +47,7 @@ macro_rules! canvas_jni {
         static EXACT_ALLOCATOR: $crate::canvas::jni::Allocator = $crate::canvas::jni::Allocator;
 
         $crate::canvas_jni_tls!();
+        include!(concat!(env!("OUT_DIR"), "/transfers.rs"));
 
         mod exact_canvas_jni {
             #![allow(clippy::missing_safety_doc, unsafe_code)]
@@ -56,6 +60,25 @@ macro_rules! canvas_jni {
 
             const PLAN: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/app.plan"));
             const COMPAT: &str = include_str!(concat!(env!("OUT_DIR"), "/compat.json"));
+            include!(concat!(env!("OUT_DIR"), "/launch.rs"));
+
+            #[no_mangle]
+            pub unsafe extern "system" fn Java_dev_exact_canvas_Native_environment(
+                env: *mut JNIEnv,
+                _class: jclass,
+                values: $crate::canvas::jni_sys::jbyteArray,
+            ) {
+                // The reader calls once before starting host threads. Copy through JNI:
+                // Android's Os.setenv may belong to another libc under ARM translation.
+                let values = $crate::canvas::jni::utf8(env, values);
+                for entry in values.split('\0') {
+                    if let Some((name, value)) = entry.split_once('=') {
+                        if !name.is_empty() {
+                            std::env::set_var(name, value);
+                        }
+                    }
+                }
+            }
 
             fn pipeline_cache() {
                 use std::hash::{Hash, Hasher};
@@ -165,10 +188,12 @@ macro_rules! canvas_jni {
                 touch_slop: jfloat,
                 dates: jstring,
                 format_locale: jstring,
+                screen_reader: jint,
             ) {
                 let device = $crate::presenter::Device {
                     night: night == JNI_TRUE,
                     font_scale,
+                    screen_reader: $crate::presenter::ScreenReader::from_bits(screen_reader as u32),
                     locale: string(env, locale),
                     rtl: rtl == JNI_TRUE,
                     hour24: hour24 == JNI_TRUE,
@@ -400,9 +425,32 @@ macro_rules! canvas_jni {
                 line: $crate::canvas::jni_sys::jbyteArray,
             ) -> $crate::canvas::jni_sys::jbyteArray {
                 let line = $crate::canvas::jni::utf8(env, line);
-                let reply = with(|h| h.agent(&line));
+                let reply = with(|h| $crate::canvas::jni::jni_agent::run(env, h, &line));
                 let reply = reply.unwrap_or_else(|| r#"{"error":"no host on this thread"}"#.into());
                 $crate::canvas::jni::bytes(env, reply.as_bytes())
+            }
+
+            /// The token of the picture the last `frame` painted, which the
+            /// reader reports with its present; 0 when none is wanted (LLP
+            /// 1003.001 D9).
+            #[no_mangle]
+            pub unsafe extern "system" fn Java_dev_exact_canvas_Native_presentToken(
+                _env: *mut JNIEnv,
+                _class: jclass,
+            ) -> jlong {
+                with(|h| h.picture()).unwrap_or(0) as jlong
+            }
+
+            /// The picture `token` was presented at `at` (`System.nanoTime`):
+            /// whether a turn is now wanted.
+            #[no_mangle]
+            pub unsafe extern "system" fn Java_dev_exact_canvas_Native_picturePresented(
+                _env: *mut JNIEnv,
+                _class: jclass,
+                token: jlong,
+                at: jlong,
+            ) -> jboolean {
+                flag(with(|h| h.picture_presented(token as u64, at)).unwrap_or(false))
             }
 
             #[no_mangle]
@@ -420,6 +468,7 @@ macro_rules! canvas_jni {
             ) -> jintArray {
                 let mut fds = with(|h| h.fds()).unwrap_or([-1, -1]).to_vec();
                 fds.push(with(|h| h.acquire_fd()).unwrap_or(-1));
+                fds.push(with(|h| h.update_fd()).unwrap_or(-1));
                 let arr = ((**env).NewIntArray.expect("jni"))(env, fds.len() as i32);
                 ((**env).SetIntArrayRegion.expect("jni"))(env, arr, 0, fds.len() as i32, fds.as_ptr());
                 arr
@@ -594,6 +643,30 @@ macro_rules! canvas_jni {
                 with(|h| h.module_event(id as u32, key, session as u64, &kind, payload));
             }
 
+            /// A media element's event, or (an empty `event`) its state (LLP 1042.001 D7).
+            #[no_mangle]
+            #[allow(clippy::too_many_arguments)]
+            pub unsafe extern "system" fn Java_dev_exact_canvas_Native_media(
+                env: *mut JNIEnv,
+                _class: jclass,
+                id: jint,
+                slot: jint,
+                generation: jint,
+                session: jlong,
+                event: jstring,
+                payload: jstring,
+                state: jstring,
+            ) {
+                let event = string(env, event);
+                let payload = string(env, payload);
+                let state = string(env, state);
+                let key = $crate::canvas::ModuleKey {
+                    index: slot as u32,
+                    generation: generation as u32,
+                };
+                with(|h| h.media(id as u32, key, session as u64, &event, &payload, &state));
+            }
+
             $crate::canvas_jni_scroll!();
 
             /// What the reader is told of the scrollers it knows, nine
@@ -625,6 +698,17 @@ macro_rules! canvas_jni {
                 tool: jint,
             ) {
                 with(|h| h.touch(action, x, y, tool));
+            }
+
+            /// Whether a touch is down on the view, before the reader routes
+            /// it (`touching`). Whether a replacement waited for the lift.
+            #[no_mangle]
+            pub unsafe extern "system" fn Java_dev_exact_canvas_Native_touching(
+                _env: *mut JNIEnv,
+                _class: jclass,
+                on: jboolean,
+            ) -> jboolean {
+                flag(with(|h| h.touching(on == JNI_TRUE)).unwrap_or(false))
             }
 
             /// A finger past the touch's first (0 down, 1 up, 2 move, 3
@@ -1289,18 +1373,19 @@ pub unsafe fn canvas_buffer(env: *mut JNIEnv, view: u32) -> jobject {
 /// # Safety
 /// `env` is the JNI call's.
 pub unsafe fn image_buffer(env: *mut JNIEnv, id: u32) -> jobject {
-    let mut pending = super::pending();
-    let Some(super::Picture::Bitmap(bitmap)) = pending.get(&id) else {
-        return std::ptr::null_mut();
-    };
-    let Some(buffer) = bitmap.hardware() else {
-        return std::ptr::null_mut();
-    };
-    let object = AHardwareBuffer_toHardwareBuffer(env, buffer);
-    if !object.is_null() {
-        pending.remove(&id);
-    }
-    object
+    super::with_pending(|pending| {
+        let Some(super::Picture::Bitmap(bitmap)) = pending.get(&id) else {
+            return std::ptr::null_mut();
+        };
+        let Some(buffer) = bitmap.hardware() else {
+            return std::ptr::null_mut();
+        };
+        let object = AHardwareBuffer_toHardwareBuffer(env, buffer);
+        if !object.is_null() {
+            pending.remove(&id);
+        }
+        object
+    })
 }
 
 /// Picture `id` into the `HardwareBuffer` `buffer` (RGBA_8888, CPU-writable):

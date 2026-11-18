@@ -41,8 +41,8 @@ final class NavigationRefitIOSTests: XCTestCase {
         XCTAssertNil(session.boot(plan: try Data(contentsOf: URL(fileURLWithPath: path)), size: window.bounds.size).error)
         view.frame = host.view.bounds
         view.layoutIfNeeded()
-        until("the fixture's first route settles") { session.presenter.navigation.activeRoute != nil && !Agent(session: session).nativeInFlight() }
-        return (session, try XCTUnwrap(session.presenter.navigation.primaryOwner))
+        until("the fixture's first route settles") { session.presenter.navigationHost.activeRoute != nil && !Agent(session: session).nativeInFlight() }
+        return (session, try XCTUnwrap(session.presenter.navigationHost.primaryOwner))
     }
 
     /// A return to the foreground of the view's scene refits the container,
@@ -51,7 +51,7 @@ final class NavigationRefitIOSTests: XCTestCase {
     func testTheContainerIsRefitWhenItsSceneReturnsToTheForeground() throws {
         guard let scene = hostedWindowScene() else { throw missing("scene", "the container is refit for the scene its view is in") }
         let (session, owner) = try fixture(scene)
-        let fitted = session.presenter.navigation.ownerFrame(owner, in: try XCTUnwrap(owner.view.superview))
+        let fitted = session.presenter.navigationHost.ownerFrame(owner, in: try XCTUnwrap(owner.view.superview))
         let off = fitted.insetBy(dx: 0, dy: 80)
         owner.view.frame = off
         NotificationCenter.default.post(name: UIScene.willEnterForegroundNotification, object: nil)

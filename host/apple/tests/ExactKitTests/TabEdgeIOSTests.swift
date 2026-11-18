@@ -54,7 +54,7 @@ final class TabEdgeIOSTests: XCTestCase {
         let session = try XCTUnwrap(session), agent = Agent(session: session)
         let deadline = Date().addingTimeInterval(5)
         func ready() -> Bool {
-            let top = session.presenter.navigation.primaryNavigation?.topViewController as? RouteController
+            let top = session.presenter.navigationHost.primaryNavigation?.topViewController as? RouteController
             return top?.node.props["testId"] == "route-\(name)" && !agent.nativeInFlight()
         }
         while !ready() && Date() < deadline {
@@ -69,7 +69,19 @@ final class TabEdgeIOSTests: XCTestCase {
         try waitForRoute(route)
     }
 
+    /// A grid header button, pressed with `Presenter.press`, where UIKit's bar item action ends: the bar has fewer places
+    /// than the header has buttons, and UIKit keeps the rest in its overflow menu, where the agent does not tap.
+    private func press(_ testId: String, route: String) throws {
+        try XCTUnwrap(session).presenter.press(try node(testId).id)
+        try waitForRoute(route)
+    }
+
     private func box(_ v: UIView) -> CGRect { v.convert(v.bounds, to: nil) }
+
+    /// The nearest node above `v` in the view tree
+    private func nodeParent(_ v: UIView) -> NodeView? {
+        sequence(first: v.superview, next: { $0?.superview }).lazy.compactMap { $0 as? NodeView }.first
+    }
 
     /// Scrolled to its end as a finger's scroll ends there: the offset UIKit
     /// rests at, its content size and insets as they are once laid out (a
@@ -124,7 +136,7 @@ final class TabEdgeIOSTests: XCTestCase {
 
     func testATabsLastRowScrollsClearOfTheTabBar() throws {
         let session = try fixture()
-        let tabs = try XCTUnwrap(session.presenter.navigation.tabController, "the tabs are a UITabBarController")
+        let tabs = try XCTUnwrap(session.presenter.navigationHost.tabController, "the tabs are a UITabBarController")
         for (tab, root, pushed) in [("scrolls", "scrolls", "scrollsPushed"), ("plain", "plain", "plainPushed"), ("grouped", "grouped", "groupedPushed")] {
             try tap("tab-\(tab)", route: root)
             try assertClear(root, tabs)
@@ -156,12 +168,12 @@ final class TabEdgeIOSTests: XCTestCase {
         guard #available(iOS 18.0, *) else { throw XCTSkip("setTabBarHidden is iOS 18") }
         let session = try fixture(wholeScreen: true), p = session.presenter
         try tap("tab-grid", route: "grid")
-        if pushed { try tap("open-grid", route: "gridPushed") }
+        if pushed { try press("open-grid", route: "gridPushed") }
         let name = pushed ? "gridPushed" : "grid"
-        if inset { try tap("inset-bar", route: name) }
-        if wrapped { try tap("wrap-bar", route: name) }
-        let tabs = try XCTUnwrap(p.navigation.tabController)
-        let route = try XCTUnwrap(p.navigation.activeRoute)
+        if inset { try press("inset-bar", route: name) }
+        if wrapped { try press("wrap-bar", route: name) }
+        let tabs = try XCTUnwrap(p.navigationHost.tabController)
+        let route = try XCTUnwrap(p.navigationHost.activeRoute)
         let scroll = try XCTUnwrap(try node("content-\(name)").scrollView)
         scrollToEnd(scroll)
         let originalInset = scroll.adjustedContentInset.bottom
@@ -191,9 +203,11 @@ final class TabEdgeIOSTests: XCTestCase {
         native.contentOffset = scroll.contentOffset
         XCTAssertEqual(native.adjustedContentInset.bottom, originalInset, accuracy: 0.5)
 
-        try tap("select-grid", route: name)
+        try press("select-grid", route: name)
         let bar = try node("selection-bar")
         waitFor("the native bar hides and select mode settles") { tabs.isTabBarHidden && !Agent(session: session).nativeInFlight() }
+        XCTAssertEqual(box(bar).minX, inset ? 16 : 0, accuracy: 0.5, "inset-bar gives the row its side margins")
+        XCTAssertEqual(nodeParent(bar) === (try node("app")), !wrapped, "wrap-bar puts the row in the panels' column")
         let obstruction = max(0, box(scroll).maxY - box(bar).minY)
         reference.additionalSafeAreaInsets.bottom = max(0, obstruction - systemBottom)
         reference.view.layoutIfNeeded()
@@ -213,7 +227,7 @@ final class TabEdgeIOSTests: XCTestCase {
         }
         let selectedOffset = scroll.contentOffset.y, nativeSelectedOffset = native.contentOffset.y
 
-        try tap("select-grid", route: name)
+        try press("select-grid", route: name)
         reference.additionalSafeAreaInsets.bottom = originalInset - systemBottom
         reference.view.layoutIfNeeded()
         waitFor("the native bar and its inset return") {
@@ -233,20 +247,23 @@ final class TabEdgeIOSTests: XCTestCase {
         guard #available(iOS 18.0, *) else { throw XCTSkip("setTabBarHidden is iOS 18") }
         let session = try fixture(wholeScreen: true), p = session.presenter
         try tap("tab-grid", route: "grid")
-        let tabs = try XCTUnwrap(p.navigation.tabController)
+        let tabs = try XCTUnwrap(p.navigationHost.tabController)
         let scroll = try XCTUnwrap(try node("content-grid").scrollView)
         scrollToEnd(scroll)
         let originalInset = scroll.adjustedContentInset.bottom
-        try tap("author-tabs", route: "grid")
+        try press("author-tabs", route: "grid")
         let bar = try node("tabs")
+        XCTAssertTrue(tabs.isTabBarHidden, "the press hides the native bar")
+        // The inset takes the obstruction only after the press returns
+        waitFor("the grid takes the tablist's obstruction", facts: {
+            "inset \(scroll.adjustedContentInset.bottom), obstruction \(box(scroll).maxY - box(bar).minY)"
+        }) { abs(scroll.adjustedContentInset.bottom - (box(scroll).maxY - box(bar).minY)) < 0.5 }
         let obstruction = box(scroll).maxY - box(bar).minY
-        XCTAssertTrue(tabs.isTabBarHidden)
         XCTAssertGreaterThan(obstruction, try XCTUnwrap(window).safeAreaInsets.bottom)
-        XCTAssertEqual(scroll.adjustedContentInset.bottom, obstruction, accuracy: 0.5)
         scrollToEnd(scroll)
         XCTAssertLessThanOrEqual(box(try node("grid-30")).maxY, box(bar).minY + 0.5)
         XCTAssertGreaterThan(bar.layer.zPosition, tabs.view.layer.zPosition)
-        try tap("author-tabs", route: "grid")
+        try press("author-tabs", route: "grid")
         waitFor("the native tab bar restores its inset") {
             !tabs.isTabBarHidden && abs(scroll.adjustedContentInset.bottom - originalInset) < 0.5
         }
@@ -260,37 +277,37 @@ final class TabEdgeIOSTests: XCTestCase {
         }
         let session = try fixture(wholeScreen: true), p = session.presenter
         try tap("tab-grid", route: "grid")
-        try tap("select-grid", route: "grid")
-        let tabs = try XCTUnwrap(p.navigation.tabController), route = try XCTUnwrap(p.navigation.activeRoute)
+        try press("select-grid", route: "grid")
+        let tabs = try XCTUnwrap(p.navigationHost.tabController), route = try XCTUnwrap(p.navigationHost.activeRoute)
         let scroll = try XCTUnwrap(try node("content-grid").scrollView)
         let bar = try node("selection-bar"), host = try XCTUnwrap(window?.rootViewController)
         let indicator = host.view.safeAreaInsets.bottom
         let obstruction = box(scroll).maxY - box(bar).minY
         waitFor("the authored row sets the bottom inset") { abs(scroll.adjustedContentInset.bottom - obstruction) < 0.5 }
         let added = tabs.additionalSafeAreaInsets.bottom
-        for _ in 0..<3 { p.navigation.reportCovers() }
+        for _ in 0..<3 { p.navigationHost.reportCovers() }
         XCTAssertEqual(tabs.additionalSafeAreaInsets.bottom, added, accuracy: 0.5, "reporting does not accumulate the row's inset")
 
         host.additionalSafeAreaInsets.bottom = 20
         host.view.layoutIfNeeded()
-        p.navigation.reportCovers()
+        p.navigationHost.reportCovers()
         waitFor("an outer container's obstruction is counted once") {
             abs(scroll.adjustedContentInset.bottom - max(indicator + 20, obstruction)) < 0.5
         }
         XCTAssertEqual(tabs.additionalSafeAreaInsets.bottom, max(0, obstruction - indicator - 20), accuracy: 0.5)
         host.additionalSafeAreaInsets.bottom = 0
         host.view.layoutIfNeeded()
-        p.navigation.reportCovers()
+        p.navigationHost.reportCovers()
         waitFor("the row takes back only its own clearance") { abs(scroll.adjustedContentInset.bottom - obstruction) < 0.5 }
 
         tabs.additionalSafeAreaInsets.bottom += 20
         tabs.view.layoutIfNeeded()
-        p.navigation.reportCovers()
+        p.navigationHost.reportCovers()
         tabs.view.layoutIfNeeded()
         XCTAssertEqual(tabs.additionalSafeAreaInsets.bottom, 20, accuracy: 0.5, "an app's own inset survives the row's reconciliation")
         tabs.additionalSafeAreaInsets.bottom -= 20
         tabs.view.layoutIfNeeded()
-        p.navigation.reportCovers()
+        p.navigationHost.reportCovers()
         tabs.view.layoutIfNeeded()
         XCTAssertEqual(tabs.additionalSafeAreaInsets.bottom, added, accuracy: 0.5)
 
@@ -329,14 +346,14 @@ final class TabEdgeIOSTests: XCTestCase {
         }
         defer { presenter.onPress = press }
         try tap("tab-grouped", route: "grouped")
-        XCTAssertEqual((presenter.navigation.primaryNavigation?.topViewController as? RouteController)?.node.props["testId"], "route-grouped")
+        XCTAssertEqual((presenter.navigationHost.primaryNavigation?.topViewController as? RouteController)?.node.props["testId"], "route-grouped")
         XCTAssertFalse(Agent(session: session).nativeInFlight())
         wait(for: [delivered], timeout: 5)
     }
 
     func testOneAgentWheelReachesTheMeasuredEndOfAGroupedList() throws {
         let session = try fixture(), agent = Agent(session: session)
-        let tabs = try XCTUnwrap(session.presenter.navigation.tabController)
+        let tabs = try XCTUnwrap(session.presenter.navigationHost.tabController)
         for name in ["grouped", "plainPushed"] {
             if name == "grouped" { try tap("tab-grouped", route: "grouped") }
             else { try tap("tab-plain", route: "plain"); try tap("plain-1", route: "plainPushed") }
@@ -364,25 +381,25 @@ final class TabEdgeIOSTests: XCTestCase {
     /// its edges while it shows, and after it closes.
     func testAClosedMenuAndDialogBesideTheScrollerLeaveItItsEdges() throws {
         let session = try fixture()
-        let tabs = try XCTUnwrap(session.presenter.navigation.tabController)
+        let tabs = try XCTUnwrap(session.presenter.navigationHost.tabController)
         try assertClear("scrolls", tabs)
         let content = try node("content-scrolls")
         let route = try XCTUnwrap(sequence(first: content.next, next: { $0?.next }).compactMap { $0 as? RouteController }.first)
         XCTAssertTrue(route.edgeScroll === content, "the scroller reaches the bottom edge")
         XCTAssertTrue(route.collapseScroll === content, "and goes under the bar")
         let menu = try node("sort-menu")
-        XCTAssertFalse(NavigationHost.inFlow(menu), "a closed menu is not laid out")
-        XCTAssertFalse(NavigationHost.inFlow(try node("confirm")), "nor is a closed dialog")
+        XCTAssertFalse(RouteGeometry.inFlow(menu), "a closed menu is not laid out")
+        XCTAssertFalse(RouteGeometry.inFlow(try node("confirm")), "nor is a closed dialog")
         let before = box(content)
         session.presenter.menus.layOut(menu)
         spin(0.2)
         XCTAssertGreaterThan(menu.bounds.height, 0, "the menu is laid out")
         // Out of the flow, as HTML's top layer is: opening it moves nothing.
-        XCTAssertFalse(NavigationHost.inFlow(menu), "an open popover is out of its parent's flow")
+        XCTAssertFalse(RouteGeometry.inFlow(menu), "an open popover is out of its parent's flow")
         XCTAssertEqual(box(content), before, "so the scroller beside it stays where it was")
         session.presenter.menus.coverClosed()
         spin(0.3)
-        XCTAssertFalse(NavigationHost.inFlow(menu))
+        XCTAssertFalse(RouteGeometry.inFlow(menu))
         XCTAssertEqual(box(content), before)
         XCTAssertTrue(route.edgeScroll === content)
     }

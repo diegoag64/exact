@@ -40,7 +40,7 @@
 //! answers no request whatever its shell attaches.
 
 use super::{CanvasHost, FINISHED};
-use exact_runner::agent::{error, field_bool, field_str};
+use exact_runner::json::{error, field_bool, field_str};
 use exact_runner::DataSource;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -84,6 +84,7 @@ pub(super) fn lend<D: DataSource>(
     let offset = started.elapsed().as_secs_f64() * 1000.0 - p.host().now();
     OFFSET.store(offset.to_bits(), Ordering::Relaxed);
     LENT.store(true, Ordering::Relaxed);
+    super::clock::set(super::clock::Clock::for_turn(started, None, offset));
     p.set_live_clock(Some(std::rc::Rc::new(move || {
         started.elapsed().as_secs_f64() * 1000.0 - offset
     })));
@@ -92,6 +93,8 @@ pub(super) fn lend<D: DataSource>(
 /// The lease ended: the driver's clock again, where the display left it.
 pub(super) fn unlend<D: DataSource>(p: &mut crate::presenter::Presenter<D>) {
     if LENT.swap(false, Ordering::Relaxed) {
+        let now = super::clock::hold(p.host().now());
+        p.tick(now);
         p.set_live_clock(None);
     }
 }
@@ -114,8 +117,10 @@ pub(crate) fn own_time<D: DataSource + Default>(
 ) {
     if std::env::var("EXACT_AGENT").as_deref() == Ok("1") {
         SEEK.store(true, Ordering::Relaxed);
+        super::clock::set(super::clock::Clock::Held(p.host().now()));
     } else {
         p.set_live_clock(Some(crate::presenter::wall_since(started)));
+        super::clock::set(super::clock::Clock::for_turn(started, None, 0.0));
     }
 }
 
@@ -151,6 +156,15 @@ pub fn waiting() -> bool {
 }
 
 impl<D: DataSource + Default> CanvasHost<D> {
+    /// The reader's handler cannot run while the agent holds this thread.
+    /// Service only its request handoff and answers until the operation returns.
+    pub fn agent_with_reader(&mut self, line: &str, turn: crate::presenter::AgentTurn) -> String {
+        let previous = self.p.set_agent_turn(Some(turn));
+        let reply = self.agent(line);
+        self.p.set_agent_turn(previous);
+        reply
+    }
+
     /// One request of the agent API, answered: a JSON line in, a JSON line
     /// out. `{"op":"ready"}` is the line the stdio carrier writes first.
     pub fn agent(&mut self, line: &str) -> String {

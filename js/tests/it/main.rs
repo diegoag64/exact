@@ -40,6 +40,7 @@ mod process;
 mod pure;
 mod render;
 mod request_sets;
+mod secret_storage_order;
 mod secrets;
 mod shim;
 mod snapshot;

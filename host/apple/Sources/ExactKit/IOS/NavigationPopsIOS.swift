@@ -60,17 +60,16 @@ extension NavigationHost {
     /// each UIKit call Exact hears (a stack's `willShow` and `didShow`, a
     /// transition's end, the tab delegate's calls) before anything else the
     /// call does, so a Back made before a tap reaches the router before the
-    /// tap's press, and, on a stack whose delegate the app replaced, in the
-    /// turn after a route appears (`routeAppeared`). A departed header search
-    /// field finishes its edit first, while its handlers still exist (LLP
-    /// 1035.001 D2). A pop on the tab UIKit selects follows that selection
-    /// first (`followSelection`): a pop on a tab selected in code can reach
-    /// Exact before the tab's route appears. One route off the router's
-    /// selected route is the platform's Back, which presses the authored
-    /// control; more is a history jump. A pop that leaves the router's
-    /// selected route in place (under a route the app pushed meanwhile, or on
-    /// a tab the router has left and UIKit does not select) is not followed,
-    /// and the router's stack is written back.
+    /// tap's press. A departed header search field finishes its edit first,
+    /// while its handlers still exist (LLP 1035.001 D2). A pop on the tab
+    /// UIKit selects follows that selection first (`followSelection`): a pop
+    /// on a tab selected in code can reach Exact before the tab's route
+    /// appears. One route off the router's selected route is the platform's
+    /// Back, which presses the authored control; more is a history jump. A
+    /// pop that leaves the router's selected route in place (under a route
+    /// the app pushed meanwhile, or on a tab the router has left and UIKit
+    /// does not select) is not followed, and the router's stack is written
+    /// back.
     @discardableResult
     func followPops() -> Bool {
         guard !syncing else { return false }
@@ -96,7 +95,7 @@ extension NavigationHost {
     /// when they agree, or while a transition, a sync or a tap is under way.
     var restDifference: String? {
         guard container != nil, primaryOwner != nil, !syncing, !changing, !pendingSync, !resyncOwed, tapping == nil,
-              !presenter.modals.inTransition else { return nil }
+              !presenter.modalHost.inTransition else { return nil }
         let keys = { (routes: [UIViewController]) in "[" + routes.map { ($0 as? RouteController)?.key ?? "?" }.joined(separator: ", ") + "]" }
         for (index, routes) in routerStacks.enumerated() where !routes.isEmpty {
             let wanted = base(routes)
@@ -143,28 +142,6 @@ extension NavigationHost {
         }
     }
 
-    /// A route UIKit shows has appeared, as a transition ended. On a stack
-    /// whose delegate the app replaced, Exact hears none of the stack's
-    /// calls, so this stands in for the transition's end there: in the next
-    /// turn, it follows the stack's pops and runs a sync the transition held.
-    /// A finished swipe's destination appears while the swipe's coordinator
-    /// is still there, its `initiallyInteractive` true (LLP 1075.003 §9.16),
-    /// and the pop counts as committed only once the coordinator is gone. On
-    /// a stack of Exact's, `willShow`, `didShow` or the transition's end has
-    /// done both already. On a stack whose delegate the app replaced, the
-    /// rest of a transition's end is not run (LLP 1075.003 §3.7): a swipe
-    /// whose source the app replaced while the finger was down is not
-    /// followed, and when the popped route's header search field finishes its
-    /// edit only after this next turn, the pop is followed then
-    /// (`followPops`), and a sync that following holds waits for a later
-    /// sync.
-    func routeAppeared() {
-        DispatchQueue.main.async { [weak self] in
-            self?.followPops()
-            self?.runHeldSync()
-        }
-    }
-
     /// Follow in the next turn a pop UIKit committed that no call reported.
     func followPopsNextTurn() {
         guard !followOwed else { return }
@@ -202,12 +179,38 @@ extension NavigationHost {
         retiringRoots.contains { node === $0 || node.isDescendant(of: $0) }
     }
 
-    /// Run the sync a transition held, now that it has ended.
+    /// Run the sync a transition held, now that it has ended, or else the edge passes that an app's selection owes.
     func runHeldSync() {
-        guard pendingSync || tabsHeld else { return }
+        guard pendingSync || tabsHeld else { return settleScrollEdges() }
         pendingSync = false
         tabsHeld = false
         resync()
+    }
+
+    /// Runs what `transition` held when it ends, on the turn after its completion: the held sync (`runHeldSync`: a
+    /// stack's write, `tabsHeld`, or a sync a route's sheet deferred, `pendingSync`) and the selected stack's tablist,
+    /// which the bar could not follow while it ran, at the root (`tablistRoot`) or at a pushed route on top
+    /// (`tablistOwed`). The stack's own push or pop also runs the held sync from `willShow`'s completion, `didShow` and
+    /// `completeTransition`; this release serves any transition the stack reports, such as a presentation over it. A
+    /// call that finds a transition whose run is pending asks nothing more and loses nothing: the run reads the router
+    /// and the tree as they are then.
+    func runHeld(after transition: UIViewControllerTransitionCoordinator) {
+        guard !heldTransitions.contains(transition) else { return }
+        heldTransitions.add(transition)
+        let run = { [weak self] in
+            guard let self else { return }
+            runHeldSync()
+            guard let stack = routesStack(routerTab) else { return }
+            followTablist(stack.stackRoutes.compactMap { $0 as? RouteController }, in: stack)
+        }
+        let release = { [weak self, weak transition] in self?.heldTransitions.remove(transition) }
+        let queued = transition.animate(alongsideTransition: nil) { _ in DispatchQueue.main.async { release(); run() } }
+        // Run on the next turn too when the coordinator answers that it queued nothing, as one does once its completions
+        // have begun (`ModalController.viewDidAppear` meets one still installed), holding it through that run so it does
+        // not ask again; a stack that still reports it then leaves the work to the next batch, and a completion UIKit runs
+        // all the same finds nothing left to do
+
+        if !queued { DispatchQueue.main.async { run(); release() } }
     }
 
     /// The child lists `batch` sets on the root and the tab panels.

@@ -77,7 +77,7 @@ fn usage() -> String {
   contract migrate <file.contract>
   contract symbols <file.contract> [--stdin] [--editor] [--name <exact-name>]
   contract sources <file.contract>
-  contract fmt [--check | --stdout] <file.contract>
+  contract fmt [--check | --stdout | --stdin] <file.contract>
   contract fmt --uses <file.contract>
   contract types <file.contract> [-o <app.d.ts>] [--check]
   contract rust <file.contract> [-o <shapes.rs>]
@@ -491,26 +491,36 @@ fn tests(args: &[String]) -> ExitCode {
     };
     match contract::tests(&src).and_then(|t| contract::properties(&src).map(|p| (t, p))) {
         Ok((t, p)) => {
-            if !p.is_empty() {
-                let test = std::path::Path::new(input);
-                let paired = test.with_file_name(
-                    test.file_name()
-                        .unwrap()
-                        .to_string_lossy()
-                        .replace(".test.contract", ".contract"),
-                );
-                let app = test.with_file_name("app.contract");
-                let app = if app.is_file() { app } else { paired };
-                if let Err(errors) = contract::check_properties_path(&app, &p) {
-                    for e in errors {
-                        if e.file.is_some() {
-                            eprintln!("{e}");
-                        } else {
-                            eprintln!("{input}:{e}");
-                        }
+            let test = std::path::Path::new(input);
+            let paired = test.with_file_name(
+                test.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace(".test.contract", ".contract"),
+            );
+            let app = test.with_file_name("app.contract");
+            let app = if app.is_file() { app } else { paired };
+            let properties = if p.is_empty() {
+                Ok(())
+            } else {
+                contract::check_properties_path(&app, &p)
+            };
+            let states = contract::check_test_states_path(&app, &t);
+            let errors: Vec<_> = properties
+                .err()
+                .into_iter()
+                .flatten()
+                .chain(states.err().into_iter().flatten())
+                .collect();
+            if !errors.is_empty() {
+                for e in errors {
+                    if e.file.is_some() {
+                        eprintln!("{e}");
+                    } else {
+                        eprintln!("{input}:{e}");
                     }
-                    return ExitCode::from(1);
                 }
+                return ExitCode::from(1);
             }
             println!("{}", contract::authored_json(&t, &p));
             ExitCode::SUCCESS
@@ -522,29 +532,28 @@ fn tests(args: &[String]) -> ExitCode {
     }
 }
 
-/// Explicit formatting, with read-only preview and check modes; `--uses`
-/// writes the `use` lines each file of the program lacks (LLP 1091 D1).
+/// Explicit formatting, with read-only preview and check modes, and one for
+/// an editor's unsaved text; `--uses` writes the `use` lines each file of the
+/// program lacks (LLP 1091 D1).
 fn fmt(args: &[String]) -> ExitCode {
-    const USAGE: &str = "usage: contract fmt [--check | --stdout] <file.contract>\n       contract fmt --uses <file.contract>";
+    const USAGE: &str = "usage: contract fmt [--check | --stdout | --stdin] <file.contract>
+       contract fmt --uses <file.contract>
+  --stdin: stdin's text, formatted to stdout; <file.contract> names it and is not read";
+    const MODES: [&str; 3] = ["--check", "--stdout", "--stdin"];
     if matches!(args, [flag] if flag == "--help" || flag == "-h") {
         println!("{USAGE}");
         return ExitCode::SUCCESS;
     }
     match args {
         [flag, input] | [input, flag] if flag == "--uses" && !input.starts_with('-') => {
-            return fix_uses(input)
+            return fix_uses(input);
         }
         _ => {}
     }
     let (input, mode) = match args {
         [input] if !input.starts_with('-') => (input, ""),
-        [flag, input]
-            if matches!(flag.as_str(), "--check" | "--stdout") && !input.starts_with('-') =>
-        {
-            (input, flag.as_str())
-        }
-        [input, flag]
-            if matches!(flag.as_str(), "--check" | "--stdout") && !input.starts_with('-') =>
+        [flag, input] | [input, flag]
+            if MODES.contains(&flag.as_str()) && !input.starts_with('-') =>
         {
             (input, flag.as_str())
         }
@@ -553,15 +562,17 @@ fn fmt(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let result = std::fs::read_to_string(input)
-        .map_err(|e| e.to_string())
-        .and_then(|before| {
-            let after = contract_syntax::fmt::format(&before).map_err(|e| e.to_string())?;
-            Ok((before, after))
-        });
+    let before = match mode {
+        "--stdin" => std::io::read_to_string(std::io::stdin()),
+        _ => std::fs::read_to_string(input),
+    };
+    let result = before.map_err(|e| e.to_string()).and_then(|before| {
+        let after = contract_syntax::fmt::format(&before).map_err(|e| e.to_string())?;
+        Ok((before, after))
+    });
     match result {
         Ok((before, after)) => match mode {
-            "--stdout" => {
+            "--stdout" | "--stdin" => {
                 print!("{after}");
                 ExitCode::SUCCESS
             }
@@ -608,7 +619,10 @@ fn fix_uses(input: &str) -> ExitCode {
                 println!("{input}: every file names what it uses");
             } else if refused.is_empty() && !names.is_empty() {
                 let are = if names.len() == 1 { "is" } else { "are" };
-                println!("{input}: every file it reaches names what it uses; {} beside it {are} not reached from it (another entry, or a file it uses nothing from)", names.join(", "));
+                println!(
+                    "{input}: every file it reaches names what it uses; {} beside it {are} not reached from it (another entry, or a file it uses nothing from)",
+                    names.join(", ")
+                );
             }
             for e in &refused {
                 eprintln!("{e}");

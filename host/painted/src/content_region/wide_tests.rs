@@ -81,7 +81,7 @@ fn a_retained_region_paints_after_its_wide_colours_are_swept() {
         return;
     }
     let _service = crate::content_region::test_service();
-    let (mut p, error) = Presenter::boot_with_content_region(
+    let (mut p, error) = Presenter::boot_region_with_fixture_fonts(
         &crate::test_plan(APP),
         (),
         (400., 500.),

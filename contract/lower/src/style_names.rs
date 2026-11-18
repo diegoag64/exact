@@ -270,6 +270,10 @@ pub const STYLE_NAMES: &[(&str, &str, AttrTarget)] = &[
     ("scroll-margin-left", "css CSS Scroll Snap 1", AttrTarget::Styles(&[StyleId::ScrollMarginLeft])),
     // Host-owned pointer reach past the border box, beside LLP 1061's press
     // feel (Charlie, 2026-11-10; issues/20261021-scroll-drag-events-and-hit-slop.md).
+    // A scroll container's one child zoomed by a pinch (LLP 1057.001.000
+    // D1): `@viewport`'s `min-zoom` and `max-zoom`, on an element.
+    ("-exact-min-zoom", "exact LLP 1057.001.000 D1", AttrTarget::Styles(&[StyleId::MinZoom])),
+    ("-exact-max-zoom", "exact LLP 1057.001.000 D1", AttrTarget::Styles(&[StyleId::MaxZoom])),
     ("-exact-hit-slop", "exact LLP 1061", AttrTarget::Styles(&[ StyleId::HitSlopTop, StyleId::HitSlopRight, StyleId::HitSlopBottom, StyleId::HitSlopLeft, ])),
     ("-exact-hit-slop-top", "exact LLP 1061", AttrTarget::Styles(&[StyleId::HitSlopTop])),
     ("-exact-hit-slop-right", "exact LLP 1061", AttrTarget::Styles(&[StyleId::HitSlopRight])),
@@ -278,6 +282,11 @@ pub const STYLE_NAMES: &[(&str, &str, AttrTarget)] = &[
     // A content owner's clearance of its chrome, per edge (LLP 1123 D4), and
     // the safe area where a box is, as an author sets it (D9).
     ("-exact-safe-area", "exact LLP 1123 D4", AttrTarget::Styles(&[StyleId::SafeArea])),
+    // What a box takes, and what it adds to the unsafe area inside it (LLP 1123 D4, D11).
+    ("-exact-safe-area-ignore", "exact LLP 1123 D4", AttrTarget::Shorthand),
+    ("-exact-safe-area-bar", "exact LLP 1123 D12", AttrTarget::Shorthand),
+    ("-exact-additional-safe-area", "exact LLP 1123 D11", AttrTarget::Styles(&[ StyleId::AdditionalSafeAreaTop, StyleId::AdditionalSafeAreaRight, StyleId::AdditionalSafeAreaBottom, StyleId::AdditionalSafeAreaLeft, ])),
+    ("-exact-safe-area-padding", "exact LLP 1123 D11", AttrTarget::Styles(&[ StyleId::SafeAreaPaddingTop, StyleId::SafeAreaPaddingRight, StyleId::SafeAreaPaddingBottom, StyleId::SafeAreaPaddingLeft, ])),
     ("--exact-safe-area-inset-top", "exact LLP 1123 D9", AttrTarget::Styles(&[StyleId::LocalInsetTop])),
     ("--exact-safe-area-inset-right", "exact LLP 1123 D9", AttrTarget::Styles(&[StyleId::LocalInsetRight])),
     ("--exact-safe-area-inset-bottom", "exact LLP 1123 D9", AttrTarget::Styles(&[StyleId::LocalInsetBottom])),

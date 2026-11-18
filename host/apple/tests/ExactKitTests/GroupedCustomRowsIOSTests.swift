@@ -398,7 +398,7 @@ final class GroupedCustomRowsIOSTests: GroupedListFixture {
             ["op": "frame", "id": 30, "x": 16.0, "y": 0.0, "w": 354.0, "h": 52.0],
         ]))
         background.view.addSubview(try XCTUnwrap(p.views[1]))
-        p.modals.present(try XCTUnwrap(p.views[90]), navigation: UIViewController(), from: background, preceding: nil, owner: owner)
+        p.modalHost.present(try XCTUnwrap(p.views[90]), navigation: UIViewController(), from: background, preceding: nil, owner: owner)
         XCTAssertTrue(try XCTUnwrap(p.views[1]).inert, "the sheet makes the list inert")
 
         rows.insert(Row(view: 21, custom: true), at: 0)
@@ -414,7 +414,7 @@ final class GroupedCustomRowsIOSTests: GroupedListFixture {
             ["op": "frame", "id": 23, "x": 370.0, "y": 0.0, "w": 60.0, "h": 52.0],
             ["op": "frame", "id": 30, "x": 16.0, "y": 52.0, "w": 354.0, "h": 52.0],
         ]))
-        p.modals.closeTop(animated: false)
+        p.modalHost.closeTop(animated: false)
         XCTAssertFalse(try XCTUnwrap(p.views[21]).inert, "the sheet closed")
         // A batch that changes nothing in the row keeps it as it is.
         p.apply(wireBatch([["op": "props", "id": 4, "set": ["testId": "rows"], "clear": [String]()]]))

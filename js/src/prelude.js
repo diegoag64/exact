@@ -43,6 +43,10 @@
     function (line) {
       if (global.console) global.console.error(line);
     };
+  // An uncancelled error event's line for the platform's log alone (console.js, LLP 1175 D5); a browser realm's
+  // console prints its own.
+  var uncaught = global.__exact_uncaught;
+  delete global.__exact_uncaught;
   // The runtime's own journal line (LLP 1097 D8): a failed storage
   // operation, an unhandled rejection. Natively it is the runner's journal
   // (`logs`) as it is; a realm without that door writes it to its console.
@@ -87,6 +91,7 @@
     tracker: tracker,
     journal: journal,
     runtimeLine: runtimeLine,
+    uncaught: uncaught,
     errorText: errorText,
     leftOpen: function () {
       leftOpen();
@@ -144,6 +149,12 @@
           "; call it inside an answer"
       );
   }
+  global.exactHost = function exactHost() {
+    answerOnly("exactHost()");
+    var kind = host(12, "host", "");
+    if (kind === undefined) throw storageError("exactHost() is unavailable during bake", "bake");
+    return kind;
+  };
   // Host work an answer waits on that is neither a fetch nor storage (the
   // browser's digest settles in a later task): on the web it joins the
   // answer's storage turn, so the answer is pending on it, not on nothing.
@@ -199,6 +210,10 @@
   var pending = new Map(),
     // the answer a fetch belongs to
     currentCall = null,
+    // the id of the answer whose turn the engine runs (an id, so that no ended call's value is kept alive by it), and
+    // whether the turn is a module turn delivering a report's reply (LLP 1175 D3)
+    turnId = 0,
+    reportTurn = false,
     // a socket's mapper answering a frame (D7)
     mapping = null,
     // any mapper call
@@ -303,6 +318,14 @@
   function headOwner() {
     return head ? owner(head.call) : null;
   }
+  // Storage this call already issued, excluding `hostWork`: an answer drains
+  // these FIFO operations before it asks the browser host for an unheld secret
+  // lease (LLP 1097 D7).
+  function hasQueuedStorage(call) {
+    if (head && owner(head.call) === call) return true;
+    for (var i = 0; i < queue.length; i++) if (owner(queue[i].call) === call) return true;
+    return false;
+  }
   // Native image cancellation uses Ibex's identity on the original Promise.
   // Other promises may resolve to raw capabilities (a database or statement).
   global.__exact_storage_promise = function () {
@@ -396,8 +419,23 @@
     Response: Response,
     FetchError: FetchError,
     conflict: SOCKET_AND_FETCH,
+    errors: errors,
     current: function () {
       return currentCall;
+    },
+    // Whether `call` is the answer whose turn the engine runs now (`__exact_call`, `__exact_turn`).
+    inTurn: function (call) {
+      return call !== null && call.id === turnId && turnId !== 0;
+    },
+    moving: function () {
+      return moving;
+    },
+    initializing: function () {
+      return initializing;
+    },
+    // A module turn that delivers a report's reply (LLP 1175 D3).
+    afterReport: function () {
+      return reportTurn;
     },
     mapping: function () {
       return mapping;
@@ -406,6 +444,10 @@
       return overlaying;
     },
     inOverlay: inOverlay,
+    // store.js's, once the store is made below
+    secretEffect: function (call) {
+      storeEnv.secretEffect(call);
+    },
   });
   delete global.__exact_fetch;
   var request = fetches.request,
@@ -417,7 +459,7 @@
   delete global.__exact_auth;
 
   // --- the store (store.js) and storage (storage.js) ------------------------
-  var store = global.__exact_store({
+  var storeEnv = {
     host: host,
     presence: binary.presence,
     browserSecrets: browserSecrets,
@@ -435,7 +477,8 @@
       return overlaying;
     },
     inOverlay: inOverlay,
-  });
+  };
+  var store = global.__exact_store(storeEnv);
   delete global.__exact_store;
   var storageCalls = global.__exact_storage_calls({
     host: host,
@@ -443,6 +486,7 @@
     errorText: errorText,
     background: background,
     owner: owner,
+    browserSecrets: browserSecrets,
     storing: storing,
     unstore: unstore,
     storageCounts: storageCounts,
@@ -552,9 +596,23 @@
     cleanUp();
     return text;
   }
-  function settle(call, final) {
+  function settleResult(call, final) {
     var secret = call.secrets && call.secrets[0];
-    if (secret && !secret.held) return JSON.stringify({ tag: 1, call: call.id, ticket: 0, secret: secret.name });
+    if (secret && !secret.held) {
+      if (browserSecrets && !call.lost && !call.letGo) {
+        if (hasQueuedStorage(call)) {
+          var storageOwner = headOwner();
+          return JSON.stringify({
+            tag: 1,
+            call: call.id,
+            ticket: 0,
+            waiting: !!storageOwner && storageOwner !== call,
+          });
+        }
+        secret.asked = true;
+      }
+      return JSON.stringify({ tag: 1, call: call.id, ticket: 0, secret: secret.name });
+    }
     // A fetch its continuation tried after it staged socket operations
     // (refused at the fetch) refuses the mutation too, before any frame.
     if (call.socketConflict && call.status === "done") {
@@ -643,8 +701,8 @@
         if (c !== background && !calls.has(c.id)) left = true;
       });
       if (left) return JSON.stringify({ tag: 1, call: call.id, ticket: 0 });
-      // Another answer's work may settle it before its timer: whichever comes first asks it again (not on a
-      // worker, which runs one turn to its end and so cannot wait on another's).
+      // Another answer's work may settle it before its timer: whichever comes
+      // first asks it again.
       if (
         !final &&
         (due === undefined || (moving && later)) &&
@@ -652,7 +710,8 @@
       )
         return JSON.stringify({ tag: 1, call: call.id, ticket: 0, waiting: true, timer: due });
     } else if (due === undefined && moving && !final && background.storage > 0) {
-      // The page's realm keeps its background-delivery rule (LLP 1097 D7).
+      // The page realm asks a waiter again after background storage lands
+      // (LLP 1097 D2, D7).
       return JSON.stringify({ tag: 1, call: call.id, ticket: 0, waiting: true });
     }
     // A later turn can clear even a timer that parked alone: keep its owner releasable (LLP 1162 D3).
@@ -672,12 +731,29 @@
     return fail(
       new Error(
         "the answer is pending on nothing: no host operation it started will resolve it. " +
-          "An answer that awaits a promise another answer started (a fetch shared between answers, or a queue chained through a " +
-          "fetch another answer is waiting on) waits on work it does not own in the web's module realm; make each answer's own " +
-          "fetch, or share the resolved value rather than the promise. Storage is different: an answer queued behind another's " +
-          "storage turn waits for it"
+          "An answer that awaits a promise another answer started waits on work it does not own; make each answer's own " +
+          "request, or share the resolved value rather than the promise"
       )
     );
+  }
+  function settle(call, final) {
+    var text = settleResult(call, final);
+    if (!call.secretCompleted) return text;
+    var result = JSON.parse(text);
+    // Results the realm consumes itself leave the completion sticky until one
+    // reaches the host. A next lease's request is one: the host ends the
+    // completed lease before it asks for the next (LLP 1146 D5).
+    if (
+      result.secret === undefined &&
+      result.tag === 1 &&
+      result.ticket === 0 &&
+      (result.yielded || result.waiting || result.timer === undefined)
+    )
+      return text;
+    call.secretCompleted = false;
+    result.secretComplete = true;
+    if (call.secretFailed) result.secretFailed = true;
+    return JSON.stringify(result);
   }
   var nativeCall = (global.__exact_module_sync = function (request) {
     // `native.call`, and a module binding's synchronous form (LLP 1133.002 D14)
@@ -738,6 +814,7 @@
     };
     var result;
     currentCall = call;
+    turnId = call.id;
     work.setTurn(call);
     calls.set(call.id, call);
     try {
@@ -1296,6 +1373,8 @@
   global.__exact_turn = function (id) {
     var t = id === "module" ? work.MODULE : id ? calls.get(Number(id)) || null : null;
     currentCall = t === work.MODULE ? null : t;
+    turnId = currentCall ? currentCall.id : 0;
+    reportTurn = false;
     work.setTurn(t);
   };
   global.__exact_module_discarded = function () {
@@ -1339,11 +1418,19 @@
     currentCall = p.module ? null : p.call;
     // an adopted fetch's: its let-go call's steps run as it (the async helper), a plain reaction as no answer
     if (p.module) work.landed();
+    // A report's: its listener's continuation reads the reply, and its failure is quiet (LLP 1175 D4).
+    if (p.report) {
+      fetches.reportLanded();
+      reportTurn = true;
+    }
     // Its `AbortSignal.timeout`'s deadline passed on the host: the signal aborts.
     if (o.failed && o.failed.kind === "Timeout" && p.timed) timers.expire(p.signal);
     // A reply delivered after the signal aborts still rejects with that signal's reason.
     if (p.signal && p.signal.aborted) p.reject(p.signal.reason);
-    else if (o.failed) p.reject(new FetchError(launchRefusal(o.failed, p.url)));
+    else if (o.failed) {
+      var failure = new FetchError(launchRefusal(o.failed, p.url));
+      p.reject(p.report ? errors.quietReason(failure) : failure);
+    }
     else p.resolve(hostReply(o.response, p.bodyTo, p.head));
   };
 })(globalThis);

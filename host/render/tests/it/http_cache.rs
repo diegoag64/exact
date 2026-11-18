@@ -153,6 +153,7 @@ fn a_render_prefetch_and_its_equal_read_have_separate_exchanges() {
         executor
             .run(
                 RequestOut {
+                    completion: None,
                     ticket,
                     target: "render-prefetch".into(),
                     forced: false,

@@ -22,10 +22,11 @@ import UIKit
 /// The tab delegate Exact keeps (LLP 1075.003 §3.7): UIKit selects unless the
 /// app's delegate or the router declines (`mayShow`), and the router follows
 /// what UIKit selected (`followUIKit`); what Exact does not implement goes
-/// straight to the app's delegate.
-final class TabDelegateProxy: NSObject, UITabBarControllerDelegate {
+/// straight to the app's delegate. Each call goes to the app's delegate it
+/// came to, even when Exact's handling retires the container.
+final class TabDelegateProxy: ForwardingDelegate, UITabBarControllerDelegate {
     weak var host: NavigationHost?
-    weak var app: UITabBarControllerDelegate?
+    var app: UITabBarControllerDelegate? { appDelegate as? UITabBarControllerDelegate }
 
     func tabBarController(_ tabs: UITabBarController, shouldSelect controller: UIViewController) -> Bool {
         if app?.tabBarController?(tabs, shouldSelect: controller) == false { return false }
@@ -35,6 +36,7 @@ final class TabDelegateProxy: NSObject, UITabBarControllerDelegate {
     }
 
     func tabBarController(_ tabs: UITabBarController, didSelect controller: UIViewController) {
+        let app = self.app
         if host?.builtTabs.isEmpty != false { host?.followUIKit(tabs) }
         app?.tabBarController?(tabs, didSelect: controller)
     }
@@ -43,18 +45,11 @@ final class TabDelegateProxy: NSObject, UITabBarControllerDelegate {
     /// More's Edit moved tabs between the bar and More, and UIKit their
     /// routes with them (`syncNextTurn`).
     func tabBarController(_ tabs: UITabBarController, didEndCustomizing controllers: [UIViewController], changed: Bool) {
+        let app = self.app
         if changed { host?.syncNextTurn() }
         app?.tabBarController?(tabs, didEndCustomizing: controllers, changed: changed)
     }
     #endif
-
-    override func responds(to selector: Selector!) -> Bool {
-        super.responds(to: selector) || (app?.responds(to: selector) ?? false)
-    }
-
-    override func forwardingTarget(for selector: Selector!) -> Any? {
-        app?.responds(to: selector) == true ? app : nil
-    }
 }
 
 extension NavigationHost {
@@ -66,7 +61,7 @@ extension NavigationHost {
 
     /// Whether Exact's tab bar shows: not under the agent's own chrome,
     /// which sees the authored tablist (LLP 1021 D4's one presentation).
-    var tabBarShows: Bool { tabController != nil && tabOwner === tabController && !ExactEnv.authoredChrome && !tablistAppearanceNone }
+    package var tabBarShows: Bool { tabController != nil && tabOwner === tabController && !ExactEnv.authoredChrome && !tablistAppearanceNone }
     /// Whether UIKit's tab bar stands for `node`: a root tab, or what it holds, while the bar shows.
     func tabBarStands(for node: NodeView) -> Bool {
         guard tabBarShows, let tabs = container.flatMap({ NavigationTabs.of($0, presenter) }) else { return false }
@@ -88,7 +83,7 @@ extension NavigationHost {
         routerTab = p.at
         // Read from the plan which tabs need a navigation controller, so a tab not built yet gets its controller;
         // assume one where the plan gives no answer
-        let kernel = presenter.session?.runtime.rootTabs(p.root.id)
+        let kernel = presenter.rootTabs[p.root.id]
         let needsNavigation = Dictionary(zip(kernel?.panels ?? [], kernel?.navigation ?? []), uniquingKeysWith: { $1 })
         let navs = tabs.panels.enumerated().map { index, panel in
             makeTabStack(panel.id, index == p.at ? first : base(p.wanted[index]), navigation: needsNavigation[panel.id] ?? true)
@@ -98,18 +93,16 @@ extension NavigationHost {
         let owned = askTabContainer(tabs, selected: p.at)
         tabContainerAsked = presenter.session?.natives.hatchesConnected == true
         let holder: UIViewController = owned ?? {
-            let container = UITabBarController()
-            tabProxy.host = self
+            let container = TabController()
             if #available(iOS 18.0, tvOS 18.0, *), buildsTabs(tabs) {
                 buildTabs(container, navs, tabs, unsaid: kernel?.unsaid ?? false, selected: p.at)
             } else {
                 container.setViewControllers(navs, animated: false)
                 container.selectedIndex = p.at
             }
-            container.delegate = tabProxy
+            tabController = container
             tablistAppearanceNone = tabs.tablist.wrote("appearance") && tabs.tablist.style["appearance"]?.string == "none"
             if ExactEnv.authoredChrome || tablistAppearanceNone { hideTabBar(container) }
-            tabController = container
             // A path's glyph is sized by the idiom and the size class: the items again as either changes (and
             // once the bar is in its window, whose traits it then has).
             container.tabBar.registerForTraitChanges([UITraitUserInterfaceIdiom.self, UITraitHorizontalSizeClass.self]) { [weak self] (_: UITabBar, _: UITraitCollection) in
@@ -162,7 +155,7 @@ extension NavigationHost {
     /// The module's `tabContainer`, when it is connected: the app's own
     /// container for these tabs' controllers, or nil.
     private func askTabContainer(_ tabs: NavigationTabs, selected: Int) -> UIViewController? {
-        guard let natives = presenter.session?.natives, natives.hatchesConnected, natives.tabCalls != nil else { return nil }
+        guard let natives = presenter.session?.natives, natives.hatchesConnected, natives.hasTabHatches else { return nil }
         let names = tabs.panels.map { $0.props["id"] ?? "" }
         return natives.tabContainerHatch(names: names, nodes: tabs.tabs.map(\.id), selected: selected, controllers: tabPanels.compactMap { tabStacks[$0] }) as? UIViewController
     }
@@ -179,7 +172,7 @@ extension NavigationHost {
             tabsHatched = true
             natives.tabsHatch(container, event: 0)
         }
-        guard !tabContainerAsked, presenter.modals.routes.isEmpty, !presenter.modals.inTransition, presentedNavigations.isEmpty,
+        guard !tabContainerAsked, presenter.modalHost.routes.isEmpty, !presenter.modalHost.inTransition, presentedNavigations.isEmpty,
               let root = self.container, let tabs = NavigationTabs.of(root, presenter), let parent = container.parent else { return }
         tabContainerAsked = true
         // Offer the stacks in place: a container the hook returns takes them from Exact's, as UIKit moves any
@@ -203,8 +196,8 @@ extension NavigationHost {
         }
         if let more, primaryNavigation === more { primaryNavigation = tabStack(routerTab) as? UINavigationController }
         releaseMore()
-        container.delegate = nil
         tablistRoot = nil
+        tablistOwed = nil
         tablistHidBar = false
         container.willMove(toParent: nil)
         container.view.removeFromSuperview()
@@ -216,8 +209,63 @@ extension NavigationHost {
         presenter.session?.log("hatch: the app's \(type(of: owned)) holds the tabs; the content moved after the first frame")
     }
 
+    /// An intent of a tab container the app owns (`ExactTabContents.back`,
+    /// `open`, `select`; LLP 1075.003 §3.6): 0 its Back, the platform's Back
+    /// of the stack in front as the agent's `back` takes it (`agentBack`);
+    /// 1 open `text` as a URL that arrived from the system
+    /// (`ExactSession.openURL`); 2 press the authored tab whose index is
+    /// `text`, as the bar's item presses it.
+    /// Queued on the hatch act queue, it runs on a later turn and only in the
+    /// term of the container that sent it. False when it cannot be queued:
+    /// Exact's own container, text that is no URL, a full queue.
+    func tabIntent(_ kind: UInt32, _ text: String) -> Bool {
+        guard tabController == nil, tabOwner != nil else { return false }
+        let term = tabOwnerTerm
+        switch kind {
+        case 0:
+            return presenter.elements.later("tabs", "back()") { [weak self] in
+                guard let self, inTerm(term) else { return }
+                if inTransition || presenter.modalHost.inTransition { return backRefused("a transition is running") }
+                switch agentBack() {
+                case nil: backRefused("nothing is beneath the top of the stack in front")
+                case ""?: break
+                case let refusal?: backRefused(refusal)
+                }
+            }
+        case 1:
+            guard !text.isEmpty, let url = URL(string: text) else { return false }
+            return presenter.elements.later("tabs", "open(\(text))", bytes: text.utf8.count) { [weak self] in
+                guard let self, inTerm(term), let session = presenter.session else { return }
+                if !session.openURL(url) { session.log("hatch tabs: open(\(text)) refused: the session did not take it") }
+            }
+        case 2:
+            guard let index = Int(text) else { return false }
+            return presenter.elements.later("tabs", "select(\(index))") { [weak self] in
+                guard let self, inTerm(term) else { return }
+                guard let tab = authoredTab(index), tab.handlers.contains("press"), !tab.disabled else {
+                    presenter.session?.log("hatch tabs: select(\(index)) refused: the tab is gone, disabled or has no press")
+                    return
+                }
+                presenter.press(tab.id)
+            }
+        default:
+            return false
+        }
+    }
+
+    private func backRefused(_ why: String) { presenter.session?.log("hatch tabs: back() refused: \(why)") }
+
+    /// Whether the container that sent an intent in `term` still holds the
+    /// tabs: a later container, or the same one adopted again, did not send it.
+    private func inTerm(_ term: Int) -> Bool {
+        if tabOwnerTerm == term { return true }
+        presenter.session?.log("hatch tabs: an intent refused: the container that sent it retired")
+        return false
+    }
+
     private func hideTabBar(_ container: UITabBarController) {
         if #available(iOS 18.0, tvOS 18.0, *) { container.setTabBarHidden(true, animated: false) } else { container.tabBar.isHidden = true }
+        (container as? TabController)?.syncBarAccessibility()
     }
 
     /// Rows below the panels stay in CSS flow while UIKit's container fills the page: the root's
@@ -235,7 +283,7 @@ extension NavigationHost {
         func visit(_ children: [NodeView]) {
             let holding = children.filter { child in panels.contains { $0 === child || $0.isDescendant(of: child) } }
             guard let end = holding.map({ $0.convert($0.bounds, to: root).maxY }).max() else { return }
-            for child in children where !holding.contains(child) && !owned.contains(child.id) && Self.inFlow(child) && !child.isHidden {
+            for child in children where !holding.contains(child) && !owned.contains(child.id) && RouteGeometry.inFlow(child) && !child.isHidden {
                 let box = child.convert(child.bounds, to: root)
                 guard !box.isEmpty, box.intersects(area), box.minY >= end - 0.5,
                       routes.contains(where: { $0.minX < box.maxX && $0.maxX > box.minX }) else { continue }
@@ -266,6 +314,7 @@ extension NavigationHost {
         } else {
             tabs.setTabBarHidden(hidden, animated: animated)
         }
+        (tabs as? TabController)?.syncBarAccessibility()
     }
 
     /// Before installing: a root that gains, loses or changes its tabs gets
@@ -298,11 +347,15 @@ extension NavigationHost {
             tablistAppearanceNone = authored
             presenter.session?.view?.setNeedsLayout()
             tablistRoot = nil
+            tablistOwed = nil
             tablistHidBar = false
             if let container = tabController, tabOwner === container, !ExactEnv.authoredChrome {
                 let hidden = authored || tabs.tablist.style["display"]?.string == "none"
                 if #available(iOS 18.0, tvOS 18.0, *) { setTabBarHidden(hidden, in: container, animated: false) }
-                else { container.tabBar.isHidden = hidden }
+                else {
+                    container.tabBar.isHidden = hidden
+                    (container as? TabController)?.syncBarAccessibility()
+                }
                 tablistHidBar = hidden && !authored
             }
         }
@@ -319,7 +372,10 @@ extension NavigationHost {
         for index in navs.indices where index != p.at {
             let stack = routesStack(index) ?? navs[index]
             let routes = base(p.wanted[index])
-            if stack.stackRoutes.elementsEqual(routes, by: ===) || writable(stack, routes) { setRoutes(routes, in: stack) } else { tabsHeld = true }
+            if stack.stackRoutes.elementsEqual(routes, by: ===) || writable(stack, routes) { setRoutes(routes, in: stack) } else {
+                tabsHeld = true
+                if let transition = stack.transitionCoordinator { runHeld(after: transition) }
+            }
         }
         // Fill the router's tab's controller with its first routes, or project
         // its bar when the router's tab changes, before UIKit shows it, where
@@ -741,6 +797,10 @@ extension NavigationHost {
             for _ in 0..<4 {
                 let top = sv.adjustedContentInset.top
                 sv.contentOffset = PixelGrid.offset(CGPoint(x: sv.contentOffset.x, y: -top - nav.navigationBar.frame.height), in: sv, clamped: false)
+                // UIKit 26 can defer the bar's layout after an unanimated pull.
+                nav.navigationBar.setNeedsLayout()
+                nav.view.setNeedsLayout()
+                nav.navigationBar.layoutIfNeeded()
                 nav.view.layoutIfNeeded()
                 if sv.adjustedContentInset.top <= top + 0.5 { break }
             }
@@ -754,6 +814,7 @@ extension NavigationHost {
     func retireTabs() {
         // The tablist's hold on the bar goes with its container (§3.7).
         tablistRoot = nil
+        tablistOwed = nil
         tablistHidBar = false
         for stack in tabPanels.compactMap({ tabStacks[$0] }) {
             if let nav = stack as? UINavigationController { release(nav) } else { (stack as? PlainTab)?.show(nil) }
@@ -761,8 +822,9 @@ extension NavigationHost {
         releaseMore()
         if tabsHatched, tabController != nil { presenter.session?.natives.tabsHatch(tabController, event: 1) }
         if tabController == nil, tabOwner != nil { presenter.session?.natives.tabsHatch(nil, event: 3) }
+        // Leave the slot of a container the app owns as it is; Exact's own container's is emptied as
+        // `tabController` changes
         if let holder = tabOwner {
-            (holder as? UITabBarController)?.delegate = nil
             holder.willMove(toParent: nil)
             holder.view.removeFromSuperview()
             holder.removeFromParent()
@@ -788,7 +850,11 @@ extension NavigationHost {
     /// authored tablist's covers.
     func batchApplied(_ batch: Batch, rowsOnly: Bool) {
         if !rowsOnly || syncOwed { sync(batch) }
-        presenter.modals.inheritFromAncestors()
+        else if batch.ops.isEmpty {
+            // Page facts can carry no ops after UIKit sized an inactive owner.
+            fitOwner()
+        }
+        presenter.modalHost.inheritFromAncestors()
         followAuthoredTablist()
     }
 
@@ -802,18 +868,6 @@ extension NavigationHost {
         guard tablistAppearanceNone, !syncing, let view = presenter.session?.view,
               let list = adoptedTablist.flatMap({ presenter.views[$0] }) else { return }
         if list.convert(list.bounds, to: view) != measuredTablist { reportCovers() }
-    }
-
-    /// A bar visible in its window, including every ancestor's visibility.
-    static func shownBar(_ bar: UIView?) -> UIView? {
-        guard let bar, let window = bar.window else { return nil }
-        var at: UIView? = bar
-        while let view = at {
-            if view.isHidden || view.alpha < 0.01 { return nil }
-            at = view.superview
-        }
-        let frame = bar.convert(bar.bounds, to: window)
-        return frame.width > 1 && frame.height > 1 && frame.intersects(window.bounds) ? bar : nil
     }
 
     /// Whether a tab container takes this tablist's place.
@@ -843,7 +897,7 @@ extension UITabBarController {
     }
 
     /// The projected bar, when it is visibly on screen.
-    var shownTabBar: UIView? { NavigationHost.shownBar(projectedTabBar) }
+    var shownTabBar: UIView? { RouteGeometry.shownBar(projectedTabBar) }
 }
 
 #if os(iOS)

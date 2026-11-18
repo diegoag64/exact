@@ -353,7 +353,7 @@ final class DialogSheetController: UIViewController, UIGestureRecognizerDelegate
 /// The dialogs shown as sheets, in the order they opened. An entry is kept
 /// until UIKit has finished dismissing its sheet, so the dialog stays where
 /// the person sees it until then.
-final class DialogSheets: NSObject, UIAdaptivePresentationControllerDelegate {
+final class DialogSheets: NSObject, UIAdaptivePresentationControllerDelegate, DialogHosting {
     private weak var presenter: Presenter?
     /// Its presenter's root: what a sheet's surface resolves the theme by.
     var root: UIView? { presenter?.root }
@@ -400,19 +400,9 @@ final class DialogSheets: NSObject, UIAdaptivePresentationControllerDelegate {
     private var entries: [Entry] = []
     /// Still open in the document, waiting for a retiring route's UIKit stack.
     private var resuming: [Entry] = []
-    /// HTML's `cancel` at a dialog a close request closed. Unset, it goes to
-    /// the session's runner; a test without a session sets it.
-    var onCancel: ((UInt32) -> Void)?
 
     init(presenter: Presenter) { self.presenter = presenter }
     fileprivate func geometryChanged() { presenter?.nativeGeometry.changed() }
-
-    /// Whether `dialog`'s author painted its surface, which makes it the
-    /// author's box in the top layer rather than the platform's sheet or
-    /// alert (LLP 1035.001 D11).
-    static func paintsOwnSurface(_ dialog: NodeView) -> Bool {
-        dialog.wrote("background_color") || dialog.wrote("background_image")
-    }
 
     /// Shown, or still on screen while its sheet leaves.
     func owns(_ node: NodeView) -> Bool { (entries + resuming).contains { $0.dialog === node } }
@@ -536,7 +526,7 @@ final class DialogSheets: NSObject, UIAdaptivePresentationControllerDelegate {
         // The focus moves into the dialog, as `showModal()` moves it: a field
         // editing on the page ends its editing, and takes it back at the close.
         let previous: UIView? = old == nil ? presenter.focusedNode.map { $0.textArea ?? $0.field ?? $0 } : old?.previous
-        let controller = DialogSheetController(host: self, topLayer: Self.paintsOwnSurface(dialog))
+        let controller = DialogSheetController(host: self, topLayer: DialogShape.paintsOwnSurface(dialog))
         let entry = Entry(dialog, source: source, previous: previous, controller: controller)
         let under: UIView = top?.viewIfLoaded ?? presenter.modals.coordinateView ?? presenter.session?.view ?? presenter.viewport
         entry.under = under
@@ -677,10 +667,7 @@ final class DialogSheets: NSObject, UIAdaptivePresentationControllerDelegate {
             UIAccessibility.post(notification: .screenChanged, argument: element)
         }
         if cancelled || entry.notifyClose { dialog.queueDialogClose() }
-        if cancelled, live(dialog), dialog.handlers.contains("cancel") {
-            if let onCancel { onCancel(dialog.id) }
-            else if let session = presenter.session { session.applyInput(session.runtime.pickerCancel(dialog.id, now: session.now())) }
-        }
+        if cancelled, live(dialog), dialog.handlers.contains("cancel") { presenter.onCancel?(dialog.id) }
     }
 
     /// A tap on the dimmed page closes only a `closedby="any"` dialog.

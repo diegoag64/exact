@@ -44,11 +44,11 @@ fn a_save_becomes_a_plan_and_an_identical_save_is_nothing() {
     let map_path = dir.join("app.plan.map.json");
     let map = std::fs::read_to_string(&map_path).unwrap();
     assert_eq!(
-        exact_runner::agent::field_str(&map, "digest"),
+        exact_runner::json::field_str(&map, "digest"),
         Some(contract::plan_digest(&built.bytes))
     );
     assert_eq!(
-        exact_runner::agent::field_str(map.split_once("\"nodes\":[").unwrap().1, "file"),
+        exact_runner::json::field_str(map.split_once("\"nodes\":[").unwrap().1, "file"),
         Some(src.to_str().unwrap().to_owned())
     );
     assert!(s.poll::<NoData>().is_none(), "nothing changed");
@@ -76,7 +76,7 @@ fn a_save_becomes_a_plan_and_an_identical_save_is_nothing() {
     assert_ne!(again.bytes, built.bytes);
     let map = std::fs::read_to_string(&map_path).unwrap();
     assert_eq!(
-        exact_runner::agent::field_str(&map, "digest"),
+        exact_runner::json::field_str(&map, "digest"),
         Some(contract::plan_digest(&again.bytes))
     );
     assert!(again.saved_ms > built.saved_ms);
@@ -429,9 +429,9 @@ fn a_refused_bridge_reload_keeps_the_running_host() {
         let len = bridge.agent(len);
         String::from_utf8(bridge.output_bytes(len as usize).to_vec()).unwrap()
     };
-    assert!(exact_runner::agent::field_str(&inspect(&mut bridge, false), "planDigest").is_none());
+    assert!(exact_runner::json::field_str(&inspect(&mut bridge, false), "planDigest").is_none());
     assert_eq!(
-        exact_runner::agent::field_str(&inspect(&mut bridge, true), "planDigest"),
+        exact_runner::json::field_str(&inspect(&mut bridge, true), "planDigest"),
         Some(contract::plan_digest(&plan))
     );
 
@@ -451,7 +451,7 @@ fn a_refused_bridge_reload_keeps_the_running_host() {
     assert!(!after.contains("not booted"), "{after}");
     assert!(after.contains("\"text\":\"3\""), "{after}");
     assert_eq!(
-        exact_runner::agent::field_str(&inspect(&mut bridge, true), "planDigest"),
+        exact_runner::json::field_str(&inspect(&mut bridge, true), "planDigest"),
         Some(contract::plan_digest(&plan)),
         "state changes and refused candidates keep the accepted plan identity"
     );
@@ -463,11 +463,11 @@ fn a_refused_bridge_reload_keeps_the_running_host() {
     let len = bridge.boot_plan(len, NoData, 390.0, 844.0, "/");
     let response = String::from_utf8_lossy(bridge.output_bytes(len as usize));
     assert!(
-        exact_runner::agent::field_str(&response, "error").is_none(),
+        exact_runner::json::field_str(&response, "error").is_none(),
         "{response}"
     );
     assert_eq!(
-        exact_runner::agent::field_str(&inspect(&mut bridge, true), "planDigest"),
+        exact_runner::json::field_str(&inspect(&mut bridge, true), "planDigest"),
         Some(contract::plan_digest(&replacement)),
         "a replacement may reuse the same node id but must expose its own plan"
     );
@@ -537,29 +537,37 @@ fn display_mode_bits_preserve_fold_and_preferences_at_boot_and_without_a_resize(
 /// which have no room for it, and holds across a boot and a resize.
 #[test]
 fn update_holds_across_boot_and_resize() {
-    let source = "shape Viewport\n  update: string\ncomponent App\n  resource viewport = exactViewport() as shape Viewport\n  view\n    text viewport.update\n";
+    let source = "shape Viewport\n  update: string\n  screenReader: string\ncomponent App\n  resource viewport = exactViewport() as shape Viewport\n  view\n    text viewport.update\n";
     let plan = contract::bake(contract::compile(source).unwrap(), NoData)
         .unwrap()
         .encode();
     let mut bridge = exact_web::abi::Bridge::new();
     bridge.set_links(exact_web::HostLinks::ALL);
-    let update = |bridge: &mut exact_web::abi::Bridge<NoData>| {
+    let facts = |bridge: &mut exact_web::abi::Bridge<NoData>| {
         let n = bridge.input_write(br#"{"op":"state"}"#);
         let len = bridge.agent(n);
         let state: serde_json::Value =
             serde_json::from_slice(bridge.output_bytes(len as usize)).unwrap();
-        state["resources"]["viewport"]["update"].clone()
+        state["resources"]["viewport"].clone()
     };
     bridge.set_update(2);
+    bridge.set_screen_reader(2);
     bridge.set_preferences(0xff);
     bridge.boot(&plan, NoData, 600.0, 400.0, "/");
-    assert_eq!(update(&mut bridge), "none");
+    assert_eq!(facts(&mut bridge)["update"], "none");
+    assert_eq!(facts(&mut bridge)["screenReader"], "on");
     bridge.set_update(1);
     bridge.resize(600.0, 400.0, 0, 0.0);
-    assert_eq!(update(&mut bridge), "slow");
+    assert_eq!(facts(&mut bridge)["update"], "slow");
+    assert_eq!(facts(&mut bridge)["screenReader"], "on");
     bridge.set_update(0);
     bridge.resize(600.0, 400.0, 0xff, 0.0);
-    assert_eq!(update(&mut bridge), "fast");
+    assert_eq!(facts(&mut bridge)["update"], "fast");
+    for (code, expected) in [(1, "off"), (0, "unknown"), (2, "on"), (3, "unknown")] {
+        bridge.set_screen_reader(code);
+        bridge.resize(600.0, 400.0, 0, 0.0);
+        assert_eq!(facts(&mut bridge)["screenReader"], expected);
+    }
 }
 
 /// LLP 1039 D9: a rotation's size and the page's geometry reach the runner

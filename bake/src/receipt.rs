@@ -8,7 +8,7 @@ use exact_update::{gpu_code_digest as code_digest, Baked, Envelope};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-mod watch;
+pub(crate) mod watch;
 
 /// A development bake's map from plan node to Contract source (LLP 1035.002
 /// D6; LLP 1012.001.000 D6), `OUT_DIR/app.plan.map.json`: beside the plan,
@@ -114,6 +114,23 @@ pub(crate) fn emit(
     assets.extend(rust_assets);
     assets.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
     let mut graph = artifact_graph(&plan, &compat.inputs, &assets, pictures, target)?;
+    let required = crate::link::apple_requirement(
+        app,
+        &plan,
+        entries.values().map(|entry| &entry.plan),
+        &compat.inputs,
+        manifest,
+        compat.host_work,
+    )?;
+    if let Some(required) = required {
+        graph["artifacts"][0]["requires"]["appleUses"] = required;
+    }
+    // What the binary links for its plan and, on Apple, its entries' plans,
+    // as `link::name_into` decides it.
+    let entry_plans = entries.values().map(|entry| &entry.plan);
+    let uses =
+        crate::link::production_uses(app, &plan, entry_plans, &compat.inputs, compat.host_work);
+    graph["uses"] = json!(uses.iter().map(|c| c.name()).collect::<Vec<_>>());
     if matches!(platform, "ios" | "macos") {
         let mut icons = apple_icons(&plan)?;
         for entry in entries.values() {
@@ -593,6 +610,15 @@ pub fn plan_graph(
     requires["formatVersion"] = json!(exact_plan::FORMAT_VERSION);
     requires["formatDigest"] = json!(format!("{:016x}", exact_plan::FORMAT_DIGEST));
     requires["kernelSchema"] = json!(format!("{:016x}", plan.kernel_schema_digest));
+    // What it needs the cohort to link, from the manifest and the grants
+    // `inputs` name as a bake composes it. A plan pushed alone brings no Rust
+    // source (that is native code, a binary change), so no declared host work.
+    let manifest = contract::Manifest::read(app)?;
+    if let Some(required) =
+        crate::link::apple_requirement(app, &plan, std::iter::empty(), &inputs, &manifest, false)?
+    {
+        requires["appleUses"] = required;
+    }
     Ok(graph)
 }
 
@@ -700,8 +726,6 @@ fn artifact_graph(
             json!(crate::compat::plan_extensions(plan)),
         );
     }
-    // A purpose's text is in the installed binary's Info.plist: a bundle
-    // whose purposes differ is a binary release (LLP 1069.008 D5).
     // What a TypeScript module may ask of the binary's prelude (compat.rs
     // `TYPESCRIPT_RUNTIME`): an older cohort's prelude would ignore it
     // silently (`exactBodyFrom` sent as an empty body), so it takes no bundle.
@@ -711,8 +735,13 @@ fn artifact_graph(
             inputs["typescriptRuntime"].clone(),
         );
     }
-    if inputs.get("grantPurposes").is_some() {
-        requires.insert("grantPurposes".into(), inputs["grantPurposes"].clone());
+    // A purpose's text and the bundle's languages are in the installed
+    // binary's Info.plist: a bundle whose purposes or tables differ is a
+    // binary release (LLP 1069.008 D5).
+    for key in ["grantPurposes", "localizations", "watchSync"] {
+        if inputs.get(key).is_some() {
+            requires.insert(key.into(), inputs[key].clone());
+        }
     }
     let rust = assets
         .iter()
@@ -820,7 +849,7 @@ fn artifact_graph(
     });
     // The linked tier the plan uses (LLP 1047 D2), by name: a native build
     // whose plan is fixed links these and no other (LLP 1047.001 D2).
-    let uses: Vec<&str> = exact_runner::uses(plan)
+    let uses: Vec<&str> = crate::link::plan_uses(plan, inputs)
         .with_grants(inputs["grantCeiling"].as_str().unwrap_or(""))
         .iter()
         .map(|c| c.name())

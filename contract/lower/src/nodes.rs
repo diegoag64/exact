@@ -1,5 +1,7 @@
 //! Element lowering keeps its large per-tag temporaries off the recursive view path.
 
+#[path = "custom_props.rs"]
+mod custom_props;
 use super::*;
 
 pub(super) struct ElementStep<'n> {
@@ -173,7 +175,7 @@ impl Lowerer<'_> {
         let expanded = timed.as_deref().unwrap_or(expanded);
         let composed = self.compose_animation(expanded)?;
         if shadow_part == Some(false) {
-            grouped::shadow::check_animations(expanded, &self.keyframes)?;
+            grouped::shadow::check_animations(expanded, &self.keyframes, &self.constants(scope))?;
         }
         let expanded = composed.as_deref().unwrap_or(expanded);
         let in_svg = svg::in_svg(self.svg_depth > 0, parent_tag);
@@ -197,7 +199,7 @@ impl Lowerer<'_> {
             }
         };
         let expanded = boxed.as_deref().unwrap_or(expanded);
-        self.check_svg(tag, parent_tag, expanded)?;
+        self.check_svg(tag, parent_tag, expanded, scope)?;
         shorthands::check_text_box(tag, parent_tag, expanded)?;
         // @ref LLP 1011.002 D3 — the one box `vertical-align` moves.
         let inline_image = tag == "image" && matches!(parent_tag, Some("text"));
@@ -598,7 +600,13 @@ impl Lowerer<'_> {
         }
         let flex = tags::flex_container(tag, expanded);
         self.element_children = !children.is_empty();
+        let (custom, refused_custom) = custom_props::merged(expanded, scope, &self.types.shapes);
+        self.errors.extend(refused_custom);
         for (index, a) in expanded.iter().enumerate() {
+            // Its custom properties are bound as one row, after the others
+            if exact_kernel::style::safe_area_properties::is_author_name(&a.name) {
+                continue;
+            }
             if let Some(e) = flex.and_then(|f| tags::multicol_on_flex(f, a).err()) {
                 self.errors.push(e);
                 continue;
@@ -718,6 +726,26 @@ impl Lowerer<'_> {
                 origins.resize(bindings.len(), origin);
             }
         }
+        if let Some(a) = &custom {
+            let control = contract_syntax::payload_control(tag, attrs);
+            let font = &font;
+            if let Err(e) = self.attr(
+                tag,
+                control,
+                a,
+                scope,
+                locals,
+                &mut bindings,
+                &mut handlers,
+                &mut surface,
+                font,
+            ) {
+                self.errors.push(native::name_the_fix(n, e));
+            }
+            if let Some(origins) = &mut origins {
+                origins.resize(bindings.len(), Origin::Own(None));
+            }
+        }
         // @ref LLP 1116.006 D2 — no box where no split shows it (the web shell shows it).
         if routes::split_placeholder(expanded).is_some() {
             let none = self.fixed(true, "none");
@@ -751,6 +779,7 @@ impl Lowerer<'_> {
                 a.span,
             );
         }
+        crate::zoom::check(tag, t.node_type, expanded, children, *span)?;
         // The web draws a hit slop as a pseudo-element, which an element the
         // browser replaces cannot have (Charlie, 2026-11-10).
         if matches!(

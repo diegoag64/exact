@@ -10,12 +10,15 @@ import { fileURLToPath } from 'node:url';
 import { faultRequest as rawFaultRequest, preferGroups } from './agent-prefer.mjs';
 import { open } from './agent.mjs';
 import { duringOp } from './agent-drag.mjs';
+import { equalJson } from '../host/web-js/declared-values.js';
 import { perfDelta } from './agent-inspect.mjs';
 import { driveStore, faultSpecOf, launchFacts } from './agent-launch.mjs';
+import { macSandboxed } from './agent-build.mjs';
 import { resolveApp, webDist as defaultWebDist } from './app.mjs';
 import { onThisMachine, serverUrl } from './app-server.mjs';
 import { backendOrigin, backendOriginSelection, literalBackendOrigin, staticFacts } from '../js/bake/src/typescript.mjs';
-import { declaredSettings, inlineSettings, settingValues } from '../js/bake/src/__exact_env.mjs';
+import { declaredSettings, settingValues } from '../js/bake/src/__exact_env.mjs';
+import { appSettings } from './app-imports.mjs';
 import { createRequire } from 'node:module';
 // Snapback's client (snapback4/) is optional: a checkout without it builds every app that does not mount it.
 const snapbackDevice = existsSync(new URL('../snapback4/web/device-build.mjs', import.meta.url)) ? await import('../snapback4/web/device-build.mjs') : null;
@@ -89,6 +92,21 @@ export function focusedExpectation(nodes, target) {
   const holder = nodes.find((n) => n.focused);
   const was = !targetNode(nodes, target) ? 'no view carries that testId' : !holder ? 'nothing has the focus' : `${holder.props.testId != null ? JSON.stringify(holder.props.testId) : `${holder.type}#${holder.id}`} has it`;
   return { message: `expected "${target}" focused, ${was}` };
+}
+
+/** `expect layout <target> width|height ==|<=|>= <points>`: null when the size holds, else `{ message }`. The
+ * size is the box `layout <target>` reports, `node.space.viewport` (LLP 1012: viewport points, presentation transforms
+ * folded in), at the reply's two decimals. A node the shipped app does not show fails as `expect text` has it; a host
+ * with no box for the node says why (`space.unavailable`: an iOS swipe action not revealed). */
+export async function layoutExpectation(s, nodes, st) {
+  const n = targetNode(nodes, st.target), said = `${st.dimension} of "${st.target}"`;
+  if (!n) return { message: `${said} is absent (no view carries that testId${unopenedHint(nodes)})` };
+  if (n.unshown) return { message: `testId "${st.target}" is in the tree, but ${n.unshown}`, unshown: true };
+  const space = (await s.layout(n.id)).node?.space, box = space?.viewport;
+  if (!box) return { message: `${said} is unknown: ${space?.unavailable ?? 'the host reports no box for it'}` };
+  const r2 = (v) => Math.round(v * 100) / 100, w = r2(box.w), h = r2(box.h), got = st.dimension === 'width' ? w : h;
+  if (stateHolds(got, st)) return null;
+  return { message: `${said} is ${got}, expected ${{ equal: '', 'at-least': '>= ', 'at-most': '<= ' }[st.comparison]}${st.value} (its box is ${w}×${h})` };
 }
 
 /** A press on a disabled control does nothing, and each host said so its own way (the web's silently, a native one in the words of the view
@@ -169,9 +187,10 @@ export const pickHint = (host) => host === 'web'
   : '; first tap a button whose action calls showPicker("<input id>"); the file input needs id as well as testId';
 
 /** Where a native host keeps a drive's scratch stores (host/apple and host/painted `configure_storage`), or
- * null where the driver cannot reach them: an iOS simulator's are in its app container and go with the app. */
-export function storeBase(appId, host, env = process.env, home = homedir()) {
-  if (host === 'macos' || host === 'mac') return resolve(home, 'Library/Caches/exact', appId, 'agent');
+ * null where the driver cannot reach them: an iOS simulator's are in its app container and go with the app; a
+ * sandboxed Mac build's (`sandboxed`: `mac --sandbox`, LLP 1030.005 D4) are in its container, whose HOME it takes. */
+export function storeBase(appId, host, env = process.env, home = homedir(), sandboxed = false) {
+  if (host === 'macos' || host === 'mac') return resolve(home, ...(sandboxed ? ['Library/Containers', appId, 'Data'] : []), 'Library/Caches/exact', appId, 'agent');
   if (host === 'linux') return resolve(env.XDG_CACHE_HOME?.startsWith('/') ? env.XDG_CACHE_HOME : resolve(home, '.cache'), 'exact', appId, 'agent');
   return null;
 }
@@ -199,8 +218,12 @@ export function backendOriginSource(app, origin, env=process.env) {
   const at=value=>{ try { return new URL(value).origin; } catch { return null; } };
   const names=declaredSettings(dir), placeholder=name=>`http://${name.toLowerCase().replaceAll('_','-')}.setting.invalid`;
   let grants='';
-  try { const parse=createRequire(import.meta.url)('rolldown/utils').parseSync; grants=staticFacts(inlineSettings(code,dir,parse,Object.fromEntries(names.map(name=>[name,placeholder(name)]))).code,parse).grants ?? ''; }
-  catch { /* an app.ts the bake refuses: no setting is named */ }
+  try {
+    const parse=createRequire(import.meta.url)('rolldown/utils').parseSync;
+    const settings=appSettings(dir,Object.fromEntries(names.map(name=>[name,placeholder(name)])));
+    grants=staticFacts(settings.code,parse,{load:settings.load}).grants ?? '';
+  }
+  catch { /* a module the bake refuses: no setting is named */ }
   const fetched=new Set(grants.split('\n').map(line=>/^\s*(?:development\s+)?net\.fetch\s+(\S+)/.exec(line)?.[1]).filter(Boolean).map(at));
   const setting=Object.entries(settingValues(dir,names,env)).find(([name,s])=>s && at(s.value)===origin && fetched.has(at(placeholder(name))));
   return setting ? `import.meta.env.${setting[0]} from ${setting[1].source}` : 'built net.fetch grant (rebuild after changing the backend selection)';
@@ -311,7 +334,7 @@ export function sweepTestStores(base, storage) {
 export function backendFetchPrefixes(tests, origins) {
   const unique = [...new Set(origins.map(o => o.replace(/\/+$/, '')))];
   for (const t of tests) for (const step of t.steps) {
-    if (!['fail-fetch', 'pass-fetch'].includes(step.op)) continue;
+    if (!['fail-fetch', 'answer-fetch', 'pass-fetch'].includes(step.op)) continue;
     step.prefix = resolveFaultPrefix(step.prefix, unique);
   }
   return tests;
@@ -360,7 +383,7 @@ export async function failureMark(s) {
   return {
     failures: Object.fromEntries(Object.entries(state.failures ?? {}).map(([name, f]) => [name, f.count])),
     failed: state.failed ?? {}, mutations: state.mutationFailures ?? {},
-    faults: Object.fromEntries((state.faults ?? []).map((f) => [f.prefix, f.hits])), journal,
+    faults: Object.fromEntries((state.faults ?? []).map((f) => [f.prefix, f.failureHits ?? (f.response ? 0 : f.hits)])), journal,
   };
 }
 
@@ -559,15 +582,44 @@ export async function serverRequest(base, st) {
 /** A launch line's op and the `open` option it sets (`size` aside: it is two numbers). */
 const LAUNCH = { epoch: 'epoch', 'time-zone': 'timeZone', locale: 'locale', seed: 'seed' };
 
-/** Literal comparisons in a scripted state assertion; numeric bounds never coerce another JSON type. */
+/** Comparisons never coerce JSON types; equality and membership are structural. */
 export function stateHolds(got, step) {
-  const equal = value => JSON.stringify(got) === JSON.stringify(value);
+  const equal = value => equalJson(got, value);
   switch (step.comparison) {
     case 'equal': return equal(step.value);
-    case 'at-least': return typeof got === 'number' && got >= step.value;
-    case 'at-most': return typeof got === 'number' && got <= step.value;
-    case 'in': return step.value.some(equal);
+    case 'not-equal': return !equal(step.value);
+    case 'at-least': return typeof got === 'number' && typeof step.value === 'number' && got >= step.value;
+    case 'at-most': return typeof got === 'number' && typeof step.value === 'number' && got <= step.value;
+    case 'in': return Array.isArray(step.value) && step.value.some(equal);
     default: throw new Error(`unknown state comparison ${step.comparison}`);
+  }
+}
+
+/** Both paths read one state reply. A missing path fails before inequality can negate equality. */
+export function stateExpectation(state, step) {
+  const bag = { ...state.resources, ...state.derives, ...state.slots };
+  const read = name => {
+    const [root, ...fields] = name.split('.');
+    if (!Object.hasOwn(bag, root)) return { message: `no state named "${root}"` };
+    let value = bag[root], path = root;
+    for (const field of fields) {
+      if (value === null || typeof value !== 'object' || !Object.hasOwn(value, field)) {
+        const description = value !== null && typeof value === 'object' && !Array.isArray(value)
+          ? `its fields: ${Object.keys(value).join(', ')}` : `it is ${JSON.stringify(value).slice(0, 200)}`;
+        return { message: `${path} has no field "${field}" (${description})` };
+      }
+      value = value[field]; path += `.${field}`;
+    }
+    return { value };
+  };
+  const got = read(step.name);
+  if (got.message) return got;
+  const expected = step.state === undefined ? { value: step.value } : read(step.state);
+  if (expected.message) return expected;
+  if (!stateHolds(got.value, { ...step, value: expected.value })) {
+    const operator = { equal: step.state === undefined ? '' : '== ', 'not-equal': '!= ', 'at-least': '>= ', 'at-most': '<= ', in: 'in ' }[step.comparison];
+    const operand = step.state === undefined ? JSON.stringify(expected.value) : `state ${step.state} (${JSON.stringify(expected.value)})`;
+    return { message: `${step.name} is ${JSON.stringify(got.value)}, expected ${operator}${operand}` };
   }
 }
 
@@ -596,7 +648,10 @@ export function propertyHolds(line, state, previous) {
 }
 
 async function propertyFailure(p, line, state, previous, s, file, test, step, index, host) {
-  const label = ['boot', 'reload'].includes(step.op) ? step.op : step.op === 'clock' ? `clock ${step.arg}` : `${step.op} ${JSON.stringify(step.target)}${step.op === 'type' ? ` ${JSON.stringify(step.text)}` : ''}`;
+  const label = ['boot', 'reload'].includes(step.op) ? step.op
+    : step.op === 'clock' ? `clock ${step.arg}`
+    : step.op === 'presence' ? `presence ${step.answer}`
+    : `${step.op} ${JSON.stringify(step.target)}${step.op === 'type' ? ` ${JSON.stringify(step.text)}` : ''}`;
   const location = at => `${at.file}:${at.line}:${at.col}`;
   const out = [`PROPERTY ${JSON.stringify(p.name)} is false on ${host}`,
     `  property line: ${file}:${line.line}`,
@@ -640,7 +695,7 @@ async function propertyFailure(p, line, state, previous, s, file, test, step, in
  * `atLine({ name, index, line, last, op })` runs before each step of a test, `atResult(result)` as each test's result
  * lands: a run's caller says where a long test is and what each test did as it goes, not only at the run's end.
  */
-export async function runTests({ host, browser, file, plan, app, size, env, webDist, device = false, phone, reader, url, seed, locale, formatLocale, timeZone, epoch, failFetch, storage = 'test', touch = 'agent', chrome: bars = 'agent', scale, atEnd, atStep, atLine, atResult, port, running, only, testIndex, replayLaunch, replayShots } = {}) {
+export async function runTests({ host, browser, file, plan, app, size, env, webDist, device = false, phone, reader, url, seed, locale, formatLocale, timeZone, epoch, failFetch, storage = 'test', touch = 'agent', chrome: bars = 'agent', scale, atEnd, atStep, atLine, atResult, port, running, only, testIndex, replayLaunch, replayShots, ax } = {}) {
   const root = resolve(fileURLToPath(new URL('..', import.meta.url))), selected = resolveApp(app);
   // The APK carrier runs at the phone's size (agent-stdio.mjs reads `reader` the same way).
   const apk = host === 'android' && (reader ?? !!process.env.EXACT_ANDROID_READER);
@@ -676,7 +731,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
   // Where the host keeps its stores, as it will see its environment (a drive's env overrides the driver's).
   const launched = { ...process.env, ...(env ?? {}) };
   const id = selected.id, chrome = host === 'web' && (browser ?? launched.EXACT_WEB_BROWSER ?? 'chrome') === 'chrome';
-  const base = device ? null : chrome ? driveStore(selected, storage, env).base : host === 'web' ? null : storeBase(id, host, launched, launched.HOME || homedir());
+  const base = device ? null : chrome ? driveStore(selected, storage, env).base : host === 'web' ? null : storeBase(id, host, launched, launched.HOME || homedir(), (host === 'macos' || host === 'mac') && macSandboxed(selected));
   // A run's own names where the driver can remove them; a simulator's (one drive at a time: a launch ends the
   // last) reuse one store a test, emptied at launch, so they cannot pile up in its app container.
   // Android's stores are on the device, out of the driver's reach, but a run's names stay its own there too (LLP 1107).
@@ -715,6 +770,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
       if (st.op === 'before-data') beforeData = true;
       else if (st.op === 'fresh') reset = st;
       else if (st.op === 'fail-fetch') { early(st); facts.failFetch = [facts.failFetch, st.times == null ? st.prefix : `${st.prefix}\t${st.times}`].filter(Boolean).join('\n'); if (st.times != null) armed.set(st.prefix, st.line); }
+      else if (st.op === 'answer-fetch') facts.failFetch = [facts.failFetch, faultSpecOf([{prefix: st.prefix, hits: 0, armed: true, response: st.response}])].filter(Boolean).join('\n');
       else if (st.op === 'size') facts.size = [st.width, st.height];
       else if (st.op === 'at') opensAt = st.value;
       else if (st.op === 'prefer') preferences.push(st);
@@ -723,6 +779,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
       lines.push(st.line);
       leading++;
     }
+    if (host === 'web' && opensAt && /^https?:\/\//.test(url ?? '')) opensAt = new URL(opensAt, url).href;
     // Replay uses the already-resolved facts, including an authored `epoch now` (LLP 1116.007 D3.4).
     if (replayLaunch) Object.assign(facts, replayLaunch);
     // A size the carrier cannot give: run at another, the test would fail on what that size was to show.
@@ -759,10 +816,10 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
     // (every `clock +N`, settle and timer), as the runner reports it; whole milliseconds, which every host takes.
     const first = facts.epoch; // the test's launch date, which a `reload` moves `facts.epoch` on from
     const reached = async () => { const { clock } = await s.op({ op: 'tags' }).catch(() => ({})); return facts.epoch + Math.floor(Number.isFinite(clock) ? clock : s.now); };
-    const launch = (environment) => open({ host, browser, plan, ...facts, env: { ...environment, EXACT_AGENT_EPHEMERAL_PORT: '1' }, app, webDist, device, phone, reader, url: opensAt ?? url, storage: store, touch: fingers, chrome: bars, scale, port });
+    const launch = (environment) => open({ host, browser, plan, ...facts, env: { ...environment, EXACT_AGENT_EPHEMERAL_PORT: '1' }, app, webDist, device, phone, reader, url: opensAt ?? url, storage: store, touch: fingers, chrome: bars, scale, port, ax });
     let s;
     try { s = await launch(fresh); } catch (e) {
-      if (!running) throw e;
+      if (!running || e.missingBuild) throw e; // no build: the next test would say the same
       let why = e.message;
       try { running.check(); } catch (dead) { why = dead.message; }
       landed({ name: t.name, index: n, failures: [`${t.name}: ${why}`], notes });
@@ -806,7 +863,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
       const failFetch = now.faults ? faultSpecOf(now.faults) : undefined;
       facts.epoch = await reached();
       if (s.host === 'web') { await s.carrier.reset({ keep: true, failFetch, epoch: facts.epoch }); s.now = 0; s.contact = null; resetLogs(s); }
-      else { await s.close(); s = await open({ host, browser, plan, ...facts, failFetch: failFetch ?? facts.failFetch, env: { ...(env ?? {}), ...fixture }, app, webDist, device, phone, reader, url, storage: store, touch: fingers, chrome: bars, scale, port }); }
+      else { await s.close(); s = await open({ host, browser, plan, ...facts, failFetch: failFetch ?? facts.failFetch, env: { ...(env ?? {}), ...fixture }, app, webDist, device, phone, reader, url, storage: store, touch: fingers, chrome: bars, scale, port, ax }); }
       s.notes = notes;
       // A module's permission is the runner's, which starts again, as a phone keeps a granted one across a restart.
       for (const [name, value] of Object.entries({ ...media, ...permissions })) {
@@ -878,7 +935,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
       };
       // Before an input while counted faults are outstanding: those that fired leave the check, so a press the app
       // answers with `close()` cannot take an unfired one's evidence with it (LLP 1103 D3).
-      const INPUTS = new Set(['tap', 'drag', 'type', 'key', 'pick', 'authorize', 'clipboard', 'resize', 'back']);
+      const INPUTS = new Set(['tap', 'drag', 'type', 'key', 'pick', 'authorize', 'presence', 'clipboard', 'resize', 'back']);
       const settleFired = async () => {
         if (!armed.size) return;
         const faults = (await s.state()).faults ?? [];
@@ -909,7 +966,23 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
             if (st.times != null) armed.set(st.prefix, st.line);
             break;
           }
+          case 'answer-fetch': {
+            if (n < leading) break;
+            await unfired(st.prefix);
+            const r = await s.op({ op: 'prefer', faults: { answer: st.prefix, response: st.response } });
+            if (r?.error) throw new Error(r.error);
+            break;
+          }
           case 'pass-fetch': { const r = await s.op({ op: 'prefer', faults: { pass: st.prefix } }); if (r?.error) throw new Error(r.error); break; }
+          case 'drop-stream': {
+            const r = await s.op({ op: 'prefer', faults: { dropStream: st.prefix } }).catch(e => {
+              if (e.reply?.error) throw new Error(e.reply.error);
+              throw e;
+            });
+            if (r?.error) throw new Error(r.error);
+            if (r?.dropped !== true) throw new Error(`drop stream is unavailable on ${host}`);
+            break;
+          }
           // The driver's `tap` forms (feed F10): `into` brings a virtualized list's row into view by its key.
           case 'tap': {
             const opts = st.form === 'into' ? { into: { key: st.key } }
@@ -947,6 +1020,17 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
           case 'pick': {
             try { delivered(st.paths.length ? await s.type(`@${st.target}`, st.paths.map((p) => resolve(dirname(resolve(file)), p)).join('\n') + '\n') : await s.tap(`@${st.target}`, { choice: 'cancel' })); }
             catch (error) { if (error.message.includes('held: none')) error.message += pickHint(host); throw error; }
+            input = st.line; break;
+          }
+          case 'presence': {
+            const r = await s.clock('data');
+            if (r?.error || r?.settled === false) throw new Error(`presence: waiting for the prompt: ${r.error ?? r.diagnostic ?? r.reason}`);
+            try { delivered(await s.tap('@presence', { choice: st.answer })); }
+            catch (error) {
+              const missing = error.message.includes('no held device request');
+              error.message = `presence: ${error.message}${missing ? '; tap the control that calls authenticate or unlocks a presence secret first' : ''}`;
+              throw error;
+            }
             input = st.line; break;
           }
           // The held sign-in, completed against the app's own server (LLP 1146 D4): its authorization URL is
@@ -1010,6 +1094,12 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
             if (f) await fail(`${at}: ${f.message}`);
             break;
           }
+          case 'expect-layout': {
+            const f = await layoutExpectation(s, (await s.tree()).nodes, st);
+            if (f?.unshown) failures.push(`${at}: ${f.message}`);
+            else if (f) await fail(`${at}: ${f.message}`);
+            break;
+          }
           case 'expect-text': {
             const f = textExpectation((await s.tree()).nodes, st.target, st.value);
             if (f?.unshown) failures.push(`${at}: ${f.message}`);
@@ -1018,20 +1108,8 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
           }
           case 'expect-state': {
             const state = await s.state(undefined, undefined, false, false, { reveal: true });
-            const bag = { ...(state.resources ?? {}), ...(state.derives ?? {}), ...(state.slots ?? {}) };
-            // A field or a list index at any depth, `name.field` or `rows.0` (feed F10, drums R7).
-            const [name, ...fields] = st.name.split('.');
-            if (!(name in bag)) { failures.push(`${at}: no state named "${name}"`); break; }
-            let got = bag[name], path = name, missing = null;
-            for (const field of fields) {
-              if (got === null || typeof got !== 'object' || !(field in got)) { missing = field; break; }
-              got = got[field]; path += `.${field}`;
-            }
-            if (missing != null) { await fail(`${at}: ${path} has no field "${missing}" (${got !== null && typeof got === 'object' && !Array.isArray(got) ? `its fields: ${Object.keys(got).join(', ')}` : `it is ${JSON.stringify(got).slice(0, 200)}`})`); break; }
-            if (!stateHolds(got, st)) {
-              const operator = {equal: '', 'at-least': '>= ', 'at-most': '<= ', in: 'in '}[st.comparison];
-              await fail(`${at}: ${st.name} is ${JSON.stringify(got)}, expected ${operator}${JSON.stringify(st.value)}`);
-            }
+            const f = stateExpectation(state, st);
+            if (f) await fail(`${at}: ${f.message}`);
             break;
           }
           case 'expect-wakelock': {
@@ -1104,7 +1182,10 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
             break;
           }
           case 'expect-perf': {
-            const f = perfExpectation(measured, st, Object.keys((await s.state()).resources ?? {}));
+            // A child's resources are listed under each instance (LLP 1035.005.004 D8).
+            const state = await s.state();
+            const names = [...Object.keys(state.resources ?? {}), ...(state.owned ?? [])];
+            const f = perfExpectation(measured, st, [...new Set(names)]);
             if (f) failures.push(`${at}: ${f}`);
             break;
           }
@@ -1119,7 +1200,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
           default: failures.push(`${at}: unknown step ${st.op}`);
         }
         if (closedAt == null) await mutationClock.advance(s, properties.length ? async (state, delta) => {
-          if (delta || ['tap', 'type', 'clock', 'key', 'reload'].includes(st.op)) {
+          if (delta || ['tap', 'type', 'clock', 'key', 'reload', 'presence'].includes(st.op)) {
             await checkProperties(state, delta ? { ...st, op: 'clock', arg: '+' + delta } : st, n);
           } else previous = state;
         } : undefined);
@@ -1187,7 +1268,10 @@ export function nativeFetchOrigins(dir, env = process.env) {
   const origin = backendOrigin(dir, env) ?? literalBackendOrigin(code, parse);
   if (origin) return [origin];
   let grants = '';
-  try { grants = staticFacts(inlineSettings(code, dir, parse, env).code, parse).grants ?? ''; }
+  try {
+    const settings = appSettings(dir, env);
+    grants = staticFacts(settings.code, parse, { load: settings.load }).grants ?? '';
+  }
   catch { return []; } // the bake refuses it, and says why when it builds
   return [...new Set([...declared, ...grants.split('\n').map(line => /^\s*(?:development\s+)?net\.fetch\s+(https?:\/\/[^/\s]+)/.exec(line)?.[1]).filter(Boolean)])];
 }

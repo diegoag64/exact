@@ -20,6 +20,7 @@ mod looks;
 mod modes;
 mod namespace;
 mod navigation;
+mod output_freeze;
 mod page;
 mod paint_order;
 mod pan_release;

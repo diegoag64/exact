@@ -183,17 +183,17 @@ extension NavigationHost {
                 let reached = end - (c.surface.bounds.maxY - safe.bottom)
                 // A transparent bar covers nothing of the route's top, scroller or not: the content starts under it.
                 edges = Self.routeEdges(safe: safe, whole: whole, covered: covered,
-                                        collapses: c.collapseScroll != nil || !topPeers.isEmpty || !c.ridingBars.isEmpty || Self.insetsNoTop(c.node),
+                                        collapses: c.collapseScroll != nil || !topPeers.isEmpty || !c.ridingBars.isEmpty || RouteGeometry.insetsNoTop(c.node),
                                         reached: reached)
                 // An edge the route opts out of has no clearance to take (LLP 1123 D4).
-                c.bottomClearance = Self.clearanceOff(c.node) & 4 != 0 ? 0 : edges?.bottom ?? 0
-                if let node = c.collapseScroll, let sv = node.scrollView, !Self.insetsNoTop(c.node) {
+                c.bottomClearance = RouteGeometry.clearanceOff(c.node) & 4 != 0 ? 0 : edges?.bottom ?? 0
+                if let node = c.collapseScroll, let sv = node.scrollView, !RouteGeometry.insetsNoTop(c.node) {
                     let top = clearanceExtra(c, scroller: node, top: true)
                     let held = extras[ObjectIdentifier(sv)]
                     extras[ObjectIdentifier(sv)] = (sv, top, held?.bottom ?? 0)
                 }
                 if let node = c.edgeScroll ?? c.collapseScroll, let sv = node.scrollView,
-                   node === c.edgeScroll || Self.clearanceOff(c.node) & 4 != 0 && !Self.insetsNoTop(c.node) {
+                   node === c.edgeScroll || RouteGeometry.clearanceOff(c.node) & 4 != 0 && !RouteGeometry.insetsNoTop(c.node) {
                     let bottom = clearanceExtra(c, scroller: node, top: false)
                     let held = extras[ObjectIdentifier(sv)]
                     extras[ObjectIdentifier(sv)] = (sv, held?.top ?? 0, bottom)
@@ -214,7 +214,7 @@ extension NavigationHost {
             // starts under it (`collapse`), so no `.inset` is reported there.
             var insetNodes = [c.collapseScroll, c.edgeScroll].compactMap { $0 }
             for peer in topPeers + bottomPeers where !insetNodes.contains(where: { $0 === peer }) { insetNodes.append(peer) }
-            for node in insetNodes where wanted[node.id] != .whole && node.scrollView != nil && !(node === c.collapseScroll && Self.insetsNoTop(c.node)) {
+            for node in insetNodes where wanted[node.id] != .whole && node.scrollView != nil && !(node === c.collapseScroll && RouteGeometry.insetsNoTop(c.node)) {
                 if settled, let safe = node.scrollView?.safeAreaInsets {
                     // The bottom edge's scroller takes the route's bottom
                     // clearance, which the route then pads nothing of
@@ -278,10 +278,11 @@ extension NavigationHost {
         for id in covers.keys where wanted[id] == nil && presenter.views[id] != nil { changes.append((id, nil)) }
         covers = wanted
         let locals = reportLocalInsets()
-        guard !changes.isEmpty || locals else { return }
+        guard !changes.isEmpty || locals else { return writeCarriedScrollsWhenAnswered() }
         // A scroller's least content height is the port its cover leaves
         // (`scrollFloor`); the kernel sends no new content size when only that changed.
         for (id, _) in changes { presenter.views[id]?.fitScroll() }
+        countReport()
         // Under Q3 (c) a cold launch's first frame runs no app code: a hatch
         // that changes a bar the plan already showed moves the content once.
         if replayingHatches, changes.contains(where: { presenter.views[$0.0]?.props["navigationKey"] != nil }) {
@@ -299,7 +300,9 @@ extension NavigationHost {
     /// persona switcher lay under the large title, drawn over by it and
     /// untappable (LLP 1116.006 D1).
     func deliverCovers() {
-        guard !deliveringCovers else { return }
+        // A delivery asked for while one runs (an answer applied in it reports again, or the write or the sync that
+        // closes a pass does) runs in that one, after the pass
+        guard !deliveringCovers else { deliverAgain = true; return }
         // A callback the runtime waits on can make no runtime call: deliver once it returns
         if Owner.shared.isServingMain {
             DispatchQueue.main.async { [weak self] in self?.deliverCovers() }
@@ -307,35 +310,119 @@ extension NavigationHost {
         }
         deliveringCovers = true
         defer { deliveringCovers = false }
-        // A stack change held for a lifted header (`liftHeld`) is given to
-        // UIKit by the sync of the runtime's answer to its cover. The session
-        // applies answers in the order asked, a slice in flight first: the
-        // hold ends just before this answer, and what it did not sync (an
-        // answer that moved nothing) syncs after it. An answer applied here
-        // can lift another header, whose own delivery finds this one running.
-        let idle = { [weak self] (work: @escaping () -> Void) in
-            guard let session = self?.presenter.session else { return work() }
-            session.whenIdle(bound: true, work, cancelled: { self?.liftHeld = false })
-        }
-        let held = liftHeld
-        if held { idle { [weak self] in self?.liftHeld = false } }
-        defer {
-            if held || liftHeld { idle { [weak self] in self?.liftHeld = false; self?.liftAnswered() } }
-        }
-        var toldInsets = localInsets.wanted
         for _ in 0..<8 {
-            toldInsets = localInsets.wanted
-            let views = presenter.views
-            let locals = localInsets.take { views[$0] != nil }
-            presenter.session?.localInsets(locals)
-            var changes: [(UInt32, HostCover?)] = []
-            for (id, cover) in covers where delivered[id] != cover { changes.append((id, cover)) }
-            for id in delivered.keys where covers[id] == nil && presenter.views[id] != nil { changes.append((id, nil)) }
-            delivered = covers
-            guard !changes.isEmpty || !locals.isEmpty else { return }
-            if !changes.isEmpty { presenter.onCovers?(changes) }
+            deliverAgain = false
+            deliverCoversOnce()
+            guard deliverAgain else { return }
+            if untoldChain?.spent == true { break }
         }
-        if delivered != covers || localInsets.wanted != toldInsets { presenter.session?.log("Navigation covers did not settle after 8 corrections") }
+        // What a report past the chain's eighth pass changed stays untold until a report outside the chain tells it
+        if untoldChain?.spent == true {
+            presenter.session?.log("Navigation covers did not settle in 8 passes; what the last changed is told with the next change no answer causes")
+            return
+        }
+        // A chain a slice landed meanwhile started is told on the main queue's next turn, so one call holds main for
+        // eight passes at most and leaves no counted report untold
+        DispatchQueue.main.async { [weak self] in self?.deliverCovers() }
+    }
+
+    /// Count a report that changed the covers or the local insets, in the chain of the work making it
+    /// (`ExactSession.coversCause`), or in a new one. Reports told together are told in the chain with more passes left,
+    /// so a change no answer causes keeps its own eight. A report in a spent chain is not counted: no delivery tells it in
+    /// that chain, so no carried position waits for its answer (`coversAnswerOwed`).
+    func countReport() {
+        let chain = presenter.session?.coversCause as? CoversChain ?? CoversChain()
+        untoldChain = untoldChain.map { $0.passes <= chain.passes ? $0 : chain } ?? chain
+        if !chain.spent { coversReported += 1 }
+    }
+
+    /// Deliver the covers and local insets not yet told, in their chain, unless it is spent. Every pass is one of its
+    /// chain's eight, and the runtime's answers and the write and the sync that close it run in the chain, so what they
+    /// report is told in that chain.
+    private func deliverCoversOnce() {
+        let views = presenter.views
+        let untold = !untoldCovers().isEmpty || localInsets.changed(live: { views[$0] != nil })
+        let chain = untoldChain ?? CoversChain(), spent = chain.spent
+        // A spent chain keeps what it left untold, so a delivery asked again tells nothing in it
+        if untold, spent { presenter.session?.log("Navigation covers did not settle in 8 passes; what the last changed is told with the next change no answer causes") }
+        if !untold || !spent { untoldChain = nil }
+        if !spent { chain.passes += 1 }
+        // The last report this pass answers: every one counted before it sends (a spent chain's untold ones are not)
+        let told = coversReported
+        let inChain = { (work: () -> Void) in if let session = self.presenter.session { session.inCoversChain(chain, work) } else { work() } }
+        inChain {
+            // A stack change held for a lifted header (`liftHeld`) is given to
+            // UIKit by the sync of the runtime's answer to its cover. The session
+            // applies answers in the order asked, a slice in flight first: the
+            // hold ends just before this answer, and what it did not sync (an
+            // answer that moved nothing) syncs after it. An answer applied here
+            // can lift another header, whose own delivery runs once this one ends.
+            let release = { [weak self] in
+                guard let self else { return }
+                liftReleased = max(liftReleased, told)
+            }
+            let idle = { [weak self] (work: @escaping () -> Void) in
+                guard let session = self?.presenter.session else { return work() }
+                session.whenIdle(bound: true, work, cancelled: release)
+            }
+            let held = liftHeld
+            if held { idle(release) }
+            if untold, !spent {
+                presenter.session?.localInsets(localInsets.take { views[$0] != nil })
+                // Read the covers once the local insets are told, so covers their answer changes at once, as it does
+                // when no work waits, go out in this pass. A report that answer makes stays owed, and the next pass
+                // answers it, telling what is still untold, local insets among it, or nothing.
+                let changes = untoldCovers()
+                delivered = covers
+                if !changes.isEmpty { presenter.onCovers?(changes) }
+            }
+            writeCarriedScrollsWhenAnswered(through: told)
+            if held || liftHeld { idle { [weak self] in release(); self?.liftAnswered() } }
+        }
+    }
+
+    /// The covers the kernel has not been told, and the scrollers still shown that no longer have the one it was told
+    private func untoldCovers() -> [(UInt32, HostCover?)] {
+        var changes: [(UInt32, HostCover?)] = []
+        for (id, cover) in covers where delivered[id] != cover { changes.append((id, cover)) }
+        for id in delivered.keys where covers[id] == nil && presenter.views[id] != nil { changes.append((id, nil)) }
+        return changes
+    }
+
+    /// Write the positions Exact carried across a change of its own (`Presenter.writeCarriedScrolls`) once every report
+    /// that changed the covers or local insets is answered, so each lands in the layout it is for. A delivery passes
+    /// the last report it told (`report`): the session runs this after the runtime's answer to it, which answers it,
+    /// and a reset cancels both, which makes it moot. A call for covers and local insets that changed nothing passes
+    /// none and answers nothing. While a report is unanswered a batch's restore leaves the positions
+    /// (`coversAnswerOwed`), a fill's among them; inside a batch with none unanswered, the batch's restore writes them.
+    func writeCarriedScrollsWhenAnswered(through report: Int? = nil) {
+        let answered = { [weak self] in
+            guard let self, let report else { return }
+            coversAnswered = max(coversAnswered, report)
+        }
+        let write = { [weak self] in
+            answered()
+            guard let self, !coversAnswerOwed, !presenter.applying else { return }
+            presenter.writeCarriedScrolls()
+        }
+        // Covers that changed nothing, with no answer owed, have nothing to wait for: written now, before work waiting
+        // in the session can scroll the scroller
+        guard let session = presenter.session, report != nil || coversAnswerOwed else { return write() }
+        session.whenIdle(bound: true, write, cancelled: answered)
+    }
+
+    /// The side insets of a route in a sheet still being presented, as they are where the sheet lands
+    /// (`UIPresentationController.frameOfPresentedViewInContainerView`). The sheet's own safe area during the
+    /// transition is not that: on the iPhone Duo the side by the button strip read 8 points wider.
+    static func landingSides(_ c: RouteController) -> (left: CGFloat, right: CGFloat)? {
+        var top: UIViewController = c
+        while let parent = top.parent { top = parent }
+        guard top.isBeingPresented, let sheet = top.presentationController, let container = sheet.containerView else { return nil }
+        let landed = sheet.frameOfPresentedViewInContainerView
+        let box = c.node.convert(c.node.bounds, to: top.view)
+        let safe = container.safeAreaInsets
+        let minX = landed.minX + max(0, box.minX), maxX = landed.maxX - max(0, top.view.bounds.maxX - box.maxX)
+        return (max(0, safe.left - minX), max(0, safe.right - (container.bounds.maxX - maxX)))
     }
 
     /// @ref LLP 1123 D9 — each route's own safe area, which its content reads
@@ -344,7 +431,8 @@ extension NavigationHost {
     /// as the route's box reaches them, as its covers are. A route out of a
     /// window keeps the last it had, UIKit's zero there being no measurement,
     /// and so does one while its stack's transition runs, as its cover does;
-    /// one that has none yet takes what it has from its first frame. And the
+    /// one that has none yet takes what it has from its first frame, its sides
+    /// from where a sheet being presented lands (`landingSides`). And the
     /// session root's while the containers take the whole view, where `env()`
     /// is 0 but the screen's insets are not. Whether any changed.
     func reportLocalInsets() -> Bool {
@@ -359,8 +447,9 @@ extension NavigationHost {
             }
             let box = c.node.convert(c.node.bounds, to: view)
             let safe = view.safeAreaInsets
-            wanted[c.node.id] = [safe.top, max(0, safe.right - max(0, view.bounds.maxX - box.maxX)),
-                                 safe.bottom, max(0, safe.left - max(0, box.minX))]
+            var sides = (left: max(0, safe.left - max(0, box.minX)), right: max(0, safe.right - max(0, view.bounds.maxX - box.maxX)))
+            if last == nil, let landing = Self.landingSides(c) { sides = landing }
+            wanted[c.node.id] = [safe.top, sides.right, safe.bottom, sides.left]
         }
         if wantsWholeView, let view = presenter.session?.view, view.window != nil {
             let safe = view.safeAreaInsets
@@ -372,30 +461,54 @@ extension NavigationHost {
 
     // MARK: The development check (LLP 1075.003 §3.5)
 
-    /// Whether this build checks what Exact owns: every build but a
-    /// production bake.
-    static let checksOwnership = !ExactEnv.productionBake
+    /// The delegate slots Exact keeps (LLP 1075.003 §3.5): every stack's,
+    /// hooked or not, More's once adopted, and its own tab container's. A
+    /// slot written outside Exact takes its container's calls from Exact, so
+    /// the journal names it once each time it leaves Exact: what it holds,
+    /// what Exact no longer hears and what to set instead. Checked at each
+    /// batch, also while Exact is changing a stack: such a slot keeps Exact
+    /// from hearing a transition end.
+    func checkDelegates() {
+        func say(_ what: String, _ now: AnyObject?, _ effect: String) {
+            presenter.session?.log("\(what): delegate changed outside Exact, which owns it (now \(now.map { "\(type(of: $0))" } ?? "nil")); \(effect)")
+        }
+        // `stacks` holds a record for each slot Exact keeps: `registerStack` fills the slot, `retireStack` retires it
+        for stack in stacks.values.sorted(by: { $0.order < $1.order }) {
+            guard let nav = stack.controller else { continue }
+            let written = !stack.proxy.fillsSlot
+            if written, !stack.proxy.slotNamed {
+                if nav === adoptedMore {
+                    say("navigation More", nav.delegate, "Exact hears none of More's calls, and More has no forwarded delegate")
+                } else {
+                    say("navigation \(stack.label)", nav.delegate, "Exact hears none of this stack's calls: set ExactNavigation.delegate, which Exact forwards to")
+                }
+            }
+            stack.proxy.slotNamed = written
+        }
+        guard let tabs = tabController, let proxy = tabProxy else { return }
+        let written = !proxy.fillsSlot
+        if written, !proxy.slotNamed {
+            say("tabs", tabs.delegate, "Exact hears none of the tab container's calls: set ExactTabs.delegate, which Exact forwards to")
+        }
+        proxy.slotNamed = written
+    }
 
-    /// Before each batch: compare what Exact owns on each hatched object with
-    /// what Exact last wrote, and UIKit's stacks and selection at rest with
-    /// the router's (`restDifference`), and journal a difference once, by
-    /// name. It is detection, not enforcement; a change made and undone
-    /// between two batches is not seen.
+    /// Before each batch: compare what Exact owns on each hatched object and
+    /// the tabs of its own tab container with what Exact last wrote or made,
+    /// and UIKit's stacks and selection at rest with the router's
+    /// (`restDifference`), and journal a difference once, by name. It is
+    /// detection, not enforcement; a change made and undone between two
+    /// batches is not seen.
     func checkOwned() {
-        if NavigationHost.checksOwnership, let difference = restDifference {
-            let line = "navigation: at rest, \(difference)"
-            if ownedReported.insert(line).inserted { presenter.session?.log(line) }
-        }
-        guard NavigationHost.checksOwnership, !changing, !syncing, presenter.session?.natives.hatchesConnected == true else { return }
-        func say(_ what: String, _ property: String) {
-            let line = "\(what): \(property) changed outside Exact, which owns it"
-            if ownedReported.insert(line).inserted { presenter.session?.log(line) }
-        }
+        guard RouteGeometry.checksOwnership else { return }
+        checkDelegates()
+        checkTabs()
+        if let difference = restDifference { reportOnce("navigation: at rest, \(difference)") }
+        guard !changing, !syncing, presenter.session?.natives.hatchesConnected == true else { return }
         // `allNavigations` leaves out a tab's own navigation controller while UIKit holds its routes in More; More has
         // no hatch, so the `hatched` guard skips it
         for nav in allNavigations {
             guard let stack = stacks[ObjectIdentifier(nav)], stack.hatched else { continue }
-            if nav.delegate !== stack.proxy { say("navigation \(stack.label)", "delegate") }
             if nav.transitionCoordinator == nil, !searching(nav.topViewController as? RouteController), nav.isNavigationBarHidden == topShowsBar(nav) { say("navigation \(stack.label)", "navigation bar visibility") }
             #if !os(tvOS)
             if let pop = nav.interactivePopGestureRecognizer, pop.delegate !== self { say("navigation \(stack.label)", "the pop gesture's delegate") }
@@ -407,40 +520,53 @@ extension NavigationHost {
         for c in controllers.values where c.hatched && presenter.views[c.node.id] === c.node {
             if c.navigationController != nil, c.isViewLoaded, c.node.superview !== c.contentMount { say("route \(c.key)", "view") }
             guard let node = c.ownedScroll, let scroll = node.scrollView else { continue }
-            for property in NavigationHost.ownedChanges(scroll, of: node, insetByUIKit: insetByUIKit(node)) { say("route \(c.key)", property) }
+            for property in RouteGeometry.ownedChanges(scroll, of: node, insetByUIKit: insetByUIKit(node)) { say("route \(c.key)", property) }
         }
     }
 
-    /// What Exact sets on a node's scroll view and nothing else may (LLP
-    /// 1075.003 §3.5) and differs from what Exact writes: no inset (a
-    /// refresh control insets it while it spins), automatic adjustment for a
-    /// route's collapse or bottom-edge scroller and arranged peers, the backend's
-    /// Exact-owned delegate, the node's keyboard dismissal (authored, or
-    /// the platform's for what it scrolls, LLP 1115.000 D9.1). The offset
-    /// and the content size are Exact's too but are not checked: they move
-    /// with the user and with layout, so no last write predicts them.
-    static func ownedChanges(_ s: UIScrollView, of node: NodeView, insetByUIKit: Bool) -> [String] {
-        var out: [String] = []
-        // A native backend owns layout/footer insets, composed with the
-        // refresh control and keyboard; zero is only the plain-scroll baseline.
-        if s === node.scroll {
-            #if os(tvOS)
-            if s.contentInset != node.bandInset { out.append("contentInset") }
-            #else
-            if s.contentInset != node.bandInset, s.refreshControl?.isRefreshing != true { out.append("contentInset") } // a band's is the host's
-            #endif
+    /// The tabs and their controllers Exact made with its container, hooked
+    /// or not (LLP 1075.003 §3.7): Exact never replaces a tab's controller,
+    /// and makes a container's `UITab`s again only when an app's
+    /// `tabContainer` took their stacks and returned no container
+    /// (`restoreBuiltTabs`). They are compared as members, since More's Edit
+    /// reorders them as UIKit lets a person do. A container built from
+    /// `UITab`s holds them in its `tabs`, and its `viewControllers` reads nil,
+    /// so it is compared by its tabs. One built from controllers is compared
+    /// by its `viewControllers`, which reads nil once the app sets `tabs` on it.
+    private func checkTabs() {
+        // Skip during a sync, which can set `builtTabs` before the container's tabs: the next batch checks them
+        guard !syncing, let tabs = tabController, tabOwner === tabs else { return }
+        // Compare by identity as sets: Exact's are distinct, so equal counts and equal sets are the same members
+        func same(_ shown: [AnyObject], _ made: [AnyObject]) -> Bool {
+            shown.count == made.count && Set(shown.map(ObjectIdentifier.init)) == Set(made.map(ObjectIdentifier.init))
         }
-        if s.contentInsetAdjustmentBehavior != (insetByUIKit ? .automatic : .never) { out.append("contentInsetAdjustmentBehavior") }
-        if s !== node.scrollView || !node.ownsScrollDelegate { out.append("delegate") }
-        if s.keyboardDismissMode != node.keyboardDismissal { out.append("keyboardDismissMode") }
-        return out
+        if #available(iOS 18.0, tvOS 18.0, *), !builtTabs.isEmpty {
+            if !same(tabs.tabs, builtTabs) { say("tabs", "tabs") }
+        } else if #available(iOS 18.0, tvOS 18.0, *), tabs.viewControllers == nil {
+            // Name `tabs` for a container built from controllers that now holds `UITab`s: a cleared
+            // `viewControllers` reads back as no controllers, not nil (measured on iOS 27)
+            say("tabs", "tabs")
+        } else if !same(tabs.viewControllers ?? [], tabPanels.compactMap { tabStacks[$0] }) {
+            say("tabs", "viewControllers")
+        }
     }
+
+    /// Journal that `what`'s `property`, which Exact owns, changed outside it, the first time the check finds it.
+    private func say(_ what: String, _ property: String) { reportOnce("\(what): \(property) changed outside Exact, which owns it") }
+
+    /// Journal `line` the first time the development check finds it.
+    private func reportOnce(_ line: String) {
+        if ownedReported.insert(line).inserted { presenter.session?.log(line) }
+    }
+
 }
 
 extension RouteController {
-    /// A large title at rest stays open when the text size changes. UIKit
-    /// draws the title at the new size in the bar's old height, which grows
-    /// only when the list is pulled: at the largest size the title ran under
+    /// A large title at rest opens after its route appears, once UIKit has
+    /// given its scroller the bar's insets. The same repair keeps it open
+    /// when the text size changes. UIKit draws the title at the new size in
+    /// the bar's old height, which grows only when the list is pulled:
+    /// at the largest size the title ran under
     /// the bar's buttons (meal-planner, bake-off round 34), and a hand-built
     /// bar clips it the same way. A scroller at its start is pulled open on
     /// the next turn, after UIKit's layout, as a title that turns large
@@ -453,5 +579,13 @@ extension RouteController {
             host.restAtTop(sv, in: self)
         }
     }
+}
+
+/// A chain of covers corrections: a change no answer causes, and every report that the runtime's answers to its
+/// deliveries, and the writes and syncs closing them, make in turn. Covers that never settle stop after its eighth
+/// pass, however its answers branch and whether they apply at once or wait behind a slice.
+final class CoversChain {
+    var passes = 0
+    var spent: Bool { passes >= 8 }
 }
 #endif

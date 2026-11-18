@@ -772,3 +772,41 @@ fn active_targets_keep_default_buttons_native() {
     assert_eq!(node.node_type, exact_kernel::NodeType::Control);
     assert!(node.style.mask.has(StyleId::PressBackgroundColor));
 }
+
+#[test]
+fn active_translate_compiles_without_changing_the_base_transform() {
+    let r = booted(
+        r#"component App
+  view
+    view translate="10px 20px" testId="slab"
+      :active
+        translate = "4px 4px"
+"#,
+    );
+    let k = r.kernel();
+    let node = k.node_by_key(k.find_by_test_id("slab")[0]).unwrap();
+    assert_eq!(node.style.translate.x, 10.);
+    assert_eq!(node.style.translate.y, 20.);
+    assert_eq!(node.style.press_translate.x, 4.);
+    assert_eq!(node.style.press_translate.y, 4.);
+}
+
+#[test]
+fn active_translate_refuses_a_third_axis() {
+    for value in [
+        r#""4px 4px 8px""#,
+        r#""0 0 0""#,
+        r#"(on ? "4px 4px" : "0 0 8px")"#,
+        r#"(match some(on) { case some(n) => "0 0 8px", case none => "4px 4px" })"#,
+        r#"(match some("0 0 8px") { case some(offset) => offset, case none => "4px 4px" })"#,
+        "offset",
+        r#"(on ? "4px 4px" : offset)"#,
+    ] {
+        let source = format!("component App\n  state on = false\n  derive offset = (on ? \"4px 4px\" : \"0 0 8px\")\n  view\n    view\n      :active\n        translate = {value}\n");
+        let error = contract::compile(&source).expect_err("a press is two-dimensional");
+        assert!(
+            error.to_string().contains("a press is a 2D offset"),
+            "{error}"
+        );
+    }
+}

@@ -72,6 +72,22 @@ pub(crate) struct Presence {
 }
 
 impl<D: DataSource> Host<D> {
+    /// [`crate::link::MotionLowering`]'s presentation: the transitions handed
+    /// over to Core Animation present their targets before sampling.
+    pub(crate) fn hand_over_transitions(&mut self) {
+        let new = self.engine.starts_on_frame() && !self.native_mode();
+        let runs = &self.inline_runs;
+        for view in super::svg_lower::hand_over_transitions(
+            self.runner.kernel(),
+            &mut self.engine,
+            &|v| runs.contains_key(&v),
+            &|v| !self.runner.handlers_of(v).is_empty(),
+            new,
+        ) {
+            self.svg.played(view);
+        }
+    }
+
     /// A host-known look changes scale through the same motion engine as authored targets.
     pub fn look_motion(&mut self, view: ViewId, states: u8, now_ms: f64) -> String {
         self.now_ms = self.now_ms.max(now_ms);
@@ -395,18 +411,8 @@ impl<D: DataSource> Host<D> {
         // Before sampling: a transition handed over presents its target.
         // Under the agent's clock (no first-frame rule) motion is sampled:
         // nothing new is handed over, and what was comes back.
-        if self.svg.play_transitions {
-            let new = self.engine.starts_on_frame() && !self.native_mode();
-            let runs = &self.inline_runs;
-            for view in super::svg_lower::hand_over_transitions(
-                self.runner.kernel(),
-                &mut self.engine,
-                &|v| runs.contains_key(&v),
-                &|v| !self.runner.handlers_of(v).is_empty(),
-                new,
-            ) {
-                self.svg.played(view);
-            }
+        if let Some(motion) = self.turn.motion.filter(|_| self.svg.play_transitions) {
+            (motion.present)(self);
         }
         let frame = self.engine.frame();
 
@@ -424,9 +430,10 @@ impl<D: DataSource> Host<D> {
             }) else {
                 continue;
             };
-            if Property::PAINT.contains(&p.property) {
+            if Property::PAINT.contains(&p.property) || p.property == Property::Filter {
                 // @ref LLP 1055.000 D6 — an `svg`'s scene shows its colours;
-                // a box's are its style, re-sent with the presented values.
+                // a box's are its style, re-sent with the presented values,
+                // and so is its filter (LLP 1003.002 D8).
                 if !self.svg.touch(self.runner.kernel(), view) {
                     let inherits = p.property == Property::Color;
                     if let Some((_, changed)) = colored.iter_mut().find(|(id, _)| *id == view) {
@@ -473,10 +480,10 @@ impl<D: DataSource> Host<D> {
     ) {
         // A layout box is presented as its offset from the laid-out
         // origin and its size's difference from the laid-out size;
-        // identity is `0 0 0 0`. The other three are one or two numbers.
+        // identity is `0 0 0 0`. Rotation carries its angle and axis.
         let values = match property {
             Property::Layout => layout_presented(&self.engine, node, value),
-            Property::Translate => [value.x, value.y, value.z, value.w],
+            Property::Translate | Property::Rotate => [value.x, value.y, value.z, value.w],
             _ => [value.x, 0.0, 0.0, 0.0],
         };
         let identity = match property.identity() {
@@ -486,16 +493,19 @@ impl<D: DataSource> Host<D> {
         if identity && (boot || batch.at_identity(view, property.name())) {
             return;
         }
-        // A run has no box of its own to move, and transforms do not apply
-        // to a non-replaced inline box (CSS Transforms 1 §3).
-        if self.inline_runs.contains_key(&view) || self.svg.presented(view) {
+        // A layout-only box has no layer. A run has no box of its own to
+        // move: transforms do not apply to non-replaced inline boxes (CSS Transforms 1 §3).
+        if self.flat.nodes.contains(&view)
+            || self.inline_runs.contains_key(&view)
+            || self.svg.presented(self.runner.kernel(), view)
+        {
             return;
         }
         if self.native_protected_id(view) && !self.native_current() {
             return;
         }
-        if property == Property::Layout {
-            batch.present4(view, "layout", values);
+        if matches!(property, Property::Layout | Property::Rotate) {
+            batch.present4(view, property.name(), values);
         } else if property == Property::Translate && (values[2] != 0.0 || values[3] != 0.0) {
             // Its percentages ride as `w` and `h`; the presenter
             // resolves them against the box (chess diary #4).

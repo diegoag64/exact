@@ -39,7 +39,7 @@ struct HeaderRule {
     /// (`fact::AUTHORED`), and on iOS a pushed route with one gets no bar
     /// of the system Back alone either, since the author drew their own.
     static func keepsAuthoredHeader(_ route: NodeView) -> Bool {
-        guard let header = route.container.subviews.lazy.compactMap({ $0 as? NodeView }).first,
+        guard let header = route.childNodes.first,
               header.props["semanticTag"] == "header", header.style["display"]?.string != "none" else { return false }
         return header.wrote("appearance") && header.style["appearance"]?.string == "none"
     }
@@ -78,13 +78,13 @@ struct HeaderRule {
         // (`exact_kernel::bars::header_shape`); any other is answered here,
         // before walking it: a route whose first child is its feed would
         // hand every row's facts over at each projection, several a batch.
-        guard let first = route.container.subviews.lazy.compactMap({ $0 as? NodeView }).first,
+        guard let first = route.childNodes.first,
               first.props["semanticTag"] == "header" else { return nil }
         // The route, then its first child's subtree, in preorder: two words
         // a node, its facts and the count of its children.
         var nodes: [NodeView] = [route], words: [UInt32] = [route.props["navigationBar"] == "none" ? 256 : 0, 1]
         func add(_ node: NodeView) {
-            let children = node.container.subviews.compactMap { $0 as? NodeView }
+            let children = node.childNodes
             nodes.append(node)
             Self.walked += 1
             words.append(Self.facts(node, back: back))

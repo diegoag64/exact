@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 afterEach(() => stopAll());
 
-/** A copy of library-gate with id `id`, under the repo's target. */
+/** A copy of library-gate's contract and design with id `id`, under the repo's target. */
 function copy(id) {
   const dir = resolve(ROOT, 'target', `dev-gallery-test-${process.pid}`, 'app');
   rmSync(dir, { recursive: true, force: true });
@@ -31,6 +31,8 @@ function copy(id) {
   writeFileSync(join(dir, 'assets', 'note.txt'), 'the app\'s asset\n');
   const manifest = JSON.parse(readFileSync(resolve(ROOT, 'apps/library-gate/app.json'), 'utf8'));
   manifest.app.id = id; manifest.id = id;
+  // The copy has no data crate (its contract asks for no data), so its manifest names none (LLP 1153.003 D2).
+  delete manifest.rust;
   writeFileSync(join(dir, 'app.json'), JSON.stringify(manifest, null, 2));
   return dir;
 }

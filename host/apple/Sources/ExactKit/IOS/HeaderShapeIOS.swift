@@ -127,7 +127,9 @@ struct HeaderShape: Equatable {
             disabled = button.disabled
             accessibilityDisabled = button.ariaUnavailable
             prominent = ["filled", "bordered-prominent", "prominent-glass", "prominent-clear-glass"].contains(face?.style ?? "")
+            // A badge (an avatar) on a button that asks for glass sits in its own capsule, as a glass button does.
             ownGlass = ["glass", "clear-glass"].contains(face?.style ?? "")
+                || (badge != nil && Materials.glass(button.props["backgroundMaterial"]))
             #if os(tvOS)
             // tvOS's bar title font is not measured: its own stays.
             font = nil
@@ -180,7 +182,7 @@ struct HeaderShape: Equatable {
     }
     let header: NodeView
     let heading: NodeView?
-    let title: String
+    package let title: String
     let level: Int
     let leading: [Item], trailing: [Item]
     /// The header's `input type="search"`, if it has one: the item's

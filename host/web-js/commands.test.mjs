@@ -5,11 +5,13 @@ import { webCompiler } from './module.mjs';
 import { hostFixtureFile, glueCase, glueNode, glueDeclarations } from '../web/tests/glue-fixture.mjs';
 import { test, expect } from 'bun:test';
 import { suiteBrowser } from '../../scripts/agent-launch.mjs';
+import { builtFile } from './content-names.mjs';
+import { engagement } from '../web/engagement.js';
 
 test('relaunch reloads the browser document and keeps committed storage', async () => {
   const server = Bun.serve({ port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === '/rt.js') return new Response('export const DEVELOPMENT_STORE = globalThis.testDevelopment ? \"fixture\" : null; export const Kept = () => globalThis.testKey ?? \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
+    if (path === '/rt.js') return new Response('export const Hosts = {}, KeyEvent = null, Propagating = null; export const DEVELOPMENT_STORE = globalThis.testDevelopment ? \"fixture\" : null; export const Kept = () => globalThis.testKey ?? \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
     if (path === '/commands.js') return new Response(Bun.file(new URL('./commands.js', import.meta.url)));
     if (path === '/frame-messages.js') return new Response(Bun.file(new URL('../web/frame-messages.js', import.meta.url)));
     if (path === '/navigation.js') return new Response(hostFixtureFile(new URL('../web/navigation.js', import.meta.url)), { headers: { 'content-type': 'text/javascript' } });
@@ -52,7 +54,7 @@ test('relaunch reloads the browser document and keeps committed storage', async 
 test("a prompt's Return commits its field, then presses its action", async () => {
   const server = Bun.serve({ port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === '/rt.js') return new Response('export const DEVELOPMENT_STORE = globalThis.testDevelopment ? \"fixture\" : null; export const Kept = () => globalThis.testKey ?? \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
+    if (path === '/rt.js') return new Response('export const Hosts = {}, KeyEvent = null, Propagating = null; export const DEVELOPMENT_STORE = globalThis.testDevelopment ? \"fixture\" : null; export const Kept = () => globalThis.testKey ?? \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
     if (path === '/commands.js') return new Response(Bun.file(new URL('./commands.js', import.meta.url)));
     if (path === '/frame-messages.js') return new Response(Bun.file(new URL('../web/frame-messages.js', import.meta.url)));
     if (path === '/navigation.js') return new Response(hostFixtureFile(new URL('../web/navigation.js', import.meta.url)), { headers: { 'content-type': 'text/javascript' } });
@@ -116,7 +118,7 @@ test("a prompt's Return commits its field, then presses its action", async () =>
 test('openURL opens a declared scheme, refuses the rest, and journals under the agent', async () => {
   const server = Bun.serve({ port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === '/rt.js') return new Response('export const DEVELOPMENT_STORE = globalThis.testDevelopment ? \"fixture\" : null; export const Kept = () => globalThis.testKey ?? \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
+    if (path === '/rt.js') return new Response('export const Hosts = {}, KeyEvent = null, Propagating = null; export const DEVELOPMENT_STORE = globalThis.testDevelopment ? \"fixture\" : null; export const Kept = () => globalThis.testKey ?? \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
     for (const [name, file] of [['commands.js', './commands.js'], ['frame-messages.js', '../web/frame-messages.js'], ['navigation.js', '../web/navigation.js'], ['prompt-glue.js', '../web/prompt-glue.js'], ['alert-message.js', '../web/alert-message.js'], ['menu-rows.js', '../web/menu-rows.js']]) {
       if (path === `/${name}`) return new Response(hostFixtureFile(new URL(file, import.meta.url)), { headers: { 'content-type': 'text/javascript' } });
     }
@@ -161,7 +163,7 @@ test('openURL opens a declared scheme, refuses the rest, and journals under the 
 test('openDevTools is refused on the web', async () => {
   const server = Bun.serve({ port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === '/rt.js') return new Response('export const DEVELOPMENT_STORE = globalThis.testDevelopment ? \"fixture\" : null; export const Kept = () => globalThis.testKey ?? \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
+    if (path === '/rt.js') return new Response('export const Hosts = {}, KeyEvent = null, Propagating = null; export const DEVELOPMENT_STORE = globalThis.testDevelopment ? \"fixture\" : null; export const Kept = () => globalThis.testKey ?? \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
     for (const [name, file] of [['commands.js', './commands.js'], ['frame-messages.js', '../web/frame-messages.js'], ['navigation.js', '../web/navigation.js'], ['prompt-glue.js', '../web/prompt-glue.js'], ['alert-message.js', '../web/alert-message.js'], ['menu-rows.js', '../web/menu-rows.js']]) {
       if (path === `/${name}`) return new Response(hostFixtureFile(new URL(file, import.meta.url)), { headers: { 'content-type': 'text/javascript' } });
     }
@@ -189,7 +191,7 @@ test('openDevTools is refused on the web', async () => {
 test('the trace commands are refused in the journal', async () => {
   const server = Bun.serve({ port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === '/rt.js') return new Response('export const DEVELOPMENT_STORE = globalThis.testDevelopment ? \"fixture\" : null; export const Kept = () => globalThis.testKey ?? \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
+    if (path === '/rt.js') return new Response('export const Hosts = {}, KeyEvent = null, Propagating = null; export const DEVELOPMENT_STORE = globalThis.testDevelopment ? \"fixture\" : null; export const Kept = () => globalThis.testKey ?? \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
     for (const [name, file] of [['commands.js', './commands.js'], ['frame-messages.js', '../web/frame-messages.js'], ['navigation.js', '../web/navigation.js'], ['prompt-glue.js', '../web/prompt-glue.js'], ['alert-message.js', '../web/alert-message.js'], ['menu-rows.js', '../web/menu-rows.js']]) {
       if (path === `/${name}`) return new Response(hostFixtureFile(new URL(file, import.meta.url)), { headers: { 'content-type': 'text/javascript' } });
     }
@@ -224,11 +226,14 @@ test.each([false, true])('a saved scheme waits beneath a grid copy pin (wasm: %s
   const command = glueCase(source('../web/wasm/commit.js'), 'command');
   const boot = glueDeclarations(source('../web/wasm/boot.js'), ['bootNow', 'reportColors']);
   const client = glueNode(source('./dev.mjs'), n => n.type === 'VariableDeclarator' && n.id.name === 'client' && n.init);
-  const script = new Function('INSPECT_EVENTS', `return (${client})(0, null)`)([]).replace(/^<script>|<\/script>$/g, '');
+  // The client writes its replacement boundary and the page's engagement tracker into the script (dev.mjs).
+  const boundary = glueNode(source('./dev.mjs'), n => n.type === 'FunctionDeclaration' && n.id.name === 'replacementBoundary' && n);
+  const script = new Function('INSPECT_EVENTS', 'replacementBoundary', 'engagement', `return (${client})(0, null)`)([], boundary, engagement)
+    .replace(/^<script>|<\/script>$/g, '');
   const pin = glueNode(wasm ? source('../web/dev.js') : script, n => n.type === 'VariableDeclarator' && n.id.name === 'pin' && n.init);
   const server = Bun.serve({ port: 0, fetch(request) {
     const path = new URL(request.url).pathname;
-    if (path === '/rt.js') return new Response('export const DEVELOPMENT_STORE = \"fixture\"; export const Kept = () => \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
+    if (path === '/rt.js') return new Response('export const Hosts = {}, KeyEvent = null, Propagating = null; export const DEVELOPMENT_STORE = \"fixture\"; export const Kept = () => \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
     if (path === '/') return new Response('<iframe name="exact-copy-1" src="/copy"></iframe>', { headers: { 'content-type': 'text/html' } });
     for (const [name, file] of [['commands.js', './commands.js'], ['frame-messages.js', '../web/frame-messages.js'], ['navigation.js', '../web/navigation.js'], ['prompt-glue.js', '../web/prompt-glue.js'], ['alert-message.js', '../web/alert-message.js'], ['menu-rows.js', '../web/menu-rows.js']]) {
       if (path === `/${name}`) return new Response(hostFixtureFile(new URL(file, import.meta.url)), { headers: { 'content-type': 'text/javascript' } });
@@ -332,7 +337,7 @@ component App
     expect(built.status, built.stdout + built.stderr).toBe(0);
     server = Bun.serve({ hostname: '127.0.0.1', port: 0, fetch(request) {
       const path = new URL(request.url).pathname;
-    if (path === '/rt.js') return new Response('export const DEVELOPMENT_STORE = \"fixture\"; export const Kept = () => \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
+    if (path === '/rt.js') return new Response('export const Hosts = {}, KeyEvent = null, Propagating = null; export const DEVELOPMENT_STORE = \"fixture\"; export const Kept = () => \"exact.state.\";', { headers: { 'content-type': 'text/javascript' } });
       return new Response(Bun.file(resolve(dist, path === '/' ? 'index.html' : path.slice(1))), { headers: { 'cache-control': 'no-store' } });
     } });
     browser = await suiteBrowser();
@@ -351,9 +356,10 @@ component App
       await page.evaluate(key => localStorage.setItem('exact.state.#scheme', localStorage.getItem(key)), key);
       key = 'exact.state.#scheme';
     } else if (wasm) {
-      // Use the retained target's document composer, with its own origin-scoped runner key.
-      const rendered = spawnSync(resolve(root, 'target/debug/caltrain-render'), ['--plan', resolve(dist, 'app.plan'),
-        '--shell', resolve(root, 'host/web/index.html'), '--build'], { encoding: 'utf8' });
+      // The retained target's document composer, with its own origin-scoped runner key, built from this checkout and run
+      // as host/web/build.mjs runs it.
+      const rendered = spawnSync('cargo', ['run', '-q', '-p', 'caltrain-linux', '--bin', 'caltrain-render', '--', '--plan', resolve(dist, 'app.plan'),
+        '--shell', resolve(root, 'host/web/index.html'), '--build'], { cwd: root, env: { ...process.env, BUN: process.execPath, EXACT_UPDATE_TRUST: 'development' }, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
       expect(rendered.status, rendered.stdout + rendered.stderr).toBe(0);
       const document = JSON.parse(rendered.stdout.trim());
       expect(document.error).toBeUndefined();
@@ -362,7 +368,7 @@ component App
       key = 'exact.state.#scheme';
     }
     let loaded = false;
-    await page.route(wasm ? '**/app.wasm*' : '**/app.js', async () => { loaded = true; });
+    await page.route(wasm ? '**/app.wasm*' : `**/${builtFile(dist, 'app.js')}`, async () => { loaded = true; });
     if (wasm) {
       await page.route('**/*glue.js', async () => {});
       await page.route('**/navigation.js', route => route.fulfill({ status: 200, body: '' }));
@@ -412,7 +418,7 @@ test.each([false, true])('named windows restore normally outside a development g
   const scheme = readFileSync(new URL('../web/scheme.js', import.meta.url), 'utf8');
   const server = Bun.serve({ port: 0, fetch(request) {
     const url = new URL(request.url);
-    if (url.pathname === '/rt.js') return new Response('export const DEVELOPMENT_STORE = null; export const Kept = () => "exact.state.";', { headers: { 'content-type': 'text/javascript' } });
+    if (url.pathname === '/rt.js') return new Response('export const Hosts = {}, KeyEvent = null, Propagating = null; export const DEVELOPMENT_STORE = null; export const Kept = () => "exact.state.";', { headers: { 'content-type': 'text/javascript' } });
     for (const [name, file] of [['commands.js', './commands.js'], ['frame-messages.js', '../web/frame-messages.js'], ['navigation.js', '../web/navigation.js'], ['prompt-glue.js', '../web/prompt-glue.js'], ['alert-message.js', '../web/alert-message.js'], ['menu-rows.js', '../web/menu-rows.js']]) {
       if (url.pathname === `/${name}`) return new Response(hostFixtureFile(new URL(file, import.meta.url)), { headers: { 'content-type': 'text/javascript' } });
     }

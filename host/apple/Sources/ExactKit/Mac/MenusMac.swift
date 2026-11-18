@@ -29,7 +29,13 @@ final class MenuHost: NSObject {
         let bubbled: Bool
         /// The run of `source` that opened it as its context menu (X77): its anchor.
         let run: UInt32?
-        weak var parent: NSView?
+        /// Its authored parent: the container of the node it was lifted out
+        /// of, as that node has it now. A material's arrival or departure
+        /// replaces a node's container (`updateMaterial`) while the popover
+        /// is out of it.
+        var parent: NSView? { home?.container ?? held }
+        private weak var home: NodeView?
+        private weak var held: NSView?
         weak var previous: NSView?
         var index: Int
         let selection: NSRange?
@@ -50,8 +56,9 @@ final class MenuHost: NSObject {
         init(_ popover: NodeView, source: NodeView?, previous: NSView?, run: UInt32?, bubbled: Bool = false) {
             self.popover = popover; self.source = source; sourced = source != nil; self.previous = previous; self.run = run
             self.bubbled = bubbled
-            parent = popover.superview
-            index = parent?.subviews.firstIndex(of: popover) ?? 0
+            held = popover.superview
+            if let node = popover.nodeSuperview, node.container === held { home = node }
+            index = held?.subviews.firstIndex(of: popover) ?? 0
             frame = popover.frame; value = popover.props["popover"]
             hasFallbacks = popover.style["position_try_fallbacks"] != nil
             selection = ((previous as? NSTextField)?.currentEditor() as? NSTextView)?.selectedRange()
@@ -222,7 +229,7 @@ final class MenuHost: NSObject {
     }
     func refresh() {
         guard let presenter else { return }
-        presenter.navigation.refreshInputGates(Array(presenter.views.values))
+        presenter.inputGates.refresh(Array(presenter.views.values))
         presenter.topLayerChanged()
         presenter.syncKeyViewLoop()
         presenter.syncAccessibility()
@@ -448,7 +455,7 @@ final class MenuHost: NSObject {
         if let presenter, let at = PositionArea.inset(of: pop, viewport: presenter.clientSize) {
             return presenter.point(fromClient: at, in: source)
         }
-        let column = presenter.map { $0.navigation.split.pane(holding: source) ?? $0.viewport }
+        let column = presenter.map { $0.navigation.stackSplit.pane(holding: source) ?? $0.viewport }
         let bounds = column.map { source.convert($0.bounds, from: $0) } ?? .infinite
         return PositionArea.origin(PositionArea.of(pop), anchor: anchor(source, in: source), size: menu.size,
                                    margins: PositionArea.margins(of: pop), overflow: .platform, in: bounds)
@@ -636,7 +643,7 @@ final class MenuHost: NSObject {
         // A sheet's window and a popover's hold this session's nodes alone.
         if window !== viewport.window {
         } else if let owner = focusOwner(window) {
-            guard owner === viewport || owner.isDescendant(of: viewport) || presenter?.navigation.split.holdsFocus(owner) == true else { return false }
+            guard owner === viewport || owner.isDescendant(of: viewport) || presenter?.navigation.stackSplit.holdsFocus(owner) == true else { return false }
         } else if presenter?.session?.view?.ownsShortcutFocus() == false { return false }
         guard let last = entries.last(where: { $0.value != "manual" }),
               (window.firstResponder as? NSTextInputClient)?.hasMarkedText() != true else { return false }
@@ -979,7 +986,7 @@ final class MenuHost: NSObject {
             (view as? NodeView)?.style["display"]?.string == "none" || (view.isHidden && !pops.contains { $0 === view })
         }
     }
-    func title(of v: NodeView) -> String {
+    package func title(of v: NodeView) -> String {
         if v.kind == "text" { return v.paragraphSpec().runs.map(\.text).joined() }
         // A native button's children are its face, not views: its title, else its label.
         if v.isNativeButton { return [v.face?.shown, v.face?.subtitle].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " — ") }
@@ -988,8 +995,7 @@ final class MenuHost: NSObject {
         if v.isButton, let face = v.face, face.fits, let shown = face.shown { return shown }
         // Its accessible name: an `aria-hidden` child (a submenu row's `›`,
         // which the platform menu draws itself) is not part of it.
-        return v.container.subviews
-            .compactMap { $0 as? NodeView }
+        return v.childNodes
             .filter { $0.props["accessibilityElementsHidden"] != "true" }
             .map(title(of:))
             .filter { !$0.isEmpty }

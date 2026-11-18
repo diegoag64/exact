@@ -646,6 +646,8 @@ impl PlanBuilder {
             transient: false,
             keep: false,
             gate: ArgsRange { start: 0, len: 0 },
+            owner: None,
+            late: false,
         });
         ResourcesId(self.plan.resources.len() as u32 - 1)
     }
@@ -661,6 +663,8 @@ impl PlanBuilder {
             refreshes: MutationRefreshesRange { start: 0, len: 0 },
             then: None,
             mode: MutationMode::Newest,
+            owner: None,
+            then_args: ArgsRange { start: 0, len: 0 },
         });
         MutationsId(self.plan.mutations.len() as u32 - 1)
     }
@@ -668,6 +672,19 @@ impl PlanBuilder {
     /// The action run after each of `mutation`'s answers lands.
     pub fn set_mutation_then(&mut self, mutation: MutationsId, action: ActionsId) {
         self.plan.mutations[mutation.0 as usize].then = Some(action);
+    }
+
+    /// Make a mutation owned by an arm's instance (LLP 1035.005.004 D6):
+    /// each instance sends on its own.
+    pub fn set_mutation_owner(&mut self, mutation: MutationsId, arm: ArmsId) {
+        self.plan.mutations[mutation.0 as usize].owner = Some(arm);
+    }
+
+    /// The arguments `mutation`'s `then` action takes, read in the frames
+    /// of the instance whose send answered (LLP 1035.005.004 D6).
+    pub fn set_mutation_then_args(&mut self, mutation: MutationsId, args: &[Code]) {
+        let range = self.args(args);
+        self.plan.mutations[mutation.0 as usize].then_args = range;
     }
 
     /// `mutation … queue` (LLP 1092 D1), whose sends wait their turn, or
@@ -910,6 +927,8 @@ impl PlanBuilder {
         let always = self.constant(&Value::Bool(true));
         let name = self.str("");
         self.plan.timers.push(TimersRow {
+            owner: None,
+            args: ArgsRange::default(),
             change: false,
             interval_ms,
             wait: 0,
@@ -925,6 +944,14 @@ impl PlanBuilder {
             key: always,
         });
         TimersId(self.plan.timers.len() as u32 - 1)
+    }
+
+    /// An instance's task and the captured arguments its action reads (LLP 1035.005.004 D6).
+    pub fn set_timer_owner(&mut self, timer: TimersId, owner: Option<ArmsId>, args: &[Code]) {
+        let args = self.args(args);
+        let row = &mut self.plan.timers[timer.0 as usize];
+        row.owner = owner;
+        row.args = args;
     }
 
     /// Set the admission kind and optional waiting bound (LLP 1147).
@@ -1176,6 +1203,18 @@ impl PlanBuilder {
     /// Keep only successful live publications of this surface reader.
     pub fn set_resource_keep(&mut self, id: ResourcesId) {
         self.plan.resources[id.0 as usize].keep = true;
+    }
+
+    /// Make a resource owned by an arm's instance (LLP 1035.005.004 D1): one
+    /// request per instance, asked after the render that makes it.
+    pub fn set_resource_owner(&mut self, id: ResourcesId, arm: ArmsId) {
+        self.plan.resources[id.0 as usize].owner = Some(arm);
+    }
+
+    /// Make a resource settled with the root's once the `late` slots of the
+    /// child that declares it are initialized (LLP 1035.005.004 D2).
+    pub fn set_resource_late(&mut self, id: ResourcesId) {
+        self.plan.resources[id.0 as usize].late = true;
     }
 
     /// A resource's `when` (LLP 1161.002 D1): the condition under which it is asked.

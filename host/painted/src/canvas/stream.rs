@@ -28,7 +28,7 @@ pub(super) fn keep(ops: Option<Vec<u32>>) {
 pub(super) fn reader_replaced() {
     FINISHED.with(|f| *f.borrow_mut() = None);
     streams().clear();
-    pending().clear();
+    with_pending(|p| p.clear());
 }
 
 pub(super) fn next_stream() -> Option<Vec<u32>> {
@@ -91,12 +91,15 @@ pub(super) fn end(b: &[u32], i: usize) -> Option<usize> {
         picture::IMAGE_TINT | picture::IMAGE_RENDERING => i + 2,
         gradient::SHADER => i + 2 + at(1)?,
         glyphs::BLUR => i + 2,
+        filter::FILTER => i + 2 + at(1)?,
+        filter::FILTER_END => i + 1,
         ANIMATED => i + 3 + words(at(2)?),
         BACKDROP => i + 14 + 2 * at(1)?,
         NATIVE => i + 16 + words(at(15)?),
         40 => i + 27, // SHADOW
         ROW_BEGIN => i + 6 + at(5)?,
         ROW_DRAW => i + 4,
+        ROW_DRAW_THROUGH => i + 8,
         RING => i + 26,
         SLOT_SET | LAYER_SET | TRACKS => i + 3 + at(2)?,
         CLOCK => i + 3,
@@ -226,6 +229,8 @@ pub(super) struct Direct {
 
 impl Recorder {
     pub(super) fn finish_stream(&mut self) -> Result<Pixmap, String> {
+        self.ops
+            .extend(self.freed_rows.drain(..).flat_map(|id| [ROW_FREE, id]));
         self.layers_finish();
         if self.direct.surfaces == 1
             && !self.direct.backdrop
@@ -264,6 +269,114 @@ mod tests {
     use super::*;
 
     #[test]
+    fn memory_trim_frees_canvas_rows_without_freeing_their_replacements() {
+        trimmed_rows("memory");
+    }
+
+    #[test]
+    fn hidden_trim_frees_canvas_rows_without_freeing_their_replacements() {
+        trimmed_rows("hidden");
+    }
+
+    fn trimmed_rows(trim: &str) {
+        use crate::presenter::{PainterChoice, Presenter};
+        use std::collections::HashSet;
+
+        for trim in ["none", trim] {
+            for remove in [true, false] {
+                let (mut p, error) = Presenter::boot_with_fixture_fonts(
+                    &crate::test_plan(
+                        r##"component App
+  state visible = true
+  action remove
+    visible = false
+  view
+    column
+      box testId="remove" press=remove width=40 height=20
+      if visible
+        scroll width=200 height=200
+          column
+            box width=200 height=50 background-color="#123456"
+            box width=200 height=50 background-color="#abcdef"
+"##,
+                    ),
+                    (),
+                    (240., 240.),
+                    1.,
+                    std::path::PathBuf::new(),
+                    PainterChoice::Canvas,
+                )
+                .unwrap();
+                assert!(error.is_none(), "{error:?}");
+                let mut rows = HashSet::new();
+                let mut freeing = Vec::new();
+                let mut frame = |p: &mut Presenter<()>| {
+                    p.frame();
+                    let ops = FINISHED.with(|f| f.borrow_mut().take()).unwrap();
+                    // ExactView applies ROW_FREE when the following stream arrives.
+                    for id in freeing.drain(..) {
+                        assert!(
+                            rows.remove(&id),
+                            "{trim}, remove={remove}: unknown row {id}"
+                        );
+                    }
+                    let mut at = 0;
+                    while at < ops.len() {
+                        match ops[at] {
+                            ROW_BEGIN => {
+                                assert!(rows.insert(ops[at + 1]), "a live row ID was reused");
+                            }
+                            ROW_FREE => freeing.push(ops[at + 1]),
+                            ROW_DRAW => assert!(
+                                rows.contains(&ops[at + 1]),
+                                "{trim}, remove={remove}: drawing a freed row"
+                            ),
+                            _ => (),
+                        }
+                        at = end(&ops, at).expect("valid Canvas stream");
+                    }
+                    (rows.len(), freeing.len())
+                };
+                assert_eq!(frame(&mut p), (2, 0));
+                match trim {
+                    "memory" => p.memory_warning(),
+                    "hidden" => {
+                        let page = p.host().runner().page();
+                        assert!(p
+                            .set_page(exact_runner::Page {
+                                hidden: true,
+                                ..page
+                            })
+                            .is_none());
+                        assert!(p.set_page(page).is_none());
+                    }
+                    _ => (),
+                }
+                if remove {
+                    let k = p.host().kernel();
+                    let id = k.node_by_key(k.find_by_test_id("remove")[0]).unwrap().id;
+                    assert!(p
+                        .host_mut()
+                        .dispatch_at(id, exact_runner::Event::Press, 0.)
+                        .is_none());
+                    assert!(p.after_commit().is_none());
+                }
+                let trimmed = trim != "none";
+                assert_eq!(
+                    frame(&mut p),
+                    (
+                        if trimmed && !remove { 4 } else { 2 },
+                        if trimmed || remove { 2 } else { 0 }
+                    ),
+                    "{trim}, remove={remove}: row frees must reach the reader"
+                );
+                assert_eq!(frame(&mut p), (if remove { 0 } else { 2 }, 0));
+                assert_eq!(frame(&mut p), (if remove { 0 } else { 2 }, 0));
+            }
+        }
+    }
+
+    #[test]
     fn entering_shared_state_after_an_ordinary_frame_preserves_both_boundaries() {
         let old = vec![IMAGE_DEF, 7, 10, 10, IMAGE, 7, 0, 0, 10, 10];
         let state = vec![shared::STATE, 5, 0, 0, 1, 9, 0, shared::DRAW, 9, 0];
@@ -296,7 +409,7 @@ mod tests {
             text "Second line"
 "##;
         for scale in [1., 2.625] {
-            let (mut p, error) = Presenter::boot_with(
+            let (mut p, error) = Presenter::boot_with_fixture_fonts(
                 &crate::test_plan(source),
                 (),
                 (411., 500.),
@@ -376,7 +489,7 @@ mod tests {
             let source = format!(
                 "component App\n  view\n    iframe src=\"https://example.com/\" width=100 height=100{attribute}\n"
             );
-            let (mut p, error) = Presenter::boot_with(
+            let (mut p, error) = Presenter::boot_with_fixture_fonts(
                 &crate::test_plan(&source),
                 (),
                 (200., 200.),
@@ -435,7 +548,7 @@ component App
               button id="back" press=back width=100 height=40
                 text "Back"
 "##;
-        let (mut p, error) = Presenter::boot_with(
+        let (mut p, error) = Presenter::boot_with_fixture_fonts(
             &crate::test_plan(source),
             (),
             (400., 500.),
@@ -508,7 +621,7 @@ component App
     fn a_hosted_hit_names_the_native_contents_painted_origin() {
         use crate::presenter::{PainterChoice, Presenter};
         for scale in [1., 2., 2.75] {
-            let (mut p, error) = Presenter::boot_with(
+            let (mut p, error) = Presenter::boot_with_fixture_fonts(
                 &crate::test_plan(r##"component App
   view
     view margin=10.25 padding=12 width=350 height=350
@@ -549,7 +662,7 @@ component App
     #[test]
     fn turned_boxes_record_shapes_without_cpu_pictures() {
         use crate::presenter::{PainterChoice, Presenter};
-        let (mut p, error) = Presenter::boot_with(
+        let (mut p, error) = Presenter::boot_with_fixture_fonts(
             &crate::test_plan("component App\n  view\n    view perspective=600 width=200 height=100 margin=100\n      view rotate=\"y 40deg\" width=200 height=100 background-color=\"#ff0000\"\n        text \"Turned card\" font-size=18 color=\"white\" margin=12\n"),
             (), (400., 400.), 3., std::path::PathBuf::new(), PainterChoice::Canvas,
         ).unwrap();
@@ -596,7 +709,7 @@ component App
             (recorded, drawn)
         }
 
-        let (mut p, error) = Presenter::boot_with(
+        let (mut p, error) = Presenter::boot_with_fixture_fonts(
             &crate::test_plan(
                 r##"component App
   state shown = false
@@ -858,11 +971,11 @@ component App
         recorder.ops = vec![IMAGE, 1, 0, 0, 1, 1];
         recorder.finish_stream().unwrap();
         assert!(waiting());
-        assert!(pending().contains_key(&1));
+        assert!(with_pending(|p| p.contains_key(&1)));
         reader_replaced();
         assert!(!waiting());
         assert!(FINISHED.with(|f| f.borrow().is_none()));
-        assert!(pending().is_empty());
+        assert!(with_pending(|p| p.is_empty()));
 
         let new = Picture::Canvas(Arc::new(Pixmap::new(2, 1).unwrap()));
         let mut recorder = Recorder::new();
@@ -870,7 +983,7 @@ component App
         recorder.finish_stream().unwrap();
         let newest = FINISHED.with(|f| f.borrow_mut().take());
         assert_eq!(after_turn(newest), Some(vec![IMAGE_DEF, 1, 2, 1]));
-        assert_eq!(pending().remove(&1).unwrap().key(), new.key());
+        assert_eq!(with_pending(|p| p.remove(&1)).unwrap().key(), new.key());
         assert!(next_stream().is_none());
     }
 }

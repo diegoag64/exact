@@ -168,14 +168,49 @@ extension ExactSession {
     /// before it (a published reply or tick) and a timer due after it carry
     /// none: their glass is drawn at once. So do events the app's own script
     /// can cause as well as a person: focus, a selection, a scroll, a
-    /// dialog's close and a popover's `toggle`.
+    /// dialog's close and a popover's `toggle`. Beside a staged batch the
+    /// input on `id` is admitted as `admit` says (LLP 1072 T13).
     // Input without a touch hit test still installs ownership before its runner call.
-    func applyInput(_ input: @autoclosure () -> Batch) {
+    func applyInput(_ input: @autoclosure () -> Batch, at id: UInt32? = nil) {
+        guard admits(id) else { return }
         #if os(iOS)
         presenter.navigation.finishBootOwner()
         #endif
+        if clock == nil { followOffset() } // (the input reads the date: after a sleep, a press can come before any frame)
         var batch = input()
         batch.input = CACurrentMediaTime()
         apply(batch)
     }
 }
+
+#if os(iOS) || os(tvOS)
+import UIKit
+
+extension Presenter {
+    /// A hatch's act on an authored element, as the DOM's: `click()` presses
+    /// it as a tap does, `focus()` and `blur()` follow the focus rules. Each
+    /// is queued (`ElementHatches.later`) and runs on a later turn. False when
+    /// refused.
+    package func hatchAct(_ id: UInt32, _ action: UInt32) -> Bool {
+        guard let node = views[id] else { return false }
+        switch action {
+        case 0:
+            guard node.handlers.contains("press"), !node.disabled else { return false }
+            // Still the node it was when asked: a reload restarts node ids.
+            return elements.later(id, "click") { [weak self, weak node] in
+                if let self, let node, self.views[id] === node { self.session?.log("hatch \(node.props["hatch"].map { "element \($0) #\(id)" } ?? "node #\(id)"): click (delivery: hatch)"); self.press(id) }
+            }
+        case 1:
+            return elements.later(id, "focus") { [weak self, weak node] in
+                if let self, let node, self.views[id] === node { self.focusNode(node) }
+            }
+        case 2:
+            return elements.later(id, "blur") { [weak self, weak node] in
+                if let self, let node, self.views[id] === node { _ = (node.textArea ?? node.field ?? node).resignFirstResponder() }
+            }
+        default: return false
+        }
+        return true
+    }
+}
+#endif

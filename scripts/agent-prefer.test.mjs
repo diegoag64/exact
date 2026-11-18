@@ -5,6 +5,17 @@ import { PREFERENCES, mediaHeard, preferGroups, preferWeb } from './agent-prefer
 import { MalformedOperation } from './agent-keys.mjs';
 import { pageReporter } from '../host/web/navigation/environment.js';
 
+test('screen-reader is a page substitute with three values', () => {
+  for (const value of ['on', 'off', 'unknown']) {
+    expect(preferGroups({ 'screen-reader': value }).page).toEqual({ 'screen-reader': value });
+  }
+  expect(() => preferGroups({ 'screen-reader': 'false' })).toThrow('screen-reader on|off|unknown');
+  const real = pageReporter(false, { document: { documentElement: {}, getElementById: () => null }, navigator: {}, getComputedStyle: () => ({ fontSize: "16px" }) });
+  expect(real.read()['screen-reader']).toBe('unknown');
+  real.prefer({ 'screen-reader': 'off' });
+  expect(real.read()['screen-reader']).toBe('unknown');
+});
+
 test('a near spelling of a fact is that fact', () => {
   for (const name of ['prefers-color-scheme', 'color-scheme', 'colorScheme', 'prefersColorScheme', 'Color_Scheme']) {
     expect(preferGroups({ [name]: 'dark' }).media).toEqual({ 'prefers-color-scheme': 'dark' });

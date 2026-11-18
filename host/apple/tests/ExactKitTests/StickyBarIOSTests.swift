@@ -41,7 +41,7 @@ final class StickyBarIOSTests: XCTestCase {
         view.layoutIfNeeded()
         let agent = Agent(session: session), deadline = Date().addingTimeInterval(5)
         func ready() -> Bool {
-            let top = session.presenter.navigation.primaryNavigation?.topViewController as? RouteController
+            let top = session.presenter.navigationHost.primaryNavigation?.topViewController as? RouteController
             return top?.node.props["testId"] == "route" && !agent.nativeInFlight()
         }
         while !ready() && Date() < deadline {
@@ -63,8 +63,8 @@ final class StickyBarIOSTests: XCTestCase {
         let session = try XCTUnwrap(self.session)
         let list = try node("list")
         let sv = try XCTUnwrap(list.scrollView, "the list is a UIScrollView")
-        let nav = try XCTUnwrap(session.presenter.navigation.primaryNavigation)
-        XCTAssertTrue(session.presenter.navigation.insetByUIKit(list), "UIKit insets the scroller under its bar")
+        let nav = try XCTUnwrap(session.presenter.navigationHost.primaryNavigation)
+        XCTAssertTrue(session.presenter.navigationHost.insetByUIKit(list), "UIKit insets the scroller under its bar")
         sv.contentOffset.y = y - list.scrollTopInset(sv)
         RunLoop.main.run(until: Date().addingTimeInterval(0.5))
         XCTAssertEqual(sv.contentOffset.y + list.scrollTopInset(sv), y, accuracy: 0.5, "scrollTop")

@@ -144,7 +144,7 @@ public final class ExactView: UIView {
         // suppression still applies to its layers without a re-decode (D9).
         #if os(iOS)
         if #available(iOS 26, *) {
-            registerForTraitChanges([UITraitHDRHeadroomUsageLimit.self]) { (view: ExactView, _: UITraitCollection) in view.session.rasters.displayChanged() }
+            registerForTraitChanges([UITraitHDRHeadroomUsageLimit.self]) { (view: ExactView, _: UITraitCollection) in view.session.rasters?.displayChanged() }
         }
         #endif
         // A hinge moving from flat to a book angle changes the division
@@ -169,7 +169,7 @@ public final class ExactView: UIView {
 
     private func fitAheadOfLayout() {
         guard !fitting, session.booted, window != nil,
-              (session.presenter.navigation.primaryOwner ?? session.presenter.navigation.bootOwner) != nil, bounds.size != fittedSize else { return }
+              (session.presenter.navigation.primaryOwner ?? session.presenter.navigation.bootHolder) != nil, bounds.size != fittedSize else { return }
         fit()
         // Autoresizing may precede UIKit's safe-area update. The normal
         // layout still rereads insets and regions after its parent settles.
@@ -178,8 +178,15 @@ public final class ExactView: UIView {
 
     /// Paint motion resolves `light-dark()` by this view's appearance (LLP 1062).
     /// A system appearance change reaches the view as a trait change too:
-    /// `prefers-color-scheme` is told again (LLP 1069.000 D1).
-    private func reportScheme() { fitAheadOfLayout(); session.scheme(dark: traitCollection.userInterfaceStyle == .dark); session.tellPreferences(); session.natives.scopesChanged() }
+    /// `prefers-color-scheme` is told again (LLP 1069.000 D1), and the bars'
+    /// drawn items are drawn again in it.
+    private func reportScheme() {
+        fitAheadOfLayout()
+        session.scheme(dark: traitCollection.userInterfaceStyle == .dark)
+        session.tellPreferences()
+        session.natives.scopesChanged()
+        session.presenter.navigation.appearanceChanged()
+    }
     /// An app or window tint changed: `AccentColor` is reported again (LLP 1095 D9).
     public override func tintColorDidChange() { super.tintColorDidChange(); fitAheadOfLayout(); session.reportColors() }
 
@@ -218,7 +225,7 @@ public final class ExactView: UIView {
     public override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
         #if os(iOS)
         // A touch starts under the real owner, so its scroll cannot span the boot transfer.
-        if session.presenter.navigation.bootOwner != nil, event?.type == .touches { session.presenter.navigation.finishBootOwner() }
+        if session.presenter.navigation.bootHolder != nil, event?.type == .touches { session.presenter.navigation.finishBootOwner() }
         #endif
         return super.hitTest(point, with: event)
     }
@@ -286,7 +293,7 @@ public final class ExactView: UIView {
         #endif
         session.tellPage() // `hasFocus` is this window's scene's (#114)
         session.natives.scopesChanged()
-        session.rasters.setPaused(window == nil)
+        session.rasters?.setPaused(window == nil)
         session.canvases.refreshLifecycle()
         if window == nil {
             session.presenter.menus.unmounted()
@@ -360,7 +367,7 @@ public final class ExactView: UIView {
         // the page alone while a dialog sheet, which ends at the keys itself, is up.
         let covered = top.map { min(max(0, frame.maxY - max($0, frame.minY)), frame.height) } ?? 0
         keyboardCovers = covered
-        let overlap = presenter.menus.sheets.top == nil ? covered : 0
+        let overlap = presenter.dialogs.top == nil ? covered : 0
         presenter.setKeyboardInset(overlap)
         presenter.keyboardToolbars.ride(overlap: overlap)
         if top == nil { presenter.pinnedRoom.release() }
@@ -427,7 +434,7 @@ public final class ExactView: UIView {
         guard bounds.width > 0, bounds.height > 0 else { return }
         #if os(iOS)
         // A launch resize (including rotation) uses the native owner for the new geometry.
-        if fittedSize != .zero, bounds.size != fittedSize, presenter.navigation.bootOwner != nil { presenter.navigation.finishBootOwner() }
+        if fittedSize != .zero, bounds.size != fittedSize, presenter.navigation.bootHolder != nil { presenter.navigation.finishBootOwner() }
         #endif
         fittedSize = bounds.size
         // @ref LLP 1123 D1 — the document is the session view's; a
@@ -443,7 +450,7 @@ public final class ExactView: UIView {
         var insets = cover ? safe : .zero
         let keyboard = fitKeyboard(in: frame)
         if presenter.keyboardPolicy == "resizes-content", !presenter.navigation.wantsWholeView,
-           let top = keyboard.top, top < frame.maxY, presenter.menus.sheets.top == nil {
+           let top = keyboard.top, top < frame.maxY, presenter.dialogs.top == nil {
             frame.size.height = max(0, top - frame.minY)
             insets.bottom = 0
         }
@@ -502,7 +509,7 @@ public final class ExactView: UIView {
         }
         presenter.placeDocumentMount()
         // Establish UIKit's containing bounds before sampling route blocks.
-        if let owner = presenter.navigation.primaryOwner ?? presenter.navigation.bootOwner {
+        if let owner = presenter.navigation.primaryOwner ?? presenter.navigation.bootHolder {
             presenter.navigation.fitOwner()
             owner.view.layoutIfNeeded()
         }
@@ -610,11 +617,11 @@ public final class ExactView: UIView {
         // keyboard rising is not a smaller display, and a shrink trims
         // the cold cache and reduces queued decodes to fit.
         let scale = max(1, traitCollection.displayScale)
-        session.rasters.fit(size: bounds.size, scale: scale)
+        session.rasters?.fit(size: bounds.size, scale: scale)
         if scale != lastDisplayScale {
             lastDisplayScale = scale
             session.apply(session.runtime.canvasDisplay(scale: scale, memory: ProcessInfo.processInfo.physicalMemory))
-            session.rasters.displayChanged()
+            session.rasters?.displayChanged()
             session.tellDisplayScale() // a hairline is one device pixel of this display (LLP 1115.000 D10.3)
             session.presenter.regridAll()
         }

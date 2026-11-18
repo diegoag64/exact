@@ -90,7 +90,7 @@ extension Presenter {
         // popovers lifted over a dialog's sheet, as over the page. The sheet
         // leaves the bar to the screen under it.
         let roots = [session?.view].compactMap { $0 } + modals.surfaces(includingRetiring: false).map(\.view) + menus.sheetLayers
-        let lifted = Set(navigation.controllers.values.compactMap { $0.lifted.map(ObjectIdentifier.init) })
+        let lifted = Set(navigation.routeSurfaces.values.compactMap { $0.lifted.map(ObjectIdentifier.init) })
         func shows(_ node: NodeView) -> Bool {
             // `visibility` is inherited and a child may show again: the node's own.
             guard node.window != nil, !node.cssVisibilityHidden else { return false }

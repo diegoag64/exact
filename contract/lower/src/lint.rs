@@ -2,8 +2,8 @@
 //! and its literal style values against their rows.
 
 use crate::{dataset, native, shorthands, svg, tags, values, LowerError, MAX_REFUSALS};
-use contract_syntax::{Attr, Expr, File, Node, Span};
-use contract_types::Ty;
+use contract_syntax::{Attr, Component, Expr, File, Node, Span};
+use contract_types::{Scope, Ty};
 use exact_kernel::StyleId;
 use exact_motion::animation::LONGHANDS;
 
@@ -473,6 +473,20 @@ fn shorthand(a: &Attr, names: &Substituted) -> Result<(), LowerError> {
         return Ok(());
     }
     shorthands::component(&a.value, &a.name, 0).map(|_| ())
+}
+
+/// A press offset's known derive arms, with local names retaining their scope.
+pub(crate) fn press_translation_arms(a: &Attr, root: &Component, scope: &Scope) -> Attr {
+    let names = Substituted {
+        derives: root.derives.iter().enumerate().filter_map(|(i, d)| {
+            matches!(scope.lookup(&d.name), Some((contract_types::Ref::Derive(j), _)) if j as usize == i)
+                .then_some((d.name.as_str(), &d.expr))
+        }).collect(),
+        ..Substituted::default()
+    };
+    let mut budget = DERIVE_READS;
+    let value = known_arms(&a.value, &names, &mut budget).unwrap_or_else(|| a.value.clone());
+    Attr { value, ..a.clone() }
 }
 
 /// At most this many derive bodies read into one value: a derive read twice

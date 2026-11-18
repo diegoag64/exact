@@ -53,7 +53,7 @@ public final class ExactSidebarController: NSSplitViewController {
     /// 144 it is the narrowest a window that splits goes, whoever sizes it.
     public init(view exact: ExactView, autosaveName: String?, minimumPageWidth: CGFloat, sidebar: Bool = true, minimumDetailWidth: CGFloat? = nil) {
         self.minimumDetailWidth = minimumDetailWidth ?? minimumPageWidth
-        let list = sidebar ? SidebarList(host: exact.session.presenter.sidebar) : nil, page = NSViewController()
+        let list = sidebar ? SidebarList(host: exact.session.presenter.sidebarHost) : nil, page = NSViewController()
         page.view = NSView()
         exactView = exact
         self.list = list
@@ -75,8 +75,8 @@ public final class ExactSidebarController: NSSplitViewController {
         exact.translatesAutoresizingMaskIntoConstraints = false
         page.view.addSubview(exact)
         pin()
-        exact.session.presenter.sidebar.attach(self)
-        exact.session.presenter.navigation.split.attach(self)
+        exact.session.presenter.sidebarHost.attach(self)
+        exact.session.presenter.navigationHost.split.attach(self)
     }
     public required init?(coder: NSCoder) { nil }
 
@@ -118,15 +118,15 @@ public final class ExactSidebarController: NSSplitViewController {
         view.frame = NSRect(origin: .zero, size: window.contentView?.frame.size ?? window.frame.size)
         window.contentViewController = self
         // In its window now: a stack that splits shows its pane, with no batch to say so.
-        exactView.session.presenter.navigation.split.sync()
+        exactView.session.presenter.navigationHost.split.sync()
     }
 
     /// The view leaves the pane, placed by frames again: the owner makes it
     /// the window's content when the root has no tab bar for a sidebar and
     /// no stack that splits.
     public func release() {
-        exactView.session.presenter.navigation.split.detach(self)
-        exactView.session.presenter.sidebar.detach(self)
+        exactView.session.presenter.navigationHost.split.detach(self)
+        exactView.session.presenter.sidebarHost.detach(self)
         NSLayoutConstraint.deactivate(pins)
         pins = []
         pinnedCover = nil

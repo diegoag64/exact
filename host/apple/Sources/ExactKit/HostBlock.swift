@@ -5,7 +5,7 @@ import Foundation
 import CExact
 
 /// The containing block a native container gives one subtree, in points.
-struct HostBlock: Equatable {
+package struct HostBlock: Equatable {
     /// One axis: a size, a maximum, a limit for automatic content fitting, or
     /// the region a `position-area` option places the box in (fit-content
     /// across, min-content winning; its content's height down).

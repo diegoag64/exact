@@ -1,10 +1,10 @@
 {
   "ticks": {
-    "0": "0x68106967367bba41",
-    "1080": "0xda0f6d59b34ce9c4"
+    "0": "0x91f4a0b6b05493ae",
+    "1080": "0x7f3d4d796c3be783"
   },
   "saves": {
-    "continuation": "d23255568890326954b52638fc343ea277c95f9b27cfce2e06bfa46a7a70215c"
+    "continuation": "ce1249dbb1f210d1580f9784c4443805771deab664309d556a32905ffc9ce410"
   },
   "hosts": [
     "linux",
@@ -18,10 +18,10 @@
   "profiles": [
     "gpu-dev"
   ],
-  "inputs": "a07fe6f24747d81d8171210ef02975e0d886592c509ac3800c1f70ae7b69c901",
-  "sourceInputs": "1665d7feccd0febdec7c1e7e27b571c14e0feea927b0cddfa50670cce83931f6",
+  "inputs": "b3556891e25ed667ef17f7e897fa1d690f19a34aa0c28873c5b803e29c434aec",
+  "sourceInputs": "7700f9a056622e208d94794a17b9f29ebdde6fb746f8ed3a6fecefb15883524a",
   "game": "rivals",
   "generated": "bun game/prove.mjs rivals --repin --hosts 'linux,web'",
-  "at": "6c0919ce30568f0df0724536667df9afdf36ad29",
-  "reason": "Body records write default ccd, force and inertia"
+  "at": "fb6d7b4121165c7cc0c8ee1fd40fb7c23e43956a",
+  "reason": "Collider saves write every field; hashes and continuation bytes change."
 }

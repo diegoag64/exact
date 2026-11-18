@@ -244,3 +244,66 @@ fn declared_audio_and_xhtml_types_compile_and_accept_agent_picks() {
         std::panic::resume_unwind(error);
     }
 }
+
+/// LLP 1173 D2: `startIn=` trails each picker's arguments and makes either
+/// `saveFile` form five; a call without it lowers as before.
+#[test]
+fn start_in_trails_the_pickers_and_save_file() {
+    let src = r#"component App
+  state folder = "doc:/4/notes"
+  action a
+    showOpenFilePicker("x", startIn="pictures")
+  action b
+    showOpenFilePicker("x", true, startIn=folder)
+  action c
+    showDirectoryPicker("x", startIn="downloads")
+  action d
+    showSaveFilePicker("x", "a.png", startIn="screenshots")
+  action e
+    saveFile("x", "app:/data/a.png", "a.png", startIn="pictures")
+  action f
+    saveFile("x", text="t", suggestedName="a.md", startIn="documents")
+  action g
+    showSaveFilePicker("x", "a.png")
+  action h
+    saveFile("x", "app:/data/a.png", "a.png")
+  view
+    input id="x" display="none"
+"#;
+    let mut r = boot(src);
+    let (s, none) = (Value::str, Value::Option(None));
+    let cases = [
+        ("a", vec![s("x"), none.clone(), s("pictures")]),
+        ("b", vec![s("x"), Value::Bool(true), s("doc:/4/notes")]),
+        ("c", vec![s("x"), s("downloads")]),
+        ("d", vec![s("x"), s("a.png"), s("screenshots")]),
+        (
+            "e",
+            vec![
+                s("x"),
+                s("app:/data/a.png"),
+                s("a.png"),
+                none.clone(),
+                s("pictures"),
+            ],
+        ),
+        (
+            "f",
+            vec![s("x"), none.clone(), s("a.md"), s("t"), s("documents")],
+        ),
+        ("g", vec![s("x"), s("a.png")]),
+        ("h", vec![s("x"), s("app:/data/a.png"), s("a.png")]),
+    ];
+    for (action, args) in cases {
+        r.act(action, vec![]).unwrap();
+        let commands = r.take_commands();
+        assert_eq!(commands.len(), 1, "{action}");
+        let got: Vec<_> = (commands[0].args.iter())
+            .map(|v| match v {
+                Value::Option(Some(v)) => (**v).clone(),
+                v => v.clone(),
+            })
+            .collect();
+        assert_eq!(got, args, "{action}");
+    }
+}

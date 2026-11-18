@@ -49,5 +49,9 @@
     // log. The prelude's files take it, and intl.js deletes it before the app
     // loads: it is not the app's to call.
     global.__exact_runtime_line = function (line) { writeLog(string(line), ''); };
+    // An error event no listener cancelled, as a browser's console prints
+    // it: written to the platform's log alone, at error level, as the
+    // runtime's line already journals it (LLP 1175 D5). prelude.js takes it.
+    global.__exact_uncaught = function (prefix, value) { writeLog(prefix + render(value), 'uncaught'); };
   }
 })(globalThis);

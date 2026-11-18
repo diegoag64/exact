@@ -138,6 +138,17 @@ impl Catalog {
             .retain(|(family, ..), _| !(*family >= first && *family < end));
         first..end
     }
+    pub(super) fn for_picture(&self, lists: &[Vec<(bool, String)>]) -> Self {
+        let mut catalog = Self::with_collection(
+            self.fonts.collection.clone(),
+            self.files.clone(),
+            &self.locale,
+        );
+        catalog.sans = self.sans.clone();
+        catalog.install_picture(lists);
+        catalog
+    }
+
     pub(super) fn install_picture(&mut self, lists: &[Vec<(bool, String)>]) {
         for list in lists {
             let chosen = self.installed_stack(list.iter().cloned());

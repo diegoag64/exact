@@ -16,6 +16,30 @@ pub struct Selection {
     pub assets: AssetResolver,
     /// Every name the signed asset index lists.
     pub names: Vec<String>,
+    /// The directory a reader opens files from (LLP 1030.006 D1).
+    /// Absent where the resolver has no directory.
+    pub dir: Option<std::path::PathBuf>,
+    /// Verify every file against its signed card before committing activation
+    /// or exposing the directory to a reader. Inspection leaves assets lazy.
+    pub verify_assets: Box<dyn Fn() -> Result<(), String> + Send + Sync>,
+}
+
+/// The running generation's asset directory, for a reader that opens
+/// sounds, videos and pages by path: a selected update's verified
+/// directory, or none for the embedded assets (LLP 1030.006 D1).
+static READER_ROOT: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// The reader's asset directory is now `dir` (none: the embedded assets).
+pub fn set_reader_root(dir: Option<std::path::PathBuf>) {
+    *READER_ROOT.lock().unwrap_or_else(|e| e.into_inner()) = dir;
+}
+
+/// The reader's asset directory, when an update's is running.
+pub fn reader_root() -> Option<std::path::PathBuf> {
+    READER_ROOT
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// Operations the presenter needs from a linked delivery adapter.
@@ -80,6 +104,25 @@ pub struct Module {
     pub bytes: Vec<u8>,
 }
 
+/// A validated roster and receipt; executable bytes stay unread while requests run.
+pub(crate) struct ModulePair {
+    pub receipt: String,
+    path: String,
+}
+
+impl ModulePair {
+    pub(crate) fn read(self, assets: &AssetResolver) -> Result<Module, String> {
+        let bytes = assets(&self.path)?.ok_or("missing module bytes")?;
+        if bytes.len() > 32 << 20 {
+            return Err("module exceeds 32 MiB".into());
+        }
+        Ok(Module {
+            receipt: self.receipt,
+            bytes: bytes.to_vec(),
+        })
+    }
+}
+
 impl Module {
     /// The generation's module pair, both halves read before either is
     /// admitted into a data source (LLP 1030.006 D4, the Apple loader's
@@ -92,6 +135,41 @@ impl Module {
         names: &[String],
         compat: &str,
     ) -> Result<Option<Self>, String> {
+        Self::prepare(assets, names, compat)?
+            .map(|pair| pair.read(assets))
+            .transpose()
+    }
+
+    /// Validate the signed pair and read its bounded receipt without loading code.
+    pub(crate) fn prepare(
+        assets: &AssetResolver,
+        names: &[String],
+        compat: &str,
+    ) -> Result<Option<ModulePair>, String> {
+        let Some(dir) = Self::directory(names, compat)? else {
+            return Ok(None);
+        };
+        let receipt =
+            assets(&format!("{dir}/app.module.json"))?.ok_or("missing module pairing receipt")?;
+        if receipt.len() > 1 << 20 {
+            return Err("module receipt exceeds 1 MiB".into());
+        }
+        let receipt = String::from_utf8(receipt.to_vec()).map_err(|e| e.to_string())?;
+        let json: serde_json::Value = serde_json::from_str(&receipt).map_err(|e| e.to_string())?;
+        let file = if dir == "typescript" {
+            "app.hbc".to_string()
+        } else {
+            json["module"]["file"].as_str().unwrap_or("").to_string()
+        };
+        let path = format!("{dir}/{file}");
+        if !names.contains(&path) || (dir == "rust" && !RUST_FILES.contains(&file.as_str())) {
+            return Err(format!("invalid signed {dir} module pair"));
+        }
+        Ok(Some(ModulePair { receipt, path }))
+    }
+
+    /// Validate the signed roster and binary policy without reading module bytes.
+    fn directory(names: &[String], compat: &str) -> Result<Option<&'static str>, String> {
         let in_dir = |dir: &str| names.iter().filter(|n| n.starts_with(dir)).count();
         let (rust, typescript) = (in_dir("rust/"), in_dir("typescript/"));
         let dir = match (rust, typescript) {
@@ -118,30 +196,20 @@ impl Module {
         {
             return Err("Rust replacement is disabled in this binary".into());
         }
-        let receipt =
-            assets(&format!("{dir}/app.module.json"))?.ok_or("missing module pairing receipt")?;
-        if receipt.len() > 1 << 20 {
-            return Err("module receipt exceeds 1 MiB".into());
+        if !names.contains(&format!("{dir}/app.module.json")) {
+            return Err("missing module pairing receipt".into());
         }
-        let receipt = String::from_utf8(receipt.to_vec()).map_err(|e| e.to_string())?;
-        let file = if dir == "typescript" {
-            "app.hbc".to_string()
+        let has_module = if dir == "typescript" {
+            names.contains(&"typescript/app.hbc".to_string())
         } else {
-            let json: serde_json::Value =
-                serde_json::from_str(&receipt).map_err(|e| e.to_string())?;
-            json["module"]["file"].as_str().unwrap_or("").to_string()
+            RUST_FILES
+                .iter()
+                .any(|file| names.contains(&format!("rust/{file}")))
         };
-        if rust + typescript != 2 || (dir == "rust" && !RUST_FILES.contains(&file.as_str())) {
+        if rust + typescript != 2 || !has_module {
             return Err(format!("invalid signed {dir} module pair"));
         }
-        let bytes = assets(&format!("{dir}/{file}"))?.ok_or("missing module bytes")?;
-        if bytes.len() > 32 << 20 {
-            return Err("module exceeds 32 MiB".into());
-        }
-        Ok(Some(Self {
-            receipt,
-            bytes: bytes.to_vec(),
-        }))
+        Ok(Some(dir))
     }
 
     /// Read the producer's selected local development executor directory.
@@ -228,7 +296,7 @@ impl Module {
 /// links; the plan's own are recomputed from it, and the permissions only
 /// the module's source shows are in its signed receipt. A binary that
 /// records no composition refuses nothing here.
-pub fn within_linked(plan: &[u8], module: Option<&Module>, compat: &str) -> Result<(), String> {
+pub fn within_linked(plan: &[u8], receipt: Option<&str>, compat: &str) -> Result<(), String> {
     let compat: serde_json::Value = serde_json::from_str(compat).unwrap_or_default();
     let linked = &compat["inputs"]["androidLinked"];
     if linked.is_null() {
@@ -247,8 +315,8 @@ pub fn within_linked(plan: &[u8], module: Option<&Module>, compat: &str) -> Resu
         .chain(plan.module_events.iter().map(|e| e.extension))
         .map(|name| plan.str(name).to_string())
         .collect();
-    let permissions: Vec<String> = module
-        .and_then(|m| serde_json::from_str::<serde_json::Value>(&m.receipt).ok())
+    let permissions: Vec<String> = receipt
+        .and_then(|r| serde_json::from_str::<serde_json::Value>(r).ok())
         .and_then(|r| r["androidPermissions"].as_array().cloned())
         .unwrap_or_default()
         .iter()
@@ -444,19 +512,23 @@ mod tests {
         assert_eq!(
             within_linked(
                 &plan,
-                Some(&module(&[calendar])),
+                Some(&module(&[calendar]).receipt),
                 &compat(&uses, &[calendar])
             ),
             Ok(())
         );
         let error = within_linked(&plan, None, &compat(&uses[1..], &[])).unwrap_err();
         assert!(error.contains(uses[0]), "{error}");
-        let error =
-            within_linked(&plan, Some(&module(&[calendar])), &compat(&uses, &[])).unwrap_err();
+        let error = within_linked(
+            &plan,
+            Some(&module(&[calendar]).receipt),
+            &compat(&uses, &[]),
+        )
+        .unwrap_err();
         assert!(error.contains("WRITE_CALENDAR"), "{error}");
         // A binary that records no composition refuses nothing here.
         assert_eq!(
-            within_linked(&plan, Some(&module(&[calendar])), "{}"),
+            within_linked(&plan, Some(&module(&[calendar]).receipt), "{}"),
             Ok(())
         );
     }

@@ -89,7 +89,7 @@ final class TipsIOSTests: XCTestCase {
         let session = try boot("tips", in: scene)
         let p = session.presenter
         let filter = try node(session, "filter"), add = try node(session, "add")
-        let item = try XCTUnwrap(p.navigation.tipItem(filter)?.0, "the header's button is a bar item")
+        let item = try XCTUnwrap(p.navigationHost.tipItem(filter)?.0, "the header's button is a bar item")
 
         waitFor("the Filter tip over its bar item") { (self.shownTip()?.1 as AnyObject?) === item }
         XCTAssertEqual(tips(session)["filter-tip"]?["shows"] as? Bool, true)

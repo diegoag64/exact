@@ -328,6 +328,7 @@ extension Agent {
         guard let d = session.agent("{\"op\":\"node\",\"id\":\(id),\"plan\":\(includePlan)}").data(using: .utf8),
               var node = (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] else { return ["error": "node #\(id): unreadable"] }
         if let e = node["error"] { return ["error": e] }
+        if let flat = flatLayout(node) { reply["node"] = flat; return reply }
         MainActor.assumeIsolated { if let held = HeldState.rows(for: UInt32(id), in: presenter) { node["held"] = held } } // what is held on it (LLP 1122 D8)
         if let leaf, let parent = presenter.flats.host(of: leaf.id), let frame = presenter.flats.frameInHost(leaf.id) {
             let b = box(parent, region: frame)
@@ -403,69 +404,11 @@ extension Agent {
         node["geometry"] = geometry(host, region: local)
         if let scroll = host.scroll { node["scrollGeometry"] = Self.scrollGeometry(scroll) }
         node["space"] = space
-        // Who hides or inerts it is named: a reader must not guess which
-        // ancestor did.
-        let describe = { (view: UIView) -> String in (view as? NodeView).map { "#\($0.id)" } ?? String(describing: Swift.type(of: view)) }
-        var hiddenBy: String? = host.isHidden || (host.alpha == 0 && host.placement == nil) ? describe(host) : nil
-        var inertBy: String? = host.isUserInteractionEnabled ? nil : describe(host)
-        var clipped = b.isEmpty
-        var chain: [[String: Any]] = []
-        var clippers: [(UIView, UInt32, String)] = []
-        var canvas: NodeView? = nil
-        var above = host.superview
-        while let s = above {
-            // A canvas child's overlay is transparent on purpose: the child
-            // is painted through the canvas's capture (LLP 1014 D5) and only
-            // hit here. That is not hidden; it is named.
-            if let o = s as? PlainView, let c = o.canvasOverlayOwner {
-                canvas = c
-                above = s.superview
-                continue
-            }
-            if hiddenBy == nil, s.isHidden || (s.alpha == 0 && (s as? NodeView)?.placement == nil) { hiddenBy = describe(s) }
-            if inertBy == nil, !s.isUserInteractionEnabled { inertBy = describe(s) }
-            if let sv = s as? ScrollView, let route = sv.superview?.next as? RouteController, route.contentViewport === sv {
-                let port = box(sv, region: sv.bounds.inset(by: sv.adjustedContentInset))
-                chain.append(["route": Int(route.node.id), "port": [port.minX, port.minY, port.width, port.height].map(Agent.r2)]
-                    .merging(Agent.offset(of: sv)) { a, _ in a }.merging(Agent.range(of: sv)) { a, _ in a })
-                clippers.append((sv, route.node.id, "viewport"))
-            }
-            if let n = s as? NodeView {
-                if let sv = n.scrollView { chain.append(["id": Int(n.id), "port": port(of: n, sv)].merging(Agent.offset(of: sv, top: n.scrollTopInset(sv))) { a, _ in a }.merging(Agent.range(of: sv)) { a, _ in a }) } // CSS scrollTop, as `tree` reads it
-                else if n.scrollDormant { chain.append(["id": Int(n.id), "sx": 0.0, "sy": 0.0, "rx": 0.0, "ry": 0.0]) }
-                if n.clipsToBounds || n.clipBox != nil { clippers.append((n, n.id, "overflow")) }
-                if n.clipPath != nil { clippers.append((n, n.id, "clip-path")) }
-            }
-            above = s.superview
-        }
-        // The viewport's scrolling, or none: a presentation's mount does not scroll (LLP 1123 D2)
-        let popoverLayer = PopoverLayer.containing(host)
-        let inViewport = popoverLayer.map { presenter.inDocument($0) } ?? (presenter.port(of: host) === vp)
-        var scroll: [[String: Any]] = [inViewport ? ["viewport": true].merging(Agent.offset(of: vp)) { a, _ in a }.merging(Agent.range(of: vp)) { a, _ in a }
-                                                  : ["presentation": true, "sx": 0.0, "sy": 0.0, "rx": 0.0, "ry": 0.0]]
-        scroll.append(contentsOf: chain.reversed())
-        var clip: [[String: Any]] = []
-        for (n, id, kind) in clippers.reversed() {
-            clip.append(["id": Int(id), "kind": kind])
-            if let w = host.window {
-                let intersects = kind == "overflow" && n is NodeView
-                    ? (n as! NodeView).overflowClipIntersects(host.convert(host.bounds, to: n))
-                    : host.convert(host.bounds, to: w).intersects(n.convert(n.bounds, to: w))
-                if !intersects { clipped = true }
-            }
-        }
-        node["scroll"] = scroll
-        node["clip"] = clip
-        // CSS `visibility: hidden` with nothing of it showing, or a hidden run (e28279b3b keeps the view).
-        if hiddenBy == nil, !host.accessibilityExposed || presenter.inlineText(UInt32(id))?.hidden == true { hiddenBy = "visibility" }
-        let reach = popoverLayer.map { box($0) } ?? presenter.reach(of: host)
-        var visible: [String: Any] = ["hidden": hiddenBy != nil, "inert": inertBy != nil, "inViewport": b.intersects(reach), "clipped": clipped]
-        if let hiddenBy { visible["hiddenBy"] = hiddenBy }
-        if let inertBy { visible["inertBy"] = inertBy }
-        node["visible"] = visible
+        let visibility = visibility(of: host, region: host.bounds, box: b, hidden: presenter.inlineText(UInt32(id))?.hidden == true)
+        node.merge(visibility.facts) { _, new in new }
         var native: [String: Any] = ["view": String(describing: Swift.type(of: v)), "sheet": presenter.modals.active]
         if presenter.inlineText(UInt32(id)) != nil { native["inline"] = true }
-        if let canvas { native["canvas"] = "#\(canvas.id)" }
+        if let canvas = visibility.canvas { native["canvas"] = "#\(canvas.id)" }
         if let f = host.field { native["editor"] = String(describing: Swift.type(of: f)); native["firstResponder"] = f.isFirstResponder }
         #if os(iOS)
         if let stepper = host.stepperObservation { native["stepper"] = stepper }
@@ -479,7 +422,7 @@ extension Agent {
         let tabs = navigation.adopts(tablist: host) ? navigation.tabController : nil
         let projectedBar = presenter.segments.bar(of: host.id)
         if tabs != nil || projectedBar != nil {
-            let shown = tabs?.shownTabBar ?? NavigationHost.shownBar(projectedBar)
+            let shown = tabs?.shownTabBar ?? RouteGeometry.shownBar(projectedBar)
             var observation: [String: Any] = ["visible": shown != nil]
             if let shown { observation["frame"] = rect(box(shown)) }
             native["tabBar"] = observation
@@ -516,10 +459,10 @@ extension Agent {
     /// sheet's swipe down. The system's button is no node, so no tap reaches it.
     func back() -> [String: Any] {
         #if os(iOS)
-        if ShareSheet.agentBack(in: session) || session.picker.agentBackDocument() { return backReply(("sheet", "")) }
+        if session.shareHost.agentBack(session) || session.picker.agentBackDocument() { return backReply(("sheet", "")) }
         #endif
         if let cancelled = presenter.menus.agentCancel() { return backReply(("dialog", cancelled ? "" : "the alert is still moving: `clock settle` first")) }
-        if let refused = presenter.menus.sheets.agentCancel() { return backReply(("dialog", refused)) }
+        if let refused = presenter.dialogs.agentCancel() { return backReply(("dialog", refused)) }
         if let refused = presenter.navigation.agentBack() { return backReply(("route", refused)) }
         return backReply(presenter.modals.agentDismiss().map { ("sheet", $0) })
     }
@@ -594,10 +537,15 @@ extension Agent {
             if let reply = recognizedPan(phase, req) { return reply }
             return ["phase": phase, "delivery": "unsupported", "reason": "no held contact across requests on iOS (LLP 1080.000 P3)"]
         }
+        let dismissFlat = flatBoxForRequest(req)
         // Light-dismiss before resolving the tap's press.
-        if let id = req["id"] as? Int, let node = presenter.views[UInt32(id)],
+        if let id = req["id"] as? Int, let node = presenter.views[UInt32(id)] ?? dismissFlat?.host,
            req["wheel"] == nil, req["hover"] == nil, req["contextmenu"] == nil, req["dblclick"] == nil {
-            presenter.menus.agentTap(node, landing: tapLanding(req, node: node))
+            let landing = dismissFlat.flatMap { flat in
+                tapPoint(req, node: node, drawn: box(flat.host.container, region: flat.rect))
+                    .flatMap { node.window?.hitTest(windowPoint($0), with: nil) }
+            } ?? tapLanding(req, node: node)
+            presenter.menus.agentTap(node, landing: landing)
         }
         if let id = req["id"] as? Int, let node = presenter.views[UInt32(id)],
            req["wheel"] == nil, req["hover"] == nil, req["contextmenu"] == nil, req["dblclick"] == nil,
@@ -614,7 +562,7 @@ extension Agent {
            req["wheel"] == nil, req["hover"] == nil, req["contextmenu"] == nil, req["dblclick"] == nil,
            tapHitsControl(node, request: req),
            let activated = presenter.controls.activate(node, before: { nativePointer(node, request: req, at: $0) }) {
-            if var unsupported = presenter.controls.unopened(node) {
+            if var unsupported = presenter.controls.family.unopened(node) {
                 unsupported["reason"] = (unsupported["reason"] as? String ?? "") + "; an iOS simulator can use --touch platform for a real touch"
                 return unsupported
             }
@@ -666,33 +614,51 @@ extension Agent {
             Agent.scroll(from: list, dx: CGFloat(wheel[0]), dy: CGFloat(wheel[1]))
             return ["tapped": id, "wheel": wheel]
         }
-        guard let v = view(req), let win = v.window else { return miss(req) }
-        var b = v.tapBox(box(v))
-        // A run is touched on a fragment it paints (the web's driver taps
-        // the span's), not at its paragraph's middle.
-        if ["at", "x", "y"].allSatisfy({ req[$0] == nil }), (req["id"] as? Int).map({ presenter.inlineText(UInt32($0)) != nil }) == true,
-           let q = tapPoint(req, node: v) { b = CGRect(origin: q, size: .zero) }
+        let flat = flatBoxForRequest(req)
+        guard let v = view(req) ?? flat?.host, let win = v.window else { return miss(req) }
         // A plain press: `at` is a point in the target, the press whatever a
         // finger there reaches; without one, the target's own press
         // (`AgentAddressedTap.swift`).
         let plain = ["wheel", "hover", "contextmenu", "dblclick", "pinch", "x", "y"].allSatisfy { req[$0] == nil } && v.kind != "iframe"
-        // A long press or a double tap at a point too: where its word is (LLP 1115.000 D11.6).
-        if req["x"] != nil || req["y"] != nil || req["at"] != nil && (plain || req["contextmenu"] as? Bool == true || req["dblclick"] as? Bool == true) {
-            if req["at"] != nil {
-                guard let at = req["at"] as? [Double], at.count == 2, at.allSatisfy(\.isFinite) else { return ["error": "tap at needs two finite numbers"] }
+        // The target's box as it is seen now, or the refusal.
+        func aimed() -> (box: CGRect, refusal: [String: Any]?) {
+            var b = flat.map { box($0.host.container, region: $0.rect) } ?? v.tapBox(box(v))
+            let flatBounds = flat == nil ? nil : b
+            // A run is touched on a fragment it paints (the web's driver taps
+            // the span's), not at its paragraph's middle.
+            if ["at", "x", "y"].allSatisfy({ req[$0] == nil }), (req["id"] as? Int).map({ presenter.inlineText(UInt32($0)) != nil }) == true,
+               let q = tapPoint(req, node: v) { b = CGRect(origin: q, size: .zero) }
+            // A long press or a double tap at a point too: where its word is (LLP 1115.000 D11.6).
+            if req["x"] != nil || req["y"] != nil || req["at"] != nil && (plain || req["contextmenu"] as? Bool == true || req["dblclick"] as? Bool == true) {
+                if req["at"] != nil {
+                    guard let at = req["at"] as? [Double], at.count == 2, at.allSatisfy(\.isFinite) else { return (b, ["error": "tap at needs two finite numbers"]) }
+                }
+                guard let point = tapPoint(req, node: v, drawn: flatBounds), point.x.isFinite, point.y.isFinite else { return (b, ["error": "tap needs finite coordinates"]) }
+                let whole = flatBounds ?? box(v)
+                guard whole.contains(point) else { return (b, ["error": "tap #\(v.id) at: (\(Agent.r2(point.x - whole.minX)), \(Agent.r2(point.y - whole.minY))) is outside its \(Agent.r2(whole.width))×\(Agent.r2(whole.height)) box"]) }
+                b = CGRect(x: point.x, y: point.y, width: 0, height: 0)
             }
-            guard let point = tapPoint(req, node: v), point.x.isFinite, point.y.isFinite else { return ["error": "tap needs finite coordinates"] }
-            let whole = box(v)
-            guard whole.contains(point) else { return ["error": "tap #\(v.id) at: (\(Agent.r2(point.x - whole.minX)), \(Agent.r2(point.y - whole.minY))) is outside its \(Agent.r2(whole.width))×\(Agent.r2(whole.height)) box"] }
-            b = CGRect(x: point.x, y: point.y, width: 0, height: 0)
+            return (b, nil)
         }
+        var aim = aimed()
+        if let refusal = aim.refusal { return refusal }
+        var b = aim.box
         // The middle of the box as seen — through a surface's placement when
         // there is one (LLP 1014 D5) — as a point in the window.
         let vp = presenter.viewport
         let window = { (q: CGPoint) in vp.convert(CGPoint(x: q.x + vp.pageOrigin.x, y: q.y + vp.pageOrigin.y), to: nil) }
         var p = window(CGPoint(x: b.midX, y: b.midY))
         var at = [Agent.r2(b.midX), Agent.r2(b.midY)]
-        if req["wheel"] == nil, req["hover"] == nil { awaitAppOverlay(at: p, in: win) }
+        // The wait runs the run loop, and what was pending there may move the
+        // target (a bar settling in a container the app took): it is aimed at
+        // again where it is after the wait, not where it was before it.
+        if req["wheel"] == nil, req["hover"] == nil, awaitAppOverlay(at: p, in: win) {
+            aim = aimed()
+            if let refusal = aim.refusal { return refusal }
+            b = aim.box
+            p = window(CGPoint(x: b.midX, y: b.midY))
+            at = [Agent.r2(b.midX), Agent.r2(b.midY)]
+        }
         let seen = win.hitTest(p, with: nil)
         // A finger lands only where the target is seen (LLP 1035.003: action
         // dispatch is never substituted for a contact), so a press, a menu or
@@ -703,13 +669,15 @@ extension Agent {
             return ["error": "tap #\(v.id): \(why)"]
         }
         var hit = seen ?? v
-        if req["wheel"] == nil, req["hover"] == nil, let why = obscured(v, at: p, hit: hit) {
+        if req["wheel"] == nil, req["hover"] == nil,
+           let why = obscured(v, at: p, hit: hit) ?? flat.flatMap({ flatObscured($0, at: p, hit: hit) }) {
             return ["error": "tap #\(v.id) at (\(at[0]), \(at[1])): \(why)"]
         }
         // Named, it presses what it names: its own press, never a control
         // inside it that its middle happens to reach.
         var avoided: PressReach?
-        if plain, req["at"] == nil, (req["id"] as? Int).map({ presenter.inlineText(UInt32($0)) == nil }) == true {
+        if let flat, plain, req["at"] == nil, let refusal = flatAddressed(flat, at: p, in: win) { return refusal }
+        if flat == nil, plain, req["at"] == nil, (req["id"] as? Int).map({ presenter.inlineText(UInt32($0)) == nil }) == true {
             switch addressedPoint(v, box: b, in: win) {
             case .refused(let refusal): return refusal.reply
             case .at(let q, let middle):
@@ -738,6 +706,10 @@ extension Agent {
                     MainActor.assumeIsolated { HeldState.input(at: hit) }
                     return ["tapped": Int(run.id), "event": event, "injected": true, "at": at]
                 }
+            }
+            // A finger's double tap (`dblclick touch`) on a zoomable scroller zooms where no authored `dblclick` takes it.
+            if event == "dblclick", req["touch"] as? Bool == true, let zoomed = NodeView.zoomDoubleTap(hit, at: p) {
+                return ["tapped": Int(zoomed.id), "dblclick": "touch", "delivery": "recognized", "scrollZoom": Double(zoomed.scroll?.zoomScale ?? 1), "at": at]
             }
             selection = presenter.agentSelect(hit, at: p, event: event)
             #endif
@@ -769,7 +741,11 @@ extension Agent {
         if let scale = req["pinch"] as? Double {
             // UIKit synthesizes no pinch: the recognized scale (LLP 1057.001 §5).
             var next: UIView? = v
-            while let view = next, !((view as? NodeView).map { presenter.transformBindings[$0.id]?.target != nil } ?? false) { next = view.superview }
+            while let view = next, !((view as? NodeView).map { presenter.transformBindings[$0.id]?.target != nil || $0.extras?.zoom != nil } ?? false) { next = view.superview }
+            if let port = next as? NodeView, port.extras?.zoom != nil {
+                let focal = (req["at"] as? [Double]).flatMap { $0.count == 2 ? v.convert(CGPoint(x: $0[0], y: $0[1]), to: nil) : nil } ?? p
+                return delivered(port.recognizedZoomPinch(scale, focal: focal).merging(["at": at]) { a, _ in a }, hit)
+            }
             guard let handle = next as? NodeView, let clipID = presenter.transformBindings[handle.id]?.clip, let clip = presenter.views[clipID] else {
                 return ["error": "no photo binding (transformDragFor) at view \(v.id)"]
             }
@@ -825,7 +801,8 @@ extension Agent {
         fingerPointer(.down, fingers, at: p, held: held)
         reach.rearm(presenter)
         fingerPointer(.up, fingers, at: p, held: held)
-        var reply: [String: Any] = ["tapped": Int(v.id), "at": at].merging(lift(reach, at: p, held: held)) { a, _ in a }
+        let tapped = flat == nil ? Int(v.id) : req["id"] as? Int ?? Int(v.id)
+        var reply: [String: Any] = ["tapped": tapped, "at": at].merging(lift(reach, at: p, held: held)) { a, _ in a }
         // Its middle reaches a control inside it: the tap landed beside it.
         if let avoided { reply["avoided"] = ["middle": [Agent.r2(b.midX), Agent.r2(b.midY)], "pressing": avoided.pressing ?? NSNull(), "what": avoided.described] as [String: Any] }
         if let why = unreached { reply["unreached"] = "Contract's pointer listeners heard it, but it \(why)" }
@@ -889,7 +866,7 @@ extension Agent {
         }
         guard let node, !node.inert else { return .nothing }
         let local = node.local(p)
-        if node.kind == "svg", let element = presenter.svg.target(node.id, at: local) { return .part(node, "SVG element #\(element)", element) }
+        if node.kind == "svg", let element = presenter.svg?.target(node.id, at: local) { return .part(node, "SVG element #\(element)", element) }
         if let run = node.inlineActivationTarget(at: local) { return .part(node, "inline run #\(run.id)", run.id) }
         if let href = node.inlineLink(at: local) { return .part(node, "the link \(href)", nil) }
         if session.canvases.wantsInput(node.id), !node.isSurfaceControl { return .canvas(node) }
@@ -1086,7 +1063,18 @@ extension Agent {
             }
             return ["typed":v.id, "key":key, "delivery":"recognized"]
         }
-        if req["key"] == nil, let reply = presenter.controls.type(v, req["text"] as? String ?? "") { return reply }
+        if req["key"] == nil, let reply = presenter.controls.family.type(v, req["text"] as? String ?? "") { return reply }
+        #if os(iOS)
+        if let key = req["key"] as? String, let reply = presenter.controls.family.rangeKey(v, key, phase: req["phase"] as? String, repeats: req["repeat"] as? Bool == true) {
+            if req["phase"] as? String == "down", let token = req["releaseKey"] as? String {
+                keyReleases[token] = { [weak presenter, weak v] in
+                    if let v { _ = presenter?.controls.family.rangeKey(v, key, phase: "up") }
+                    return ["phase": "up", "delivery": "host-activation"]
+                }
+            }
+            return reply
+        }
+        #endif
         if v.props["editable"] == "false", req["key"] == nil || ["Enter", "Backspace"].contains(req["key"] as? String ?? "") { return ["error": "view \(v.id) is readonly"] }
         // @ref LLP 1038 D11 — type on the root delivers a location.
         if v.props["navigationBack"] != nil, req["key"] == nil {

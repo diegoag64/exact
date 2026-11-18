@@ -50,11 +50,8 @@ pub fn primitive(
         return Err("JOINTS_0/WEIGHTS_0 mismatch".into());
     }
     let r = p.reader(|b| Some(buffers[b.index()].0.as_slice()));
-    let positions: Vec<f32> = r
-        .read_positions()
-        .ok_or("missing POSITION")?
-        .flatten()
-        .collect();
+    let positions = crate::attributes::read(p, buffers, gltf::Semantic::Positions)?
+        .ok_or("missing POSITION")?;
     let count = positions.len() / 3;
     let indices: Vec<u32> = r
         .read_indices()
@@ -63,13 +60,9 @@ pub fn primitive(
     if indices.iter().any(|&i| i as usize >= count) || !indices.len().is_multiple_of(3) {
         return Err("invalid triangle indices".into());
     }
-    let uvs: Vec<f32> = r
-        .read_tex_coords(0)
-        .map(|v| v.into_f32().flatten().collect())
+    let uvs = crate::attributes::read(p, buffers, gltf::Semantic::TexCoords(0))?
         .unwrap_or_else(|| vec![0.; count * 2]);
-    let normals = r
-        .read_normals()
-        .map(|v| v.flatten().collect())
+    let normals = crate::attributes::read(p, buffers, gltf::Semantic::Normals)?
         .unwrap_or_else(|| normals(&positions, &indices));
     let mut mesh = MeshData {
         outline: crate::toon::outline(p, buffers)?,

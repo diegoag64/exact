@@ -7,19 +7,19 @@
 #if os(macOS)
 import AppKit
 
-struct Leaving {
-    let view: NodeView
-    let members: [NodeView]
+package struct Leaving {
+    package let view: NodeView
+    package let members: [NodeView]
 }
 
 extension Presenter {
     func beginExit(_ id: UInt32) {
         guard let view = views[id] else { return }
-        let held = (blocks.shown.filter { navigation.split.holds($0) } + dialogs.entries.filter(\.route).map(\.dialog)).filter {
+        let held = (blocks.shown.filter { navigation.stackSplit.holds($0) } + dialogs.entries.filter(\.route).map(\.dialog)).filter {
             views[$0.id] === $0 && !$0.isDescendant(of: view) && logicallyWithin($0, view)
         }
         // Native containers hold these routes outside their authored ancestors.
-        for leaving in [view] + held { landFlights(inside: leaving) }
+        for leaving in [view] + held { flightHost.landInside(leaving) }
         var members: [NodeView] = [], seen = Set<UInt32>()
         var stack: [NSView] = [view] + held
         while let next = stack.popLast() {
@@ -27,7 +27,7 @@ extension Presenter {
                 guard seen.insert(node.id).inserted else { continue }
                 members.append(node)
             }
-            stack.append(contentsOf: next.subviews)
+            stack.append(contentsOf: next.committedSubviews)
         }
         for leaving in [view] + held {
             guard let window = leaving.window, let responder = dialogs.focusOwner(window),
@@ -60,7 +60,8 @@ extension Presenter {
         ended.view.setGhost(false)
         for member in ended.members {
             member.setGhost(false)
-            if navigation.split.holds(member) { navigation.split.retire(member) }
+            if navigation.stackSplit.holds(member) { navigation.stackSplit.retire(member) }
+            svg?.forget(member.id)
             member.forget()
         }
         ended.view.removeFromSuperview()

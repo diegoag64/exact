@@ -33,7 +33,7 @@ pub mod startup_watchdog;
 #[cfg(test)]
 mod tests;
 mod text_host;
-pub use composition::Window;
+pub use composition::{PresentStatistics, Window};
 
 /// Only free-threaded objects cross to the paint thread. A pending worker stays
 /// owned until readiness or cancellation; it never blocks first pixel. @ref LLP 1149 D6.3.

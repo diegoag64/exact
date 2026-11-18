@@ -38,11 +38,37 @@ pub(super) struct Keeping {
     pub(super) of_launch: Vec<usize>,
     /// The kept answers a settlement refused, set waiting or showed once
     /// their identity matched, by resource, with the line that says so:
-    /// journaled when its commit stands, so a refusal is never silent.
-    pub(super) refused: Vec<(usize, String)>,
+    /// journaled when its commit stands, so a refusal is never silent. A
+    /// line that one shows carries the identity it was kept for, and is
+    /// journaled only if the resource still shows that kept answer then.
+    pub(super) refused: Vec<(usize, String, Option<Vec<Value>>)>,
     /// Whether a module source declared `kept` keeps its answers (LLP
     /// 1133.015 D4): always, but in a private session.
     pub(super) modules: bool,
+}
+
+/// Whether a reload keeps resource `resource`'s kept entry: the runner it
+/// replaces kept answers for a resource of that name and source
+/// ([`super::Carried::keepers`]).
+pub(super) fn compatible_on_reload(
+    plan: &exact_plan::Plan,
+    carried: &super::Carried,
+    resource: &str,
+) -> bool {
+    plan.resources.iter().any(|r| {
+        plan.str(r.name) == resource
+            && (carried.keepers.iter()).any(|(n, s)| n == resource && s == plan.str(r.source))
+    })
+}
+
+/// Whether the plan keeps resource `i`'s answers whatever it reads: a
+/// surface record's, a kept module source's, or a reader's whose source
+/// waits for the data module ([`waits_for_module`]).
+pub(super) fn keeps_answers(plan: &exact_plan::Plan, i: usize) -> bool {
+    let row = &plan.resources[i];
+    kept_surface(plan, i)
+        || kept_module(plan, i)
+        || row.reader && waits_for_module(plan, plan.str(row.source))
 }
 
 /// Whether resource `i` reads a module's live source declared `"kept":
@@ -85,10 +111,7 @@ pub(super) fn obsolete<'n>(
         .filter_map(|name| {
             let resource = name.strip_prefix(Store::KEPT)?;
             (!(0..plan.resources.len()).any(|i| {
-                (kept_surface(plan, i)
-                    || kept_module(plan, i)
-                    || plan.resources[i].reader
-                        && waits_for_module(plan, plan.str(plan.resources[i].source)))
+                keeps_answers(plan, i)
                     && !plan.resources[i].transient
                     && plan.str(plan.resources[i].name) == resource
             }))
@@ -224,7 +247,7 @@ impl<D: DataSource> Runner<D> {
         use crate::instance::Input;
         let deps = self.sites.deps();
         let row = self.resource_row(i).clone();
-        let identity = row.args.len as usize - usize::from(row.context);
+        let identity = self.identity_len(i);
         let mut work: Vec<_> = (row.args.iter().take(identity).enumerate())
             .filter(|&(k, _)| arg(k))
             .map(|(_, a)| deps.reads_of(&self.plan, self.plan.arg(a).expr))
@@ -276,17 +299,17 @@ impl<D: DataSource> Runner<D> {
         }
     }
 
-    /// Journal each kept answer the first frame shows, with the arguments it
-    /// was kept for (development tools read the journal; its request lines
-    /// already carry URLs), so a stale answer is traceable to its key.
+    /// Journal each kept answer the first frame shows. The line names the
+    /// declaration, never its identifying values (LLP 1027.005 D3).
     pub(super) fn journal_kept_seeds(&mut self) {
         self.journal_refused();
         for i in 0..self.resources.len() {
-            if let Some(state) = self.resources[i].state.as_ref().filter(|s| s.kept_seed) {
-                let mut args = String::new();
-                crate::agent::untyped_json(&Value::list(state.args.clone()), &mut args);
-                let line =
-                    super::lines::kept_shown(self.plan.str(self.resource_row(i).name), &args);
+            if self.resources[i]
+                .state
+                .as_ref()
+                .is_some_and(|state| state.kept_seed)
+            {
+                let line = super::lines::kept_shown(self.plan.str(self.resource_row(i).name));
                 self.log(line);
             }
         }
@@ -295,8 +318,12 @@ impl<D: DataSource> Runner<D> {
     /// Journal the kept answers refused by a settlement that stood: at
     /// boot, and at a later commit before readiness (an identity changed).
     pub(super) fn journal_refused(&mut self) {
-        for (_, line) in std::mem::take(&mut self.keeping.refused) {
-            self.log(line);
+        for (i, line, shown) in std::mem::take(&mut self.keeping.refused) {
+            let stands =
+                |s: &ResourceState| Some(&s.args) == shown.as_ref() && self.holds_kept(i, s);
+            if shown.is_none() || self.resources[i].state.as_ref().is_some_and(stands) {
+                self.log(line);
+            }
         }
     }
 
@@ -312,7 +339,7 @@ impl<D: DataSource> Runner<D> {
         }
         let name = self.plan.str(row.name);
         let entry = self.store.kept(&kept_name(name))?;
-        let identity = row.args.len as usize - usize::from(row.context);
+        let identity = self.identity_len(i);
         let seed = decode(entry).and_then(|(mut args, value)| {
             if kept_surface(&self.plan, i) {
                 let surface = crate::surface_record::surface_name(&self.plan, &row)?;
@@ -325,8 +352,8 @@ impl<D: DataSource> Runner<D> {
             (args.len() == identity && self.check_shape(i, &value).is_ok()).then_some((args, value))
         });
         if seed.is_none() {
-            let line = super::lines::kept_refused(name, None, "it no longer decodes or fits");
-            self.keeping.refused.push((i, line));
+            let line = super::lines::kept_refused(name, "it no longer decodes or fits");
+            self.keeping.refused.push((i, line, None));
             if row.keep {
                 self.store.forget_kept(&kept_name(name));
             }
@@ -438,8 +465,9 @@ impl<D: DataSource> Runner<D> {
     /// Keep a store-reading resource's fresh answer for the next boot's
     /// first frame (LLP 1027 D4), when this source may not be ready then.
     pub(super) fn keep_answer(&mut self, i: usize, args: &[Value], value: &Value) {
-        // An element of a resource over a list is the launch's to ask.
-        if self.member(i).is_some() {
+        // An element of a resource over a list is the launch's to ask, and
+        // so is an instance's request (LLP 1035.005.004 D8).
+        if self.member(i).is_some() || self.owned_row(i).is_some() {
             return;
         }
         self.answered_waiting(i, args, false);
@@ -472,7 +500,7 @@ impl<D: DataSource> Runner<D> {
         // @ref LLP 1027.005 D6 — context reaches the source but does not
         // enter the kept entry or its budget.
         let row = self.resource_row(i).clone();
-        let args = &args[..row.args.len as usize - usize::from(row.context)];
+        let args = &args[..self.identity_len(i)];
         // The record the module published, without the host's own members
         // (`presented`, LLP 1009 D9): those are this launch's.
         let published;
@@ -541,11 +569,11 @@ impl<D: DataSource> Runner<D> {
             }
             total -= n;
             self.store.forget_kept(&other);
+            let other = &other[Store::KEPT.len()..];
+            let kept = &name[Store::KEPT.len()..];
             let line = format!(
-                "kept answers are at most {} KiB together: forgot `{}`'s ({n} bytes) to keep `{}`'s, so the next launch shows `{0}`'s placeholder until it answers (LLP 1027 D4)",
+                "kept answers are at most {} KiB together: forgot `{other}`'s kept answer to keep `{kept}`'s, so the next launch shows `{other}`'s placeholder until it answers (LLP 1027 D4)",
                 KEPT_TOTAL_BYTES / 1024,
-                &other[Store::KEPT.len()..],
-                &name[Store::KEPT.len()..],
             );
             self.log(line);
         }
@@ -882,7 +910,10 @@ impl<D: DataSource> Runner<D> {
         (self.call_origin(), self.invocation_id())
     }
 
-    /// One of [`Self::send_unsent`]'s sends, under its commit's origin.
+    /// One of [`Self::send_unsent`]'s sends, under its commit's origin. It
+    /// is asked as a send made now is (`ask_send`: its owner, its sockets,
+    /// its failure), except that a refusal ends this one send, said in the
+    /// journal, never the commit.
     fn send_one(
         &mut self,
         target: super::Target,
@@ -893,67 +924,42 @@ impl<D: DataSource> Runner<D> {
         let m = target
             .mutation()
             .expect("a send's target names its mutation");
-        let name = self.plan.str(self.plan.mutations[m].name).to_string();
-        let answer = self
-            .check_send_arguments(m, &args)
-            .map_err(|e| format!("{e:?}"))
-            .and_then(|()| {
-                self.mutation_requests += 1;
-                let answer = if Self::activity_send(&source) {
-                    self.activity_request(&source, &args)
-                } else if self.plan.fetch_named(&source).is_some() {
-                    self.fetch_answer(&source, &args)
-                } else {
-                    self.store.set_clock_ms(self.now_ms);
-                    let answer = self
-                        .data
-                        .answer_for(target, &mut self.store, &source, &args);
-                    let answer = self.single_answer(target, answer);
-                    self.refuse_locked(answer)
-                };
-                // What its turn sent as an answer (LLP 1016.000 D7, the amendment
-                // of 2026-10-18).
-                self.stage_answer(target);
-                answer.map_err(|e| format!("{e:?}"))
-            });
-        let refused = match answer {
-            Ok(super::Answer::Now(value)) if self.conforms(&value, self.plan.mutations[m].ty) => {
-                match self.mutation_slot(m) {
-                    Ok(slot) => {
-                        if self.newest_wins(m) {
-                            self.forget_ticket(target);
-                        }
-                        self.land_write(target, None, &value);
-                        if self.conclude_send(target) {
-                            self.slots[slot] = Value::some(value);
-                        }
-                        self.landed.push(m);
-                        for r in self.declared_refreshes(m) {
-                            self.force_refresh(r);
-                            self.note_reasked(r);
-                        }
-                        None
-                    }
-                    Err(e) => Some(format!("{e:?}")),
+        // Read before a refusal ends it.
+        let write = self.asked_write(target);
+        let superseded = self.concluded_after(target);
+        let why = match self.ask_send(target, &source, &args, None) {
+            Ok(super::queue::Asked::Now(slot, value)) => {
+                if self.newest_wins(m) {
+                    self.forget_ticket(target);
                 }
+                // As a reply lands (`reply.rs`): in the instance that sent
+                // it, and only as the latest send to conclude.
+                if !superseded {
+                    self.failed_mut[m] = None;
+                    self.land_send(m, slot, value);
+                }
+                self.landed.push(m);
+                for r in self.declared_refreshes(m) {
+                    self.force_refresh(r);
+                    self.note_reasked(r);
+                }
+                return;
             }
-            Ok(super::Answer::Now(_)) => {
-                Some("its answer does not fit the mutation's shape".to_string())
-            }
-            Ok(super::Answer::Later(request)) => {
+            Ok(super::queue::Asked::Later(request)) => {
                 later.push((target, source, args, request));
-                None
+                return;
             }
-            Err(error) => Some(error),
+            // `ask_send` set its failure, said why and ended its write.
+            Ok(super::queue::Asked::Failed) => None,
+            Err(e) => Some(format!("{e:?}")),
         };
-        if let Some(why) = refused {
-            self.log(super::lines::unsent_refused(&name, &why));
-            // Its write ends; the resources it showed in drop it in
-            // this commit, and a refusal of the commit does not bring
-            // it back.
-            self.refused_unsent.push((target, self.asked_write(target)));
+        if let Some(why) = why {
+            self.log(super::lines::unsent_refused(self.mutation_name(m), &why));
             self.end_write(target, None);
         }
+        // The resources it showed in drop it in this commit, and a refusal
+        // of the commit does not bring it back.
+        self.refused_unsent.push((target, write));
     }
 }
 

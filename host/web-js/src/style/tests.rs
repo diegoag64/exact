@@ -189,7 +189,7 @@ fn mapped_clears_and_invalid_values_keep_declarations_but_none_removes_them() {
     for (id, invalid) in [
         (StyleId::ZIndex, "2.5"),
         (StyleId::Cursor, "not-a-cursor"),
-        (StyleId::ClipPath, "circle(20%)"),
+        (StyleId::ClipPath, "rect(0 0 10px 10px)"),
         (StyleId::ColorScheme, "orange"),
         (StyleId::CornerShape, "-apple-continuous"),
     ] {
@@ -411,7 +411,8 @@ fn mapped(values: &[&str]) -> Vec<String> {
 /// `map` run by Bun over each value.
 pub(crate) fn run(map: &str, values: &[&str]) -> serde_json::Value {
     let script = format!(
-        "console.log(JSON.stringify({}.map({map})))",
+        "import {{cssNames}} from {:?};console.log(JSON.stringify({}.map({map})))",
+        concat!(env!("CARGO_MANIFEST_DIR"), "/regions.js"),
         serde_json::to_string(values).unwrap(),
     );
     let out = std::process::Command::new(std::env::var("BUN").unwrap_or_else(|_| "bun".into()))
@@ -437,11 +438,20 @@ fn a_bound_text_style_is_its_rem() {
             " -Apple-System-Headline ",
             "1.5rem",
             "-exact-nope",
+            "min(-exact-subheadline, 14px)",
+            "clamp(12px, calc(-exact-title-1 / 2), 31px)",
         ],
     );
     assert_eq!(
         out,
-        serde_json::json!(["1.6875rem", "1rem", "1.5rem", "-exact-nope"])
+        serde_json::json!([
+            "1.6875rem",
+            "1rem",
+            "1.5rem",
+            "-exact-nope",
+            "min(0.875rem, 14px)",
+            "clamp(12px, calc(1.6875rem / 2), 31px)"
+        ])
     );
 }
 
@@ -700,5 +710,85 @@ fn a_bound_side_is_written_as_its_author_wrote_it() {
             Ok((sheets.to_string(), "px".to_string())),
             "{row:?}"
         );
+    }
+}
+
+#[test]
+fn bound_basic_clips_reach_css() {
+    let writes = style_writes(StyleId::ClipPath as u16, false, true).unwrap();
+    let values = [
+        "polygon(0% 25%, 100% 0%, 50% 100%)",
+        "inset(4px round 8px)",
+        "circle(30%)",
+        "ellipse(30% 40%)",
+    ];
+    assert_eq!(
+        run(writes[0].map.unwrap(), &values),
+        serde_json::json!(values)
+    );
+}
+
+#[test]
+fn computed_basic_clip_admission_matches_the_kernel() {
+    exact_kernel::style::link_all();
+    let values = [
+        "circle()",
+        "ellipse()",
+        "circle(30% at right bottom)",
+        "ellipse(closest-side farthest-side at 25% 60%)",
+        "inset(4px round 8px)",
+        "inset(10% 20% 30% 5px round 8px 20% 3px / 10% 5px)",
+        "polygon(0 0)",
+        "polygon(evenodd,0 0,100% 0,0 100%)",
+        "polygon(0 0,)",
+        "polygon(1 0)",
+        "circle(-2px)",
+        "circle(1em)",
+        "circle(calc(10% + 1px))",
+        "circle(10% at left right)",
+        "circle(10% at top 20px)",
+        "inset(0 round -1px)",
+        "inset(1pxround 2px)",
+        "inset(0 round 1px / 2px / 3px)",
+        "circle(1.px)",
+        "circle(1e39px)",
+    ];
+    let map = style_writes(StyleId::ClipPath as u16, false, true).unwrap()[0]
+        .map
+        .unwrap();
+    let actual = run(map, &values);
+    let expected: Vec<_> = values
+        .iter()
+        .map(|s| {
+            if exact_kernel::clip::ClipPath::parse(s).is_some() {
+                *s
+            } else {
+                "unset"
+            }
+        })
+        .collect();
+    assert_eq!(actual, serde_json::json!(expected));
+}
+
+#[test]
+fn svg_children_emit_basic_clip_css_on_both_web_targets() {
+    for tag in [
+        "rect width=100 height=80",
+        "g",
+        "text \"Hello\"",
+        "svg x=40 y=30",
+    ] {
+        let plan = contract::compile(&format!(
+            "component App\n  view\n    svg\n      {tag} clip-path=\"inset(25%)\"\n"
+        ))
+        .unwrap();
+        let output = crate::emit::emit(&plan, false, false).unwrap();
+        assert!(output.css.contains("clip-path:inset(25%"), "{}", output.css);
+        let sites = crate::emit::Sites::new(&plan).unwrap();
+        let (kernel, _) = static_tree(&plan, &sites).unwrap();
+        let css = exact_web::host::template::parts(&kernel, &plan, 2)
+            .unwrap()
+            .css;
+        assert!(css.contains("clip-path:inset(25%"), "{css}");
     }
 }

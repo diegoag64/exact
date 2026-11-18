@@ -43,7 +43,7 @@ extension NodeView {
     /// read up the view chain, as the tint is (NodeColorMac.swift).
     var inEmphasizedRow: Bool {
         guard let presenter else { return false }
-        if let row = presenter.navigation.split.emphasizedRow, isDescendant(of: row) { return true }
+        if let row = presenter.navigation.stackSplit.emphasizedRow, isDescendant(of: row) { return true }
         guard !presenter.tables.feeds.isEmpty else { return false }
         var above = superview
         while let view = above, !(view is NSTableView) {
@@ -66,7 +66,7 @@ extension NodeView {
                 let chevron = ["chevron.forward", "chevron.right"].contains(node.props["symbolName"] ?? "")
                 leaf.alphaValue = hidden && chevron ? 0 : 1
             }
-            for child in (view as? NodeView)?.container.subviews ?? view.subviews where child is NodeView { walk(child) }
+            for child in (view as? NodeView)?.structuralChildren ?? NodeView.structural(view.subviews) { walk(child) }
         }
         walk(self)
     }
@@ -91,12 +91,12 @@ extension NodeView {
         guard let layer = holder.layer else { return }
         if mark.superlayer !== layer {
             mark.removeFromSuperlayer()
-            let paint: [CALayer?] = (holder as? NodeView).map { [$0.shadowCaster, $0.boxFill, $0.boxGradient, $0.insetCaster, $0.imageLayer] } ?? []
+            let paint: [CALayer?] = (holder as? NodeView).map { [$0.shadowCaster, $0.boxFill, $0.boxGradient, $0.boxPattern, $0.insetCaster, $0.imageLayer] } ?? []
             let box = layer.sublayers?.last { sublayer in paint.contains { $0 === sublayer } }
             if let box { layer.insertSublayer(mark, above: box) } else { layer.insertSublayer(mark, at: 0) }
         }
         var leaf: NodeView = self
-        while let first = leaf.container.subviews.lazy.compactMap({ $0 as? NodeView }).first(where: { !$0.isHidden }) { leaf = first }
+        while let first = leaf.childNodes.first(where: { !$0.isHidden }) { leaf = first }
         let start = leaf === self ? frame.minX + number("padding_left") : holder.convert(leaf.bounds, from: leaf).minX
         let end = frame.maxX - number("padding_right"), edges = holder.bounds
         let left = min(max(start - 8, edges.minX), edges.minX + 10), right = max(min(end + 8, edges.maxX), edges.maxX - 10)

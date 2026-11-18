@@ -1,9 +1,11 @@
 //! Build-time glTF importer; no runtime crate depends on this crate.
 use exact_game::{asset::*, Vec3};
 use std::path::Path;
+mod attributes;
 pub mod compress;
 mod files;
 mod geometry;
+mod import;
 use files::write_changed;
 pub use files::{bake_game_level, bake_game_tables, check_size};
 mod sound;
@@ -44,33 +46,7 @@ fn sources(path: &Path) -> Result<(Model, ModelSources), String> {
     if !asset_name(&format!("{stem}.model")) {
         return Err(format!("art stem `{stem}`: invalid asset name"));
     }
-    // Inspect before import so sparse and unknown required extensions are named by us.
-    let source = gltf::Gltf::open(path).map_err(|e| e.to_string())?;
-    for extension in source
-        .document
-        .extensions_used()
-        .chain(source.document.extensions_required())
-    {
-        if !matches!(
-            extension,
-            "KHR_materials_clearcoat"
-                | "KHR_materials_emissive_strength"
-                | "KHR_materials_sheen"
-                | "KHR_materials_unlit"
-                | "KHR_texture_transform"
-        ) {
-            return Err(format!("unsupported extension {extension}"));
-        }
-    }
-    for accessor in source.document.accessors() {
-        if accessor.sparse().is_some() {
-            return Err(format!(
-                "sparse accessor {} is unsupported",
-                accessor.index()
-            ));
-        }
-    }
-    let (doc, buffers, images) = gltf::import(path).map_err(|e| e.to_string())?;
+    let (doc, buffers, images) = import::read(path)?;
     let mut model = Model::default();
     if doc.scenes().len() != 1 {
         return Err(format!("{}: expected one scene", path.display()));
@@ -311,8 +287,7 @@ fn sources(path: &Path) -> Result<(Model, ModelSources), String> {
         mesh.material = remap[&(mesh.material as usize)];
     }
     // Importers may declare source units once; runtime models use metres.
-    let units = source
-        .document
+    let units = doc
         .as_json()
         .asset
         .extras

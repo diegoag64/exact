@@ -114,6 +114,7 @@ pub(crate) fn render_js<D: DataSource + 'static, F: Fn() -> D>(
             crate::render_time(),
             delivery,
             paints_boot.then_some(&mut on_boot as &mut dyn FnMut(&mut _)),
+            None,
         )?
     };
     let tree = match page.runner.document_tree() {
@@ -366,6 +367,9 @@ mod tests {
     use exact_plan::Value;
     use exact_runner::{Answer, DataError, Outcome, Request, Response, Store};
     use std::sync::{mpsc, Arc, Mutex};
+    /// The host work these tests hand out (LLP 1047.001 D12).
+    struct TestWork;
+    impl exact_runner::HostWork for TestWork {}
 
     const SHELL: &str = r#"<!doctype html>
 <html lang="en">
@@ -375,7 +379,7 @@ mod tests {
 <link rel="modulepreload" href="./app.js">
 <style>p{margin:0}</style>
 <div id="exact-root"></div>
-<script type="module" src="./app.js"></script>
+<script type="module" data-entry src="./app.js"></script>
 "#;
     const SOURCE: &str = r#"
 routes nav
@@ -400,7 +404,7 @@ component Cards
         }
 
         fn answer(&mut self, _: &mut Store, _: &str, _: &[Value]) -> Result<Answer, DataError> {
-            Ok(Answer::Later(Request::continuation(1)))
+            Ok(Answer::Later(Request::continuation::<TestWork>(1)))
         }
 
         fn continuation(&mut self, _: u64) -> Option<Box<dyn FnOnce() -> Outcome + Send>> {

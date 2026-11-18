@@ -300,8 +300,24 @@ fn sampling_matches_eas_client_ids_uniform_value() {
 
 #[test]
 fn launch_defers_subscription_and_recovers_a_panic() {
-    let state = crate::TestDir::new("exact-observe-test-panic");
-    std::env::set_var("XDG_STATE_HOME", &*state);
+    // The launched service and the panic hook write here for the rest of the
+    // process, after the test has ended, so the directory goes at exit. The
+    // service can still be saving the queue then, from the send this test
+    // waited for: the removal is tried again until the directory is gone.
+    fn state() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!("exact-observe-test-panic-{}", std::process::id()))
+    }
+    let _ = std::fs::remove_dir_all(state());
+    std::fs::create_dir_all(state()).unwrap();
+    ibex2::process::wait_at_exit(|| {
+        for _ in 0..40 {
+            if std::fs::remove_dir_all(state()).is_ok() || !state().exists() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+    std::env::set_var("XDG_STATE_HOME", state());
     let (attempts, received) = mpsc::channel();
     let (url, seen) = sink(move |rows| {
         attempts.send(rows).unwrap();

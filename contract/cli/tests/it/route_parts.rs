@@ -216,3 +216,16 @@ fn a_part_is_refused_where_it_cannot_play_and_names_what_to_write() {
     );
     contract::compile(&route(&computed)).unwrap_or_else(|e| panic!("{e}"));
 }
+
+#[test]
+fn spatial_keyframes_on_route_pictures_name_the_unsupported_hosts() {
+    let source = screen("keyframes fold\n  to rotate=\"-90deg x\"\nstyle Fold\n  ::view-transition-new\n    animation=\"fold 1s linear both\"\n", "class=Fold");
+    let e = contract::compile(&source).unwrap_err();
+    assert_eq!(e.id, "lower-route-part");
+    assert!(
+        e.message.contains("Apple or painted hosts"),
+        "{}",
+        e.message
+    );
+    assert!(e.message.contains("box inside the route"), "{}", e.message);
+}

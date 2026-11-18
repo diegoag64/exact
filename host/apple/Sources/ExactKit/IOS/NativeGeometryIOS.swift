@@ -72,7 +72,7 @@ final class NativeGeometry {
 
     private func followAnimations() {
         guard let presenter else { FrameClock.shared.drop(self); return }
-        let routes = presenter.navigation.controllers.values.compactMap(\.viewIfLoaded)
+        let routes = presenter.navigation.routeSurfaces.values.compactMap(\.viewIfLoaded)
         let surfaces = presenter.presentations(includingRetiring: true)
         let moving = (routes + surfaces).contains { $0.window != nil && Self.animates($0.layer) }
         guard moving else { FrameClock.shared.drop(self); return }

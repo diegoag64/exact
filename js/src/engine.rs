@@ -462,12 +462,13 @@ mod real {
                         String::from_utf8_lossy(std::slice::from_raw_parts(bytes, len)),
                     )
                 };
-                let method = (!method.is_empty()).then(|| {
-                    std::str::from_utf8(method)
-                        .ok()
-                        .and_then(exact_runner::Console::named)
-                        .unwrap_or(exact_runner::Console::Log)
-                });
+                let method = match std::str::from_utf8(method).unwrap_or("log") {
+                    "" => crate::Writer::Runtime,
+                    "uncaught" => crate::Writer::Uncaught,
+                    name => crate::Writer::App(
+                        exact_runner::Console::named(name).unwrap_or(exact_runner::Console::Log),
+                    ),
+                };
                 if text.is_empty() {
                     logs.push((method, String::new()));
                 } else {

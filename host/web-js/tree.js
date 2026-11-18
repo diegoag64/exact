@@ -5,16 +5,14 @@ import { listRow, listOwner, renderMarkup } from './navigation.js';
 import { Docs } from './document.js';
 import { Refusal } from './shape.js';
 import { regions } from './regions.js';
+import { declare } from './declarations.js';
 import { backdropValue as backdropCss } from './backdrop.js';
 import { onEnd, effect, say, inflight, After, Paint, Probes, Media, Links, Scrolls, Selects } from './rt.js';
-import { Adopt, adopting } from './mount.js';
-import { input } from './pieces.js';
+import { Adopt, adopting, PrepareTasks } from './mount.js';
 import { autofocusProp } from './focus.js';
 const SVG = 'http://www.w3.org/2000/svg';
 /** An element under `p`: its static class, attributes and text. */
 export function h(p, tag, cls, attrs, text, ns) {
-  // (a look snaps by its edges too, LLP 1121 D8)
-  if (attrs?.['aria-keyshortcuts'] != null || attrs?.['data-exact-looks'] != null) input();
   if (Adopt) {
     const e = adopt(p, tag, cls, attrs);
     if (tag === 'video' || tag === 'audio') Media.media(e, attrs);
@@ -185,7 +183,8 @@ const navigable = v => {
 };
 /** A dynamic prop, by the DOM name the live host uses (`applyProps`). */
 export function P(e, name, f) {
-  if (name === 'aria-keyshortcuts') input();
+  if (PrepareTasks && ['navigationKey', 'navigationBack', 'aria-selected', 'aria-controls', 'id'].includes(name))
+    (e.$taskProps ??= {})[name] = f;
   if (name === 'data-scrolldocument') Docs.add(e);
   effect(() => {
     let v = f();
@@ -215,6 +214,8 @@ export function P(e, name, f) {
       else writeValue(e, v ?? '');
       e.exactDecorations?.sync();
     } else if (name === 'scrollTop' || name === 'scrollLeft') {
+      // Kept as `$scrollTop`, `$scrollLeft`: where the scroller opens when its page arrives (fragment.js, LLP 1153 D5.1).
+      e['$' + name] = v == null ? undefined : Number(v);
       if (v != null) (Scrolls.get(e) ?? Scrolls.set(e, {}).get(e))[name] = Number(v);
     } else if (BOOL.test(name)) {
       if (name === 'inert') e.authoredInert = v === 'true';
@@ -279,10 +280,11 @@ export const mapped = (v, map, clear) =>
 export function S(e, prop, unit, f) {
   Probes?.bind(e, prop, unit, f);
   let rendered = Adopt;
-  effect(() => {
+  const fx = effect(() => {
     css(e, prop, unit, f(), rendered);
     rendered = false;
   });
+  Probes?.track(e, prop, fx);
 }
 let Scratch = null;
 const Normal = new Map(),
@@ -323,6 +325,7 @@ export function css(e, prop, unit, v, rendered) {
     t = cssText(prop, unit, v);
   if (last[prop] === t) return;
   last[prop] = t;
+  if (prop === '--') return declare(e, t);
   if (prop === '--exact-animation-trigger') {
     if (v === 'none') e.setAttribute('data-exact-animation-trigger', 'none');
     else e.removeAttribute('data-exact-animation-trigger');

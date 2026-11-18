@@ -360,6 +360,7 @@ fn device(tv: bool) -> Device {
     Device {
         night: false,
         font_scale: 1.0,
+        screen_reader: exact_runner::ScreenReader::Unknown,
         locale: "en-US".into(),
         rtl: false,
         hour24: false,

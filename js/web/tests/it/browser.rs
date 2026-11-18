@@ -395,6 +395,17 @@ try {
     const inputs=await prepare(await payload(fixtures.inputs,inputsIdentity),inputsIdentity);
     const invoke=(realm,source,args=[],store=[],grants=[],outcome)=>checkpoint(call({id:realm.id,op:outcome?'resume':'answer',source,args,store,grants,outcome}));
     const response=(body='',status=200)=>({response:{status,headers:[],body,bodyBase64:btoa(body)}});
+    for (const placement of ['main', 'worker']) {
+      const realm = await prepare(await payload(fixtures.inputs, inputsIdentity), {...inputsIdentity, placement});
+      try {
+        for (const source of ['host', 'hostLater']) {
+          const result = await invoke(realm, source);
+          if (result.value !== 'web' || !result.externalRead) throw new Error(`${placement}: runtime host ${JSON.stringify(result)}`);
+        }
+        const init = await invoke(realm, 'atInit', ['host']);
+        if (!init.value?.includes('during module initialization')) throw new Error(`${placement}: host read during initialization`);
+      } finally { realm.dispose(); }
+    }
     const forms=['now','new','call','call-with-arg','random','alias-now','alias-random','alias-date','prototype-constructor','computed-now','computed-random','bound-now','bound-new','reflect','intl-format','intl-format-undefined','intl-parts','intl-parts-undefined','intl-format-alias','intl-format-alias-undefined','intl-parts-alias','intl-parts-alias-undefined','intl-format-getter','intl-format-computed','intl-parts-prototype'];
     for(const form of forms){
       const initial=await invoke(inputs,'atInit',[form]);
@@ -936,6 +947,15 @@ try {
     const reopened=await sql.open('app:/data/fail.db');
     const kept=(await reopened.query('SELECT x FROM t ORDER BY x')).rows.map(r=>r[0]).join();await reopened.close();
     if(kept!=='1,2')throw new Error(`rows a failing OR FAIL statement kept were not saved: ${kept}`);
+    // A statement counts only its own rows, and `changed` says it changed a row or the schema (ibex2-sqlite `execute`).
+    const counted=await sql.open('app:/data/counted.db'),seen=[];
+    for(const statement of ['CREATE TABLE t (x)','INSERT INTO t VALUES (1)','CREATE TABLE IF NOT EXISTS t (x)','UPDATE t SET x=2 WHERE x=0','DELETE FROM t WHERE x=0','ALTER TABLE t ADD COLUMN y','DROP TABLE t']){
+      const r=await counted.execute(statement);seen.push(`${r.changes} ${r.changed}`);
+    }
+    for(const r of await counted.transaction([{sql:'CREATE TABLE u (x)'},{sql:'INSERT INTO u VALUES (1)'},{sql:'CREATE TABLE IF NOT EXISTS u (x)'}]))seen.push(`${r.changes} ${r.changed}`);
+    await refused(counted.execute('PRAGMA schema_version = 1'));await refused(counted.query('PRAGMA schema_version'));
+    await counted.close();
+    if(seen.join()!=='0 true,1 true,0 false,0 false,0 false,0 true,0 true,0 true,1 true,0 false')throw new Error(`what statements changed: ${seen.join()}`);
     const reloadApp='test.browser.sqlite-overlap';
     let current=createSqlite(reloadApp,fsSet);
     const coldStart=performance.now();

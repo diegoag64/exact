@@ -24,7 +24,7 @@ const APP: &str = r#"component App
 "#;
 
 fn boot(source: &str) -> Presenter<()> {
-    let (mut p, error) = Presenter::boot_with(
+    let (mut p, error) = Presenter::boot_with_fixture_fonts(
         &crate::test_plan(source),
         (),
         (480., 400.),

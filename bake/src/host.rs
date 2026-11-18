@@ -46,13 +46,16 @@ pub struct Entry<'a> {
 
 /// Bake the app at `app_dir` (relative to the crate) for `platform` (`web`, `apple`, `linux`, `android`, `windows`)
 /// through `data`, the source the entry constructs as `constructor` (a Rust expression of type `data_type`).
-/// `replace` may return an entry that takes the generated one's place (a game's shared Apple shell). Panics with the
+/// `replace` may return an entry that takes the generated one's place (a game's shared Apple shell). `host_work`:
+/// whether `data`'s type hands out host work ([`crate::hands_out_work!`], LLP 1047.001 D12). Panics with the
 /// bake's error, as a build script reports it.
+#[allow(clippy::too_many_arguments)]
 pub fn bake<D: DataSource>(
     platform: &str,
     app_dir: &str,
     shape: &Shape,
     data: D,
+    host_work: bool,
     data_type: &str,
     constructor: &str,
     replace: impl FnOnce(&Entry) -> Option<String>,
@@ -115,8 +118,9 @@ pub fn bake<D: DataSource>(
     } else {
         platform
     };
-    let compat = crate::compatibility_id(&app, cohort, &target, &manifest, Some(&grants))
-        .unwrap_or_else(|e| panic!("compatibility id: {e}"));
+    let compat =
+        crate::compatibility_id(&app, cohort, &target, &manifest, Some(&grants), host_work)
+            .unwrap_or_else(|e| panic!("compatibility id: {e}"));
     let mode = compat.inputs["rustMode"].as_str().unwrap_or("off");
     assert!(
         shape.replacement || mode == "off",
@@ -126,12 +130,8 @@ pub fn bake<D: DataSource>(
     // What the APK's build reads beside the plan: its capabilities and derived permissions, and for an app the
     // hatches' install (`hatches.rs`), as a TypeScript app's Android crate writes it.
     if platform == "android" {
-        if shape.composed {
-            contract::native::android_entry(&app, &manifest, &baked, &out)
-        } else {
-            contract::native::android_reach(&app, &baked, &out)
-        }
-        .unwrap_or_else(|e| panic!("android: {e}"));
+        contract::native::android_entry(&app, &manifest, &baked, &out)
+            .unwrap_or_else(|e| panic!("android: {e}"));
     }
     let entry = Entry {
         platform,
@@ -171,8 +171,8 @@ const COMPAT: &str = include_str!(concat!(env!("OUT_DIR"), "/compat.json"));"#
 
 /// A generated host crate's bake (LLP 1153.003 D2), its build script's one line: the app one level up from
 /// `.exact/shells/<kind>` at `app_dir`, baked for `platform` through `data`, the source app.json's `rust.data` names,
-/// which the entry holds in host storage.
-pub fn app<D: DataSource>(platform: &str, app_dir: &str, data: D) {
+/// which the entry holds in host storage, and whether its type hands out host work ([`crate::hands_out_work!`]).
+pub fn app<D: DataSource>(platform: &str, app_dir: &str, data: D, host_work: bool) {
     let app = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join(app_dir);
     let declared = contract::Manifest::read(&app)
         .and_then(|manifest| manifest.rust_data())
@@ -190,6 +190,7 @@ pub fn app<D: DataSource>(platform: &str, app_dir: &str, data: D) {
         app_dir,
         &Shape::APP,
         data,
+        host_work,
         &data_type,
         &constructor,
         |_| None,
@@ -252,8 +253,16 @@ include!(concat!(env!("OUT_DIR"), "/hatches.rs"));"#
             )
         }
         "macos" | "ios" => apple_host("PLAN", "COMPAT"),
-        // canvas_jni! embeds OUT_DIR's plan and compat itself.
-        "android" if shape.composed => "include!(concat!(env!(\"OUT_DIR\"), \"/hatches.rs\"));\nexact_painted::canvas_jni!(crate::AppData, hatches = crate::exact_hatches());".into(),
+        // canvas_jni! embeds OUT_DIR's plan and compat itself. An app's library with a store takes the update
+        // store's opener, which its crate links at deploy.store.android "A" (LLP 1030.006 D3).
+        "android" if shape.composed => {
+            let updates = if compat.inputs["store"]["L"] == "0" {
+                ""
+            } else {
+                ", updates = exact_painted_update::open"
+            };
+            format!("include!(concat!(env!(\"OUT_DIR\"), \"/hatches.rs\"));\nexact_painted::canvas_jni!(crate::AppData, hatches = crate::exact_hatches(){updates});")
+        }
         "android" => "exact_painted::canvas_jni!(crate::AppData);".into(),
         _ => panic!("unsupported host platform: {platform}"),
     };
@@ -289,8 +298,9 @@ pub fn empty_entry(
     inputs: &serde_json::Value,
     app: &str,
 ) -> Result<String, String> {
+    // An empty source has nothing to place: the shared Apple game shell's entry is the same for every placement.
     let entry =
-        contract::rust_entry_naming("ExactEmptyData", constructor, "off", inputs, Some(app))?;
+        contract::rust_entry_composed("ExactEmptyData", constructor, "off", inputs, Some(app))?;
     Ok(format!(
         r#"#[derive(Default)]
 struct ExactEmptyData;

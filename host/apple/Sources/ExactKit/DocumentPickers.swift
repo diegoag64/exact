@@ -14,6 +14,7 @@
 // (`--touch platform`) keeps the hold and presents the real picker too: what
 // the person chooses there answers the hold, and the agent's answer, or
 // `back`, closes it.
+import CExact
 import Foundation
 import UniformTypeIdentifiers
 #if canImport(UIKit)
@@ -22,97 +23,74 @@ import UIKit
 import AppKit
 #endif
 
-extension ExactSession {
-    /// This session's number in the library's document table.
-    var documentOwner: UInt64 { UInt64(runtime.rt) }
-
-    func documentCall(_ request: [String: Any]) -> [String: Any] {
-        var request = request
-        request["owner"] = documentOwner
-        let d = (try? JSONSerialization.data(withJSONObject: request)) ?? Data()
-        return (try? JSONSerialization.jsonObject(with: Data(agent(String(decoding: d, as: UTF8.self)).utf8))) as? [String: Any] ?? [:]
-    }
-
-    /// A value arriving at the `open-file` field (LLP 1069.010 D1): a real
-    /// path from any host route — Launch Services, the command line, ⌘O,
-    /// Open Recent, a path typed there — becomes the document path, for an
-    /// app granted `fs.read doc:/`.
-    func documentValue(_ view: UInt32, _ value: String) -> String {
-        guard value.hasPrefix("/"), presenter.views[view]?.props["testId"] == "open-file" else { return value }
-        return documentCall(["op": "openDocument", "path": value])["path"] as? String ?? value
-    }
-
-    /// A URL the person chose, minted exactly: `doc:/<n>/<name>`.
-    func mintDocument(_ url: URL) -> String? {
-        if url.startAccessingSecurityScopedResource() { picker.scoped.append(url) }
-        return documentCall(["op": "mintDocument", "path": url.standardizedFileURL.path])["doc"] as? String
-    }
-
-    /// The session ends: its handles go, and so does its access.
-    func forgetDocuments() {
-        _ = documentCall(["op": "forgetDocuments"])
-        PastedImages.forget(self)
-        for url in picker.scoped { url.stopAccessingSecurityScopedResource() }
-        picker.scoped = []
-    }
-}
-
-#if !os(macOS)
-extension ExactSession {
-    /// Nothing is kept across launches here (LLP 1069.010.000: iOS keeps
-    /// nothing until an iOS document app asks).
-    func restoreKeptDocuments() {}
-}
-#endif
-
-#if canImport(UIKit)
-extension ExactSession {
-    /// A document from Files ("Open in", LLP 1069.010 slice 4): minted
-    /// exactly, under its security scope, and delivered to the `open-file`
-    /// node once the session has booted (a cold launch brings it first).
-    public func openDocument(_ url: URL, tries: Int = 200) {
-        guard state != .destroyed else { return }
-        guard booted else {
-            if tries > 0 { DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in self?.openDocument(url, tries: tries - 1) } }
-            return
-        }
-        guard let doc = mintDocument(url) else { log("open-file: refused: \(url.lastPathComponent) is not a file"); return }
-        if !change(testId: "open-file", value: doc) { log("open-file: refused: \(changeRefusal ?? "nothing took it")") }
-    }
-}
-#endif
-
 extension Picker {
     /// `showOpenFilePicker(id[, multiple])`, `showDirectoryPicker(id)`,
-    /// `showSaveFilePicker(id, suggestedName)`, from any action.
+    /// `showSaveFilePicker(id, suggestedName)`, from any action, each with a
+    /// trailing `startIn` when the call names one (LLP 1173 D2).
     func document(_ name: String, _ args: [Any]) {
-        var request: [String: Any] = ["command": name, "agent": ExactEnv.agentMode]
-        if ExactEnv.agentMode && !ExactEnv.agentPaints { request["present"] = true }
-        if let id = args.first as? String { request["id"] = id }
-        if args.count > 1 {
-            if let multiple = args[1] as? Bool { request["multiple"] = multiple }
-            if let suggested = args[1] as? String { request["suggestedName"] = suggested }
-        }
-        let ruling = session.runtime.command(request)
+        let ruling = session.runtime.command(PickerRequests.document(name, args, agent: ExactEnv.agentMode))
         let view = (ruling["view"] as? NSNumber)?.uint32Value
         if ruling["refused"] != nil { if let view { documentCancelled(view, name) }; return }
         guard ruling["present"] as? Bool == true, let view else { return }
         if let ticket = (ruling["ticket"] as? NSNumber)?.uint64Value { documentTickets[view] = ticket }
         presentDocument(name, view: view, multiple: ruling["multiple"] as? Bool ?? false,
-                        suggestedName: ruling["suggestedName"] as? String ?? "")
+                        suggestedName: ruling["suggestedName"] as? String ?? "",
+                        startIn: startFolder(ruling["startIn"] as? String, name))
     }
 
-    /// `requestPermission(id, path, mode)` (LLP 1069.010.000 D7): the
-    /// runner's rule, then `granted` at `id` for a document that resolves
-    /// (a native host owns no permission a person could withhold), else `denied`.
-    func permission(_ args: [Any]) {
-        var request: [String: Any] = ["command": "requestPermission"]
-        for (key, value) in zip(["id", "path", "mode"], args) { request[key] = value }
-        let ruling = session.runtime.command(request)
-        guard let view = (ruling["view"] as? NSNumber)?.uint32Value, let path = ruling["path"] as? String else { return }
-        let granted = session.documentCall(["op": "documentPermission", "path": path])["granted"] as? Bool == true
-        session.apply(session.runtime.change(view, granted ? "granted" : "denied", now: session.now()))
+    /// Where a picker or save panel opens for `startIn` (LLP 1173 D2): a
+    /// `doc:` handle's folder, or on a Mac the well-known folder of that
+    /// name; iOS has none of those, and opens where it would. One that does
+    /// not resolve is refused into the journal, and the panel opens where
+    /// the platform would.
+    func startFolder(_ start: String?, _ name: String) -> URL? {
+        guard let start else { return nil }
+        if start.hasPrefix("doc:/") {
+            if let folder = session.documentCall(["op": "documentFolder", "path": start])["folder"] as? String {
+                return URL(fileURLWithPath: folder, isDirectory: true)
+            }
+            session.log("\(name): startIn: refused: \(start) is not a document this session holds")
+            return nil
+        }
+        #if os(macOS)
+        if let folder = Picker.knownFolder(start) { return folder }
+        session.log("\(name): startIn: refused: \(start) is not a folder here")
+        #endif
+        return nil
     }
+
+    #if os(macOS)
+    /// The well-known folder `name` names (LLP 1173 D4's table), asked at
+    /// each use: the home's Desktop, Documents, Downloads, Music, Pictures
+    /// and Movies, and `screenshots` where the Screenshot app saves
+    /// (`com.apple.screencapture`'s `location-screenshot`, which macOS 27's
+    /// `screencapture` reads, else `location`, else the Desktop). Nil for a
+    /// destination that is not a folder (the Clipboard, Mail, an app).
+    static func knownFolder(_ name: String) -> URL? {
+        let directory: FileManager.SearchPathDirectory
+        switch name {
+        case "desktop": directory = .desktopDirectory
+        case "documents": directory = .documentDirectory
+        case "downloads": directory = .downloadsDirectory
+        case "music": directory = .musicDirectory
+        case "pictures": directory = .picturesDirectory
+        case "videos": directory = .moviesDirectory
+        case "screenshots":
+            let screenshots = UserDefaults(suiteName: "com.apple.screencapture")
+            if let set = screenshots?.string(forKey: "location-screenshot") ?? screenshots?.string(forKey: "location") {
+                return folder(URL(fileURLWithPath: (set as NSString).expandingTildeInPath, isDirectory: true))
+            }
+            directory = .desktopDirectory
+        default: return nil
+        }
+        return FileManager.default.urls(for: directory, in: .userDomainMask).first.flatMap(folder)
+    }
+
+    private static func folder(_ url: URL) -> URL? {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) && isDirectory.boolValue ? url : nil
+    }
+    #endif
 
     /// The agent's answer to a held picker: each path minted as a chosen
     /// file would be.
@@ -135,7 +113,7 @@ extension Picker {
         guard let ticket = documentTickets.removeValue(forKey: view) else { return }
         var ask: [String: Any] = ["op": urls == nil ? "tap" : "type", "ticket": ticket]
         if let urls { ask["text"] = urls.map(\.path).joined(separator: "\n") } else { ask["choice"] = "cancel" }
-        if let data = try? JSONSerialization.data(withJSONObject: ask) { _ = session.agent(String(decoding: data, as: UTF8.self)) }
+        if let data = try? JSONSerialization.data(withJSONObject: ask) { _ = session.runtime.ask(exact_answer_ticket, String(decoding: data, as: UTF8.self)) }
     }
 
     func documentsChosen(_ view: UInt32, _ urls: [URL], _ name: String) {
@@ -161,35 +139,11 @@ extension Picker {
         session.log("\(name): cancelled")
         session.apply(session.runtime.pickerCancel(view, now: session.now()))
     }
-
-    /// The manifest's `file_handlers`, as the bake wrote them into
-    /// `CFBundleDocumentTypes`. The web-page type a Mac browser declares
-    /// (`ExactWebPage`, LLP 1030 D2) is Launch Services' alone: an HTML file
-    /// it brings is a link (`isWebPageFile`), never a document.
-    static func declarations(in metadata: [String: Any] = ExactEnv.appMetadata) -> [[String: Any]] {
-        (metadata["CFBundleDocumentTypes"] as? [[String: Any]] ?? []).filter { $0["ExactWebPage"] as? Bool != true }
-    }
-
-    /// The declared types: the only ones a picker offers (D2).
-    static var declaredTypes: [UTType] { documentTypes.filter { $0 != .folder } }
-
-    /// Every declared type, and the type this device gives each declared
-    /// extension: an app's own format whose extension another app's type
-    /// already has (studio diary R13: Freeform has `.board`) is still offered,
-    /// whichever type a file of it resolves to here.
-    static var documentTypes: [UTType] { types(in: ExactEnv.appMetadata) }
-
-    static func types(in metadata: [String: Any]) -> [UTType] {
-        let declarations = declarations(in: metadata)
-        let declared = declarations.flatMap { $0["LSItemContentTypes"] as? [String] ?? [] }.compactMap { UTType($0) }
-        let byExtension = declarations.flatMap { $0["CFBundleTypeExtensions"] as? [String] ?? [] }.compactMap { UTType(filenameExtension: $0) }
-        return (declared + byExtension).reduce(into: []) { types, t in if !types.contains(t) { types.append(t) } }
-    }
 }
 
 #if os(tvOS)
 extension Picker {
-    func presentDocument(_ name: String, view: UInt32, multiple _: Bool, suggestedName _: String) {
+    func presentDocument(_ name: String, view: UInt32, multiple _: Bool, suggestedName _: String, startIn _: URL?) {
         // tvOS has no document picker.
         session.log("\(name): refused: no document picker"); documentCancelled(view, name)
     }
@@ -197,7 +151,7 @@ extension Picker {
 }
 #elseif canImport(UIKit)
 extension Picker {
-    func presentDocument(_ name: String, view: UInt32, multiple: Bool, suggestedName: String) {
+    func presentDocument(_ name: String, view: UInt32, multiple: Bool, suggestedName: String, startIn: URL?) {
         guard let controller = ViewPresentation.presenter(for: session.presenter.views[view] ?? session.presenter.root) else {
             session.log("\(name): refused: no window"); documentCancelled(view, name); return
         }
@@ -216,10 +170,11 @@ extension Picker {
             }
             picker = UIDocumentPickerViewController(forExporting: [staged], asCopy: false)
         default:
-            let types = Picker.declaredTypes
+            let types = DocumentTypes.declaredTypes
             picker = UIDocumentPickerViewController(forOpeningContentTypes: types.isEmpty ? [.item] : types, asCopy: false)
             picker.allowsMultipleSelection = multiple
         }
+        picker.directoryURL = startIn
         picker.delegate = self
         documentRequests[ObjectIdentifier(picker)] = (view, name)
         if documentTickets[view] != nil { documentShown[view] = picker }
@@ -259,7 +214,7 @@ extension Picker {
     /// AppKit's panels are never shown beside a hold: no drive shows them (`--touch platform` is iOS's).
     func closeDocument(_: UInt32) {}
 
-    func presentDocument(_ name: String, view: UInt32, multiple: Bool, suggestedName: String) {
+    func presentDocument(_ name: String, view: UInt32, multiple: Bool, suggestedName: String, startIn: URL?) {
         let panel: NSSavePanel
         if name == "showSaveFilePicker" {
             panel = NSSavePanel()
@@ -271,10 +226,11 @@ extension Picker {
             open.canChooseDirectories = name == "showDirectoryPicker"
             open.allowsMultipleSelection = multiple
             open.treatsFilePackagesAsDirectories = false
-            let types = Picker.declaredTypes
+            let types = DocumentTypes.declaredTypes
             if open.canChooseFiles && !types.isEmpty { open.allowedContentTypes = types }
             panel = open
         }
+        if let startIn { panel.directoryURL = startIn }
         let finish: (NSApplication.ModalResponse) -> Void = { [weak self, weak panel] response in
             guard let self, let panel else { return }
             let urls = (panel as? NSOpenPanel)?.urls ?? panel.url.map { [$0] } ?? []

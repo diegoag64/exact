@@ -205,6 +205,7 @@ fn a_value_carries_only_its_property_s_components() {
 
 #[test]
 fn keyframes_animate_colours_and_their_rule_reads_back() {
+    exact_motion::link_animations();
     let text = "k 1s linear @keyframes k{from{background-color:rgba(255,255,255,1)}to{--exact-tint:rgba(10,20,200,0.5);background-color:rgba(0,0,0,0)}}";
     let a = keyframed(text).unwrap();
     let rule = a.0[0].keyframes.css();
@@ -236,6 +237,7 @@ fn keyframes_animate_colours_and_their_rule_reads_back() {
 /// guess re-resolves them in place, keeping the start.
 #[test]
 fn a_light_dark_keyframe_takes_the_appearance_it_starts_under() {
+    exact_motion::link_animations();
     let text = "lit 1s linear both @keyframes lit{from{color:light-dark(rgba(79,102,87,1),rgba(183,201,172,1))}to{color:light-dark(rgba(23,27,23,1),rgba(245,245,236,1))}}";
     let a = keyframed(text).unwrap();
     let from = &a.0[0].keyframes.0[0];
@@ -284,6 +286,7 @@ fn a_light_dark_keyframe_takes_the_appearance_it_starts_under() {
 /// declaration in the rule, a `light-dark()` colour kept (LLP 1062).
 #[test]
 fn box_shadow_keyframes_round_trip_and_play() {
+    exact_motion::link_animations();
     let text = "glow 1s linear both @keyframes glow{from{box-shadow:0px 0px 0px rgba(0,0,0,0)}to{box-shadow:0px 16px 24px light-dark(rgba(29,78,216,1),rgba(255,255,255,0.5))}}";
     let list = keyframed(text).unwrap();
     let keyframes = &list.0[0].keyframes;
@@ -384,6 +387,7 @@ fn a_reversal_between_colour_encodings_is_shortened() {
 /// in Oklab, as Chrome plays the same rule; a legacy pair stays in sRGB.
 #[test]
 fn a_keyframes_modern_colour_moves_in_oklab_unclipped() {
+    exact_motion::link_animations();
     exact_motion::color::css::link_wide();
     let mid = |from: &str, to: &str| {
         let text = format!("k 1s linear both @keyframes k{{from{{color:{from}}}to{{color:{to}}}}}");

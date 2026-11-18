@@ -307,3 +307,118 @@ fn posable_extras_preserve_rotated_and_mirrored_rest_nodes_but_refuse_shear_and_
         json!([1., 0., 0., 0., 0.5, 1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1.]);
     assert!(bake(v).unwrap_err().contains("shear"));
 }
+
+#[test]
+fn optimized_meshopt_quantized_glb_bakes() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/meshopt/optimized.glb");
+    let model = exact_game_bake::model(path).unwrap();
+    assert_eq!(model.meshes.len(), 1);
+    assert_eq!(model.meshes[0].indices.len(), 36);
+    for (&actual, expected) in model.bounds.iter().zip([-0.5, -0.5, -0.5, 0.5, 0.5, 0.5]) {
+        assert!((actual - expected).abs() < 0.001, "{actual} != {expected}");
+    }
+    assert!(model.meshes[0]
+        .normals
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .all(|n| { (n.iter().map(|x| x * x).sum::<f32>() - 1.).abs() < 0.001 }));
+}
+
+#[test]
+fn meshopt_external_buffers_quantization_only_and_named_refusals() {
+    let glb =
+        gltf::Gltf::from_slice_without_validation(include_bytes!("fixtures/meshopt/optimized.glb"))
+            .unwrap();
+    let mut source = serde_json::to_value(glb.document.as_json()).unwrap();
+    let dir = TempDir(std::env::temp_dir().join(format!("exact-meshopt-{}", std::process::id())));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("packed.bin"), glb.blob.unwrap()).unwrap();
+    source["buffers"][0]["uri"] = json!("packed.bin");
+    let path = dir.join("fixture.gltf");
+    let bake = |value: &serde_json::Value| {
+        std::fs::write(&path, value.to_string()).unwrap();
+        exact_game_bake::model(&path)
+    };
+    let compressed = bake(&source).unwrap();
+    let mut failures = Vec::new();
+    for (field, value) in [
+        ("mode", json!("UNKNOWN")),
+        ("filter", json!("UNKNOWN")),
+        ("byteOffset", json!(99999)),
+        ("byteLength", json!(1)),
+        ("byteStride", json!(3)),
+        ("count", json!(1)),
+        ("buffer", json!(99)),
+    ] {
+        let mut bad = source.clone();
+        bad["bufferViews"][0]["extensions"]["EXT_meshopt_compression"][field] = value;
+        let error = bake(&bad).unwrap_err();
+        if !error.contains("EXT_meshopt_compression: bufferView 0:") {
+            failures.push(error);
+        }
+    }
+    let mut uncovered = source.clone();
+    uncovered["bufferViews"][0]
+        .as_object_mut()
+        .unwrap()
+        .remove("extensions");
+    let error = bake(&uncovered).unwrap_err();
+    assert!(
+        error.contains("bufferView 0 has no decoded data or complete fallback"),
+        "{error}"
+    );
+    assert!(failures.is_empty(), "{failures:?}");
+
+    // Remove compression, retaining quantized accessors and all transforms.
+    let cases: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../packages/model-viewer/meshopt/tests/fixtures/buffers.json"
+    ))
+    .unwrap();
+    let mut decoded = vec![];
+    for (i, view) in source["bufferViews"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        let name = format!("optimized-view-{i}");
+        let case = cases
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["name"] == name)
+            .unwrap();
+        let bytes: Vec<u8> = case["expected"]
+            .as_str()
+            .unwrap()
+            .as_bytes()
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u8::from_str_radix(std::str::from_utf8(b).unwrap(), 16).unwrap())
+            .collect();
+        view["buffer"] = json!(0);
+        view["byteOffset"] = json!(decoded.len());
+        view.as_object_mut().unwrap().remove("extensions");
+        decoded.extend(bytes);
+    }
+    std::fs::write(dir.join("decoded.bin"), &decoded).unwrap();
+    source["buffers"] = json!([{"byteLength":decoded.len(),"uri":"decoded.bin"}]);
+    source["extensionsUsed"] = json!(["KHR_mesh_quantization"]);
+    source["extensionsRequired"] = json!(["KHR_mesh_quantization"]);
+    let quantized = bake(&source).unwrap();
+    assert_eq!(
+        exact_game::bin::to_vec(&quantized),
+        exact_game::bin::to_vec(&compressed)
+    );
+    // A malformed offset must fail before an accessor reader slices the buffer.
+    let position = source["meshes"][0]["primitives"][0]["attributes"]["POSITION"]
+        .as_u64()
+        .unwrap() as usize;
+    source["accessors"][position]["byteOffset"] = json!(99999);
+    assert!(bake(&source)
+        .unwrap_err()
+        .contains("accessor exceeds its bufferView"));
+}

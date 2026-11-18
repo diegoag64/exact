@@ -216,11 +216,10 @@ mod tests {
 
     #[test]
     fn stroke_pixels_follow_the_fills_device_phase() {
-        use crate::text::TextEngine;
         use std::cell::RefCell;
         use std::rc::Rc;
 
-        let text = Rc::new(RefCell::new(TextEngine::new()));
+        let text = Rc::new(RefCell::new(crate::text::fixtures::engine()));
         let style = exact_kernel::StyleProps::default().with_rows(|rows| {
             rows.font_size = 24.0;
         });
@@ -293,11 +292,10 @@ mod tests {
 
     #[test]
     fn stroke_pixels_survive_moves_with_rounded_integer_deltas() {
-        use crate::text::TextEngine;
         use std::cell::RefCell;
         use std::rc::Rc;
 
-        let text = Rc::new(RefCell::new(TextEngine::new()));
+        let text = Rc::new(RefCell::new(crate::text::fixtures::engine()));
         let style = exact_kernel::StyleProps::default().with_rows(|rows| {
             rows.font_size = 24.0;
         });
@@ -346,11 +344,10 @@ mod tests {
 
     #[test]
     fn unchanged_stroke_reuses_the_band() {
-        use crate::text::TextEngine;
         use std::cell::RefCell;
         use std::rc::Rc;
 
-        let text = Rc::new(RefCell::new(TextEngine::new()));
+        let text = Rc::new(RefCell::new(crate::text::fixtures::engine()));
         let style = exact_kernel::StyleProps::default().with_rows(|rows| {
             rows.font_size = 32.0;
             rows.font_weight = 800;
@@ -469,11 +466,10 @@ mod tests {
 
     #[test]
     fn adjacent_stroke_passes_keep_their_own_bands() {
-        use crate::text::TextEngine;
         use std::cell::RefCell;
         use std::rc::Rc;
 
-        let text = Rc::new(RefCell::new(TextEngine::new()));
+        let text = Rc::new(RefCell::new(crate::text::fixtures::engine()));
         let mut spec = crate::paint::text_spec(&exact_kernel::StyleProps::default(), "ABC");
         spec.runs.push(spec.runs[0].clone());
         let paragraph = text.borrow_mut().paragraph(&spec, Some(300.0));

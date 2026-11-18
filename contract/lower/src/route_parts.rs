@@ -114,7 +114,7 @@ impl Lowerer<'_> {
                 );
             }
             for a in &list.0 {
-                let Some(properties) = self.keyframes.get(&a.name) else {
+                let Some(frames) = self.keyframes.get(&a.name) else {
                     return err(
                         "lower-animation-name",
                         format!(
@@ -124,6 +124,14 @@ impl Lowerer<'_> {
                         span,
                     );
                 };
+                if frames.spatial_rotation() {
+                    return err(
+                        "lower-route-part",
+                        format!("`keyframes {}` rotates outside the screen plane, which a route-transition picture cannot draw on Apple or painted hosts (Linux, Android, Windows); animate a box inside the route instead", a.name),
+                        span,
+                    );
+                }
+                let properties = frames.properties();
                 let picture = |p: &Property| {
                     matches!(
                         p,

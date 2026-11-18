@@ -423,6 +423,8 @@ pub(crate) fn projection_size(
             // price their storage before that clone, even if the wire skips them.
             match node.computed(id) {
                 RowValue::ClipPath(p) => {
+                    bytes = add_wire(bytes, p.shape_value_count(), 96)?;
+
                     for (_, values) in p.commands() {
                         bytes = add_wire(bytes, values.len(), 96)?
                             .checked_add(64)
@@ -460,6 +462,8 @@ pub(crate) fn projection_size(
             }
             match node.style.get(id) {
                 RowValue::ClipPath(p) => {
+                    bytes = add_wire(bytes, p.shape_value_count(), 96)?;
+
                     for (_, values) in p.commands() {
                         bytes = add_wire(bytes, values.len(), 96)?
                             .checked_add(64)

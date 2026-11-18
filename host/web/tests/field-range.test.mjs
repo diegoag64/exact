@@ -21,6 +21,7 @@ const page = `<button id="outside">Outside</button><div id="exact-root"></div>
   import { runFocusCommands, controlEvent, onSelection } from './navigation.js';
   import { onValue, OnHooks, onSelectionChange } from './rt.js';
   import * as rt from './rt.js';
+  rt.useCommands({ preventDefault: commands.preventDefault, stopPropagation: commands.stopPropagation });
   window.rt = rt;
   window.bindSelection = field => onSelectionChange(field, 'selectionchange', record => window.seen.push(record), (name, f) => field.addEventListener(name, f));
   import './files.js';

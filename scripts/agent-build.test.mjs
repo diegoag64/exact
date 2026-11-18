@@ -10,7 +10,6 @@ import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, relative, resolve } from 'node:path';
 import { appleArtifacts, appleRunBinary } from '../host/apple/build.mjs';
 import { notBuildInput, receiptChanges, refuseBinaryBackend } from './agent-launch.mjs';
-import { moduleGraph } from './module-graph.mjs';
 import { directoryInputSnapshot } from './cargo-dep-info.mjs';
 import { buildArgs, buildFirst, buildReason, childFailure, failureSummary, linuxRebuild, lockHolder, logged, nativeBuild, overrideDir, planOverride, planSource, planSources, ownVerb, prebuild, rebuildCommand, refuseBuild } from './agent-build.mjs';
 import { openStdio } from './agent-stdio.mjs';
@@ -59,7 +58,6 @@ function scratchApp(name) {
   const write = (path, text = '') => { mkdirSync(dirname(resolve(dir, path)), { recursive: true }); writeFileSync(resolve(dir, path), text); };
   write('app.contract', 'component App\n  view\n    text "hello"\n');
   write('app.json', JSON.stringify({ name, app: { id: `com.exact.${name}`, name } }));
-  for (const kind of ['apple', 'web']) write(`${kind}/Cargo.toml`, `[package]\nname="${name}-${kind}"\nversion="0.1.0"\n`);
   write('exact.mjs', "// …\nconst built = await run(['scripts/agent-build.mjs', host]);\n");
   return { dir, write };
 }
@@ -241,10 +239,11 @@ test('an app launcher selects a native backend before checking its build', () =>
   const script = `
     import { mock } from 'bun:test';
     import * as processes from 'node:child_process';
+    import * as shells from './scripts/app-shells.mjs';
+    import * as builds from './scripts/web-build.mjs';
     const spawn = processes.spawn;
-    mock.module(${JSON.stringify(resolve(import.meta.dir, 'app-shells.mjs'))}, () => ({
-      platformOf: () => null,
-    }));
+    mock.module('./scripts/app-shells.mjs', () => ({ ...shells, platformOf: () => null }));
+    mock.module('./scripts/web-build.mjs', () => ({ ...builds, privateNativeBuild: () => ({ env: {}, seed() {}, close() {} }) }));
     mock.module('node:child_process', () => ({ ...processes, spawn(command, args, options) {
       if (args[0].endsWith('/scripts/agent.mjs')) {
         return spawn(command, ['-e', 'console.log(process.env.EXACT_BACKEND_ORIGIN)'], options);
@@ -505,7 +504,7 @@ test('a missing or stale build is built first, said in one line; a fresh one run
     delete process.env.EXACT_MAC_BIN;
     const app = resolveApp('field-log');
     const built = new Date(Date.now() + 10_000), edited = new Date(+built + 10_000), before = new Date(Date.now() - 60_000);
-    for (const file of ['app.contract', 'app.json', 'exact.mjs', 'apple/Cargo.toml', 'web/Cargo.toml']) utimesSync(resolve(dir, file), before, before);
+    for (const file of ['app.contract', 'app.json', 'exact.mjs']) utimesSync(resolve(dir, file), before, before);
     const said = [], builds = [];
     const drive = (host, { code = 0, output = '' } = {}) => buildFirst(host, app, {
       say: line => said.push(line), wait: () => {}, build: async (args, log) => (builds.push({ args, log }), { code, output }),
@@ -536,7 +535,7 @@ test('a missing or stale build is built first, said in one line; a fresh one run
     // A source edited since: the same refusal the driver makes, and the build first instead, naming what changed.
     utimesSync(resolve(dir, 'app.contract'), edited, edited);
     assert.deepEqual(nativeBuild('ios', app).changed.map(p => resolve(p)), [resolve(dir, 'app.contract')]);
-    assert.throws(() => refuseBuild('ios', nativeBuild('ios', app), app), /^Error: ios build is stale: .*app\.contract changed since .*; run \(cd .* && bun exact\.mjs ios\)$/);
+    assert.throws(() => refuseBuild('ios', nativeBuild('ios', app), app), /^Error: ios build is stale: .*app\.contract changed since .*; run \(cd .* && bun exact\.mjs ios\); if .*no build reads.*`\.exact\/`/);
     assert.equal(await drive('ios'), 0);
     // (A contract edit alone is a plan-only edit, which a build with no module receipt to check its bake against still rebuilds.)
     assert.deepEqual([said, builds.map(b => b.args)], [['building for iOS: the build is older than its sources (app.contract changed), and the build has no module receipt to check a new plan against; its log: ' + said[0].split('its log: ')[1]], [['--ios', 'field-log-apple', '--no-install']]]);
@@ -595,7 +594,7 @@ test('a source edited while the build ran is stale; a build claimed meanwhile is
     delete process.env.EXACT_MAC_BIN;
     const app = resolveApp('race-log');
     const at = seconds => new Date(Date.now() + seconds * 1000), stamp = (file, seconds) => utimesSync(resolve(dir, file), at(seconds), at(seconds));
-    for (const file of ['app.contract', 'app.json', 'exact.mjs', 'apple/Cargo.toml', 'web/Cargo.toml']) stamp(file, -60);
+    for (const file of ['app.contract', 'app.json', 'exact.mjs']) stamp(file, -60);
     const bundle = appleArtifacts(app, { destination: 'ios-simulator' }).bundle, receipt = resolve(bundle, 'receipt.json');
     mkdirSync(bundle, { recursive: true });
     // Built from t-20 s to t+10 s; the contract edited at t-5 s, while it ran.
@@ -643,7 +642,7 @@ test('a product the build wrote and then read is judged by its recorded bytes; a
     delete process.env.EXACT_MAC_BIN; delete process.env.CARGO_TARGET_DIR;
     const app = resolveApp('gpu-log');
     const at = seconds => new Date(Date.now() + seconds * 1000), stamp = (file, seconds) => utimesSync(file, at(seconds), at(seconds));
-    for (const file of ['app.contract', 'app.json', 'exact.mjs', 'apple/Cargo.toml', 'web/Cargo.toml']) stamp(resolve(dir, file), -120);
+    for (const file of ['app.contract', 'app.json', 'exact.mjs']) stamp(resolve(dir, file), -120);
     const bundle = appleArtifacts(app, { destination: 'ios-simulator' }).bundle, receipt = resolve(bundle, 'receipt.json');
     mkdirSync(bundle, { recursive: true });
     const profile = resolve(app.target, 'aarch64-apple-ios-sim', 'host-dev'), dylib = resolve(profile, 'signed/libgpu_log_gpu.dylib');
@@ -728,7 +727,7 @@ test('generated shell outputs a cold game build records are judged by their byte
     write('logic/src/lib.rs', 'pub struct Game;');
     write('.shells/apple/src/extra.rs', 'pub const EXTRA: u32 = 1;');
     for (const path of outputs) write(path, path.endsWith('.json') ? '{}' : '// generated shell');
-    for (const path of ['app.json', 'app.contract', 'exact.mjs', 'apple/Cargo.toml', 'web/Cargo.toml', '.shells/Cargo.toml', 'logic/src/lib.rs', '.shells/apple/src/extra.rs']) stamp(path, before);
+    for (const path of ['app.json', 'app.contract', 'exact.mjs', '.shells/Cargo.toml', 'logic/src/lib.rs', '.shells/apple/src/extra.rs']) stamp(path, before);
     for (const path of outputs) stamp(path, generated);
     const sources = [...outputs, 'app.contract', 'logic/src/lib.rs', '.shells/apple/src/extra.rs'];
     write('target/aarch64-apple-ios-sim/host-dev/libshell_output_apple.d', `archive: ${sources.map(path => resolve(dir, path)).join(' ')}\n`);
@@ -801,7 +800,8 @@ test('a plan-only edit runs its bake on the existing build; any other edit, or a
     write('server/index.ts', "import { Database } from 'bun:sqlite';\nimport { routes } from './routes';\n");
     write('server/routes.ts', 'export const routes = {};\n');
     write('server/fixtures.json', '{}\n');
-    for (const file of ['app.contract', 'app.ts', 'types.ts', 'lib/model.ts', 'lib/seed.json', 'lib/format.mjs', 'lib/digits.mjs', 'scripts/export.mjs', 'server/index.ts', 'server/routes.ts', 'server/fixtures.json', 'app.json', 'exact.mjs', 'apple/Cargo.toml', 'web/Cargo.toml']) stamp(file, -60);
+    write('.exact/typescript-inputs.json',JSON.stringify({modules:['app.ts','lib/model.ts','lib/seed.json','lib/format.mjs','lib/digits.mjs'].map(file=>[file,resolve(dir,file)]),types:[['types.ts',resolve(dir,'types.ts')]]}));
+    for (const file of ['app.contract', 'app.ts', 'types.ts', 'lib/model.ts', 'lib/seed.json', 'lib/format.mjs', 'lib/digits.mjs', 'scripts/export.mjs', 'server/index.ts', 'server/routes.ts', 'server/fixtures.json', 'app.json', 'exact.mjs']) stamp(file, -60);
     // The build: its receipt names the plan its build script baked, beside which is the module receipt it paired.
     const target = 'aarch64-apple-ios-sim', out = resolve(app.target, target, 'host-dev/build/plan-log-apple-0123/out');
     const module = { version: 1, appId: 'com.exact.plan-log', grants: '', abi: 1, surfaces: {}, bytecodeVersion: 96 };
@@ -832,8 +832,6 @@ test('a plan-only edit runs its bake on the existing build; any other edit, or a
     const reset = () => { said.length = builds.length = bakes.length = 0; };
     const kept = () => planOverride('ios', app, nativeBuild('ios', app));
 
-    // What app.ts imports is the plan's; what it does not import is no input at all (LLP 1116.003 D1.1).
-    assert.deepEqual([...moduleGraph(dir, app.manifest)].map(p => p.slice(dir.length + 1)).sort(), ['app.ts', 'lib/digits.mjs', 'lib/format.mjs', 'lib/model.ts', 'lib/seed.json', 'types.ts']);
     // A script app.ts never imports is no input, a `.mjs` as a `.ts`; one it imports, through another, is.
     const input = notBuildInput(dir);
     assert.deepEqual(['scripts/export.mjs', 'lib/format.mjs', 'lib/digits.mjs', 'server/index.ts'].map(f => input(resolve(dir, f))), [true, false, false, true]);
@@ -1445,8 +1443,8 @@ else console.log(JSON.stringify({ packages: [{ id: 'app', name: 'fixture-android
     expect(existsSync(shells)).toBe(cold);
     const child = spawnSync(process.execPath, ['--eval', `
       import { mkdirSync } from 'node:fs';
-      import { androidUsesHermes } from ${JSON.stringify(resolve(import.meta.dir, 'agent-android.mjs'))};
-      console.log(androidUsesHermes({ workspace: ${JSON.stringify(shells)}, crate: () => 'fixture-android',
+      import { usesHermes } from ${JSON.stringify(resolve(import.meta.dir, 'agent-android.mjs'))};
+      console.log(usesHermes({ workspace: ${JSON.stringify(shells)}, crate: () => 'fixture-android',
         prepare: () => mkdirSync(${JSON.stringify(shells)}, { recursive: true }) }, 'android'));
     `], { encoding: 'utf8', env: { ...process.env, PATH: dir + delimiter + process.env.PATH } });
     expect(child.status).toBe(0);
@@ -1481,8 +1479,8 @@ else if (args[0] === 'metadata') {
 `, { mode: 0o755 });
     const child = spawnSync(process.execPath, ['--eval', `
       import { resolveApp } from ${JSON.stringify(resolve(import.meta.dir, 'app.mjs'))};
-      import { androidUsesHermes } from ${JSON.stringify(resolve(import.meta.dir, 'agent-android.mjs'))};
-      console.log(androidUsesHermes(resolveApp(${JSON.stringify(dir)}), 'android'));
+      import { usesHermes } from ${JSON.stringify(resolve(import.meta.dir, 'agent-android.mjs'))};
+      console.log(usesHermes(resolveApp(${JSON.stringify(dir)}), 'android'));
     `], { encoding: 'utf8', env: { ...process.env, PATH: dir + delimiter + process.env.PATH } });
     expect(child.status).toBe(failure === 'cold' ? 0 : 1);
     if (failure === 'cold') expect(child.stdout.trim()).toBe('false');

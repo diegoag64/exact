@@ -13,12 +13,15 @@ extension ExactSession {
     func pumpReplies() {
         guard state != .destroyed else { return }
         let began = CACurrentMediaTime()
-        let captured = generation, time = now()
+        let time = now()
         repliesInFlight += 1
+        #if DEBUG
+        replyPumpsForTests += 1
+        #endif
         // Keep parsing, settlement and batch decoding on the existing owner.
         // Publication joins fills and ticks before any later synchronous batch.
-        runtime.pumpAsync(now: time) { [weak self] batch in
-            self?.publish(batch == nil ? .cancelledReply : .reply, batch ?? Batch(ops: [], timers: false, motion: false, clock: nil, error: nil), captured)
+        runtime.pumpAsync(now: time) { [weak self] completion in
+            self?.publish(.reply, completion)
         }
         replySubmissions.append((CACurrentMediaTime() - began) * 1000)
     }
@@ -28,7 +31,7 @@ extension ExactSession {
     func publishCancelledReplyForTests() {
         repliesInFlight += 1
         replySubmissions.append(0)
-        publish(.cancelledReply, Batch(ops: [], timers: false, motion: false, clock: nil, error: nil), generation)
+        publish(.reply, RuntimeCompletion(lease: runtime.completionLease, batch: Runtime.heldBatch))
     }
     #endif
 
@@ -56,8 +59,7 @@ extension ExactSession {
     func tellSoon(_ calls: [(Runtime) -> Batch]) {
         guard !runtime.holds("tellSoon(_:)") else { return } // (a notice a restart's reset sets off: held before it is counted or queued, ResetGate)
         noticesInFlight += calls.count
-        let captured = generation
-        runtime.later(calls) { [weak self] batch in self?.publish(.notice, batch, captured) }
+        runtime.later(calls) { [weak self] batch in self?.publish(.notice, batch) }
     }
 
     /// `tellPage` for a notice; at once unless the data source is activating
@@ -69,6 +71,7 @@ extension ExactSession {
         #if canImport(UIKit)
         if view?.window?.windowScene?.activationState != .foregroundActive { presenter.supersedePress() }
         #endif
+        if clock == nil { dateChanged() } // (queued ahead of the page's facts, as `tellPage` checks first)
         let bits = PageFacts.bits(pageWindow, page: view?.window, readsOnLine: reads.value)
         let font = PageFacts.rootFontSize, scale = PageFacts.displayScale(presenter.viewport)
         tellSoon([{ $0.setPage(bits) }, { $0.setRootFontSize(font) }, { $0.setDisplayScale(scale) }])
@@ -109,6 +112,20 @@ extension ExactSession {
         #if os(macOS)
         controlTextChanged()
         #endif
+    }
+
+    /// @ref LLP 1095 D9 — the platform's resolution of every reference the kernel paints itself, with the app's tint
+    /// read here, on main: one for every session (`SystemColor.appTint`), since the table is the process's; a view's
+    /// own tint is the host's to paint (`ownTint`).
+    func reportColors() {
+        guard booted, state != .destroyed else { return }
+        #if os(iOS) || os(tvOS)
+        // No window, no report: attaching reports (`didMoveToWindow`), before its scheme, so nothing eases from a stand-in blue.
+        guard view?.window != nil else { return }
+        #endif
+        if applying || awaitingTree { colorsOwed = true; return } // a tint the batch being applied set, reported once the batch is in
+        // No app tint: `@tint` is left out, and the kernel keeps the last.
+        apply(runtime.reportColors(tint: SystemColor.appTint.flatMap { SystemColor.tintPair($0) }))
     }
 
     /// Recheck appearances seen before the session's trait report.

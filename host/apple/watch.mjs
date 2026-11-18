@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync, copyFileSync, cpSync, rmSync } from 'node:fs';
 import { buildBake, bakeOutput, developmentBuildEnv, HOST_DEV, appleExecutableName } from '../../scripts/app.mjs';
 import { appleAssets, plistFile } from './assets.mjs';
+import { unclaimedNote } from '../../scripts/links.mjs';
 import { WATCH_MINIMUM_OS } from './toolchain.mjs';
 import { appleProduction, stripProductionExecutable } from './link.mjs';
 import { reportBuilt } from '../../scripts/help.mjs';
@@ -24,14 +25,20 @@ export function watchEntries(app, say = console.log) {
   });
 }
 /** Whether the app has a watch app to build: its live `watch` entry (LLP 1126.002 D4), or complications. */
+export const watchSyncSelected = app => ['state', 'secrets'].some(k => app.manifest.watch?.sync?.[k]?.length > 0);
+export function watchSyncKeys(app, grants = '') {
+  return watchSyncSelected(app) ? { ExactWatchSync: { app: app.id, grants,
+    policy: { state: app.manifest.watch.sync.state ?? [], secrets: app.manifest.watch.sync.secrets ?? [] } } } : {};
+}
 export const watchCompanion = (app, say = () => {}) => !!app.manifest.watch || watchEntries(app, say).length > 0;
 /** The watch app's Rust target, Swift triple, SDK and bundle platform: arm64 alone, from watchOS 26 (LLP 1126.002 D7). */
 export const watchDestination = device => device
   ? { target: 'aarch64-apple-watchos', triple: `arm64-apple-watchos${WATCH_MINIMUM_OS}`, sdkName: 'watchos', platform: 'WatchOS' }
   : { target: 'aarch64-apple-watchos-sim', triple: `arm64-apple-watchos${WATCH_MINIMUM_OS}-simulator`, sdkName: 'watchsimulator', platform: 'WatchSimulator' };
-/** The companion's own Info.plist, never the iOS app's. A device bundle declares arm64, which leaves out the
+/** The companion's own Info.plist, never the iOS app's, but for the iPhone app's other names, which Siri requires to
+ * be the same on the watch and the watch does not inherit. A device bundle declares arm64, which leaves out the
  * arm64_32 watches watchOS 26 still supports (D7); `toolchain` is a distributed build's DT keys. */
-export function watchInfo(app, { appInfo, group, entries, live, generation, icon = {}, device = false, toolchain = {} }) {
+export function watchInfo(app, { appInfo, group, entries, live, generation, icon = {}, device = false, toolchain = {}, keychain }) {
   const { platform, sdkName } = watchDestination(device);
   return { CFBundleIdentifier: `${app.id}.watchkitapp`, CFBundleName: app.displayName, CFBundleDisplayName: app.displayName, CFBundleExecutable: 'ExactWatch', CFBundlePackageType: 'APPL',
     CFBundleVersion: appInfo.CFBundleVersion, CFBundleShortVersionString: appInfo.CFBundleShortVersionString, CFBundleSupportedPlatforms: [platform], DTPlatformName: sdkName, MinimumOSVersion: WATCH_MINIMUM_OS, UIDeviceFamily: [4],
@@ -39,7 +46,10 @@ export function watchInfo(app, { appInfo, group, entries, live, generation, icon
     WKApplication: true, WKCompanionAppBundleIdentifier: app.id, WKRunsIndependentlyOfCompanionApp: true,
     ExactAppGroup: group, ExactAppIdentifier: app.id, ExactWidgetTypeScript: false, ExactWidgetGeneration: generation,
     ExactWatchEntries: entries.map(({ kind, families, title }) => ({ kind, families, title: title ?? kind })),
-    ...(live ? { ExactWatchPlan: 'plans/watch.plan' } : {}), ...icon };
+    ...watchSyncKeys(app, appInfo.ExactWatchSync?.grants),
+    ...(keychain ? { ExactKeychainAccessGroup: keychain } : {}),
+    ...(live ? { ExactWatchPlan: 'plans/watch.plan' } : {}), ...icon,
+    ...(appInfo.INAlternativeAppNames ? { INAlternativeAppNames: appInfo.INAlternativeAppNames } : {}) };
 }
 /** The profiles a signed device build embeds in the watch app and, with complications, in its widget extension:
  * each for its own App ID, granting the watch's App Group, of the iPhone app's profile's (`like`) team, prefix and
@@ -48,14 +58,20 @@ export function watchInfo(app, { appInfo, group, entries, live, generation, icon
 export function watchProfiles({ app, udid, like, installed = installedProfiles() }) {
   if (!watchCompanion(app)) return [];
   const watch = `${app.id}.watchkitapp`, group = `group.${watch}`;
+  const sharesSecrets = app.manifest.watch?.sync?.secrets?.length > 0;
   const ids = [watch, ...(watchEntries(app, () => {}).length ? [widgetId({ id: watch })] : [])];
   return ids.map(id => {
     const candidates = profilesFor(id, installed).filter(iosProfile).sort(byExpiry);
-    const why = candidates.map(p => [p, profileMisfit(p, udid, like) ?? (p.groups.includes(group) ? null : `does not grant the App Group ${group}`)]);
+    const why = candidates.map(p => [p, profileMisfit(p, udid, like) ?? (!p.groups.includes(group) ? `does not grant the App Group ${group}` : (!sharesSecrets || (p.keychain ?? []).some(k => k === `${p.prefix}.*` || k === `${p.prefix}.${watch}`)) ? null : `does not grant the Keychain group ${p.prefix}.${watch}`)]);
     const found = why.find(([, reason]) => !reason)?.[0];
     if (found) return found;
-    throw new Error(`host/apple: the watch app needs a ${METHODS[like.method]} profile for ${id} as the iPhone app's (${like.name}) is, granting the App Group ${group}: ${why.length ? why.map(([p, reason]) => `"${p.name}" ${reason}`).join('; ') : 'none on this Mac is for it'}. In the Apple Developer portal, register the App ID ${id} with App Groups (${group}), make a ${METHODS[like.method]} profile for it of team ${like.team}${udid ? ' that includes this phone' : ''}, and install it; or leave the watch app out with --extensions.`);
+    throw new Error(`host/apple: the watch app needs a ${METHODS[like.method]} profile for ${id} as the iPhone app's (${like.name}) is, granting the App Group ${group}: ${why.length ? why.map(([p, reason]) => `"${p.name}" ${reason}`).join('; ') : 'none on this Mac is for it'}. In the Apple Developer portal, register the App ID ${id} with App Groups (${group}) and Keychain Sharing (${like.prefix}.${watch}), make a ${METHODS[like.method]} profile for it of team ${like.team}${udid ? ' that includes this phone' : ''}, and install it; or leave the watch app out with --extensions.`);
   });
+}
+export function watchEntitlements({ id, group, keychain, profile, device = false }) {
+  return {
+    ...(device ? { 'application-identifier': profile ? `${profile.prefix}.${id}` : id, ...(profile ? { 'com.apple.developer.team-identifier': profile.team } : {}), 'get-task-allow': profile?.dev ?? false } : {}),
+    'com.apple.security.application-groups': [group], ...(keychain ? { 'keychain-access-groups': [keychain] } : {}) };
 }
 export function watchSimulator(args) {
   const at = args.indexOf('--watch-sim');
@@ -92,6 +108,8 @@ export function embedWatch(app, { parent, namespace, device = false, production,
     console.log('host/apple: no watch entry and no Rust accessory entries; watch bundle omitted');
     return null;
   }
+  const unclaimed = unclaimedNote(app.manifest, 'watchos');
+  if (unclaimed) console.log(`host/apple: ${unclaimed}`);
   const { target, triple, sdkName } = watchDestination(device);
   if (process.platform === 'linux') ensureWatchSDK(sdkName);
   const profile = production ? 'release' : HOST_DEV;
@@ -106,16 +124,16 @@ export function embedWatch(app, { parent, namespace, device = false, production,
   const swiftArgs = ['build', '-c', production ? 'release' : 'debug', '--scratch-path', swiftRoot, ...(!production ? ['-Xswiftc', '-O'] : []),
     '--triple', triple, '--sdk', sdk, '-Xcc', '-isysroot', '-Xcc', sdk, '-Xlinker', '-syslibroot', '-Xlinker', sdk,
     '-Xswiftc', '-Xclang-linker', '-Xswiftc', '-isysroot', '-Xswiftc', '-Xclang-linker', '-Xswiftc', sdk];
-  const swiftEnv = { ...process.env, WATCHOS_DEPLOYMENT_TARGET: WATCH_MINIMUM_OS, EXACT_LIB_DIR: libDir, EXACT_LIB: crate.replaceAll('-', '_'), EXACT_WIDGET_GALLERY: '0', EXACT_UPDATE_TRUST: production ? 'production' : 'development' };
+  const swiftEnv = { ...process.env, EXACT_WATCH_SYNC: watchSyncSelected(app) ? '1' : '0', WATCHOS_DEPLOYMENT_TARGET: WATCH_MINIMUM_OS, EXACT_LIB_DIR: libDir, EXACT_LIB: crate.replaceAll('-', '_'), EXACT_WIDGET_GALLERY: '0', EXACT_UPDATE_TRUST: production ? 'production' : 'development' };
   delete swiftEnv.SDKROOT;
   const swiftc = runApple('xcrun', ['swiftc', '--version'], { read: true }).stdout;
   const prepared = prepareWidgetCore({ directory: resolve(directory, 'core'), swiftBuildRoot: swiftRoot, swiftArgs, triple, platform: 'watchos', device, swiftc });
   const shared = sharedWidgetCore({ app: watch, prepared, libDir, crate, env: swiftEnv, runApple });
   // A simulator reads entitlements from each link's __TEXT; a device from the signature, under the profile's App ID.
   const group = `group.${watch.id}`, [appProfile, extensionProfile] = signing?.profiles ?? [];
-  const entitlements = (id, profile) => plistFile({
-    ...(device ? { 'application-identifier': profile ? `${profile.prefix}.${id}` : id, ...(profile ? { 'com.apple.developer.team-identifier': profile.team } : {}), 'get-task-allow': profile?.dev ?? false } : {}),
-    'com.apple.security.application-groups': [group] });
+  const keychain = app.manifest.watch?.sync?.secrets?.length > 0
+    ? (appProfile ? `${appProfile.prefix}.${watch.id}` : watch.id) : undefined;
+  const entitlements = (id, profile) => plistFile(watchEntitlements({ id, group, keychain, profile, device }));
   const entitlementPath = resolve(directory, 'watch-entitlements.plist');
   writeFileSync(entitlementPath, entitlements(watch.id, appProfile));
   const sign = (path, entitled) => runApple('codesign', ['--force', '--sign', signing?.identity ?? '-', '--timestamp=none', ...(device && entitled ? ['--entitlements', entitled] : []), path]);
@@ -128,7 +146,7 @@ export function embedWatch(app, { parent, namespace, device = false, production,
   const appInfo = JSON.parse(runApple('plutil', ['-convert', 'json', '-o', '-', resolve(parent, 'Info.plist')], { read: true }).stdout);
   const icon = appleAssets(app, bundle, { platform: 'watchos', device, kept: { dir: resolve(directory, 'assets'), stamp: swiftc } });
   const info = watchInfo(app, { appInfo, group, entries, live, generation: createHash('sha256').update(JSON.stringify([baked.compat.id, baked.graph.artifacts])).digest('hex'), icon,
-    device, toolchain: production && device ? distributionToolchain(sdkName) : {} });
+    device, keychain, toolchain: production && device ? distributionToolchain(sdkName) : {} });
   writeFileSync(resolve(bundle, 'Info.plist'), plistFile(info));
   if (appProfile) copyFileSync(appProfile.path, resolve(bundle, 'embedded.mobileprovision'));
   const executableArgs = [...swiftArgs, '-Xlinker', '-rpath', '-Xlinker', '@executable_path/Frameworks',

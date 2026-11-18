@@ -146,7 +146,7 @@ pub(super) fn run(
     destination: &Arc<Location>,
     send: &mpsc::Sender<Message>,
     receive: mpsc::Receiver<Message>,
-    host: &StreamHost,
+    lane: &Lane,
 ) {
     let mut launch_workers = None;
     let mut prefetch_workers = None;
@@ -210,7 +210,7 @@ pub(super) fn run(
                 start_indices(
                     destination,
                     send,
-                    host,
+                    lane,
                     &grants,
                     workers.as_ref().unwrap(),
                     indices,
@@ -244,7 +244,7 @@ impl Drop for CloseGuard {
 fn start_indices(
     destination: &Arc<Location>,
     send: &mpsc::Sender<Message>,
-    host: &StreamHost,
+    lane: &Lane,
     launch_grants: &str,
     workers: &Arc<ibex2::stdlib::fetch_async::BoundedWorkerPool>,
     indices: Vec<(usize, usize)>,
@@ -275,6 +275,7 @@ fn start_indices(
                 cache.clock.clone(),
                 held.answered_at.as_ref().expect("pending exchange").clone(),
                 held.observer.clone().map(|o| (held.name.clone(), o)),
+                held.fixture.clone(),
             );
             if !held.prefetch {
                 cache.record_preload_fact(held.fact(Event::Sent));
@@ -282,18 +283,24 @@ fn start_indices(
             Some(start)
         })
         .flatten();
-        let Some((request, abort, grants, clock, answered_at, observed)) = start else {
+        let Some((request, abort, grants, clock, answered_at, observed, fixture)) = start else {
             continue;
         };
+        let fixture = fixture.map(|work| super::super::outcome::fixture_fetch(&grants, work));
         let grants = exact_data::storage::scope(&grants, request.grants.as_deref())
             .and_then(|s| ibex2::grant::GrantSet::parse(&exact_runner::io_grants(s)))
             .expect("checked grants");
-        let fetch = reach::gate_fetch(host().endow(grants).fetch, request.reach);
+        let fetch = match fixture {
+            Some(fetch) => fetch.with_grants(grants),
+            None => lane.endow(grants).fetch,
+        };
+        let fetch = reach::gate_fetch(fetch, request.reach);
         let transport = Arc::new(fetch.blocking_adapter(workers.clone()));
         let visited = Mutex::new(vec![request.url.clone()]);
         let timeout = request.timeout_ms;
         let invalidates = cache::unsafe_method(&request.method);
         let mut req = fetch_request(request, false);
+        req.collected = true;
         if invalidates {
             let destination = destination.clone();
             req.received = Some(ibex2::stdlib::fetch::Received(Arc::new(

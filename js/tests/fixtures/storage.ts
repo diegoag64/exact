@@ -8,6 +8,7 @@ const grants = "fs.read app:/data\nfs.write app:/data\nfs.write app:/cache/widge
 let tail: Promise<unknown> = Promise.resolve();
 let saves: Promise<unknown> = Promise.resolve(), saveError = "";
 let shared: Promise<{text:string}>;
+let nativeLeaseBody = "";
 
 // Background work (LLP 1097): the last save started and not awaited, and
 // the last failure a background step reported to the app.
@@ -40,6 +41,18 @@ function answer(source:string, args:unknown[], store:Store, storage:Storage, nat
       const leaked = raw && await raw;
       await db.close();
       return {text: leaked ? "raw database exposed" : "private"};
+    });
+  }
+  if (op === "read-before-exclusive") {
+    const pending = storage.fs.readFile(storage.fs.directories.data + "/native-order");
+    return store.exclusive("session", () => { nativeLeaseBody = value; })
+      .then(() => pending)
+      .then(bytes => ({text: new TextDecoder().decode(bytes) + " " + nativeLeaseBody}));
+  }
+  if (op === "exclusive-only") {
+    return store.exclusive("session", () => {
+      store.set("session", value);
+      return {text: "entered " + value};
     });
   }
   if (op === "worker-retirement") {
@@ -156,6 +169,7 @@ function answer(source:string, args:unknown[], store:Store, storage:Storage, nat
 
 let busyOnceDone = false;
 let held: {close(): Promise<void>} | null = null;
+let kept: any = null;
 async function work(_source:string, args:unknown[], store:Store, storage:Storage, native:{available:boolean; call(request:Record<string,unknown>):Record<string,unknown>; later(request:Record<string,unknown>):Promise<Record<string,unknown>>}|null) {
   const op = String(args[0]), value = String(args[1]);
   if (op === 'later') {
@@ -164,6 +178,10 @@ async function work(_source:string, args:unknown[], store:Store, storage:Storage
     catch(error:any) { return {text:'refused: ' + error.message}; }
   }
   if (op === 'native-direct') return {text: String(native!.call({value}).text)}; // no bake branch
+  // A package's synchronous form beside the app's own native module (native_later.rs).
+  if (op === 'native-extension') return {text: String(native!.call({extension: 'pkg', sync: 'echo', args: {value}}).text)};
+  // The app's own call that only carries an `extension` field stays with its module.
+  if (op === 'native-extension-field') return {text: String(native!.call({value, extension: '.txt'}).text)};
   // A number each way across the native seam, read back exactly (native_later.rs).
   if (op === 'native-number') return {text: String(native!.call({n: Number(value)}).text)};
   if (op === 'later-number') return {text: String((await native!.later({n: Number(value)})).text)};
@@ -179,6 +197,15 @@ async function work(_source:string, args:unknown[], store:Store, storage:Storage
     } catch(error:any) { return {text:error.message}; }
   }
   if (op === "placeholder") return {text: ""};
+  // One connection across answers, as an app keeps its database open: what a
+  // statement or a batch (its statements split at ";") counted, and the keys
+  // the app is given.
+  if (op === "kept-execute" || op === "kept-batch") {
+    if (!kept) kept = await storage.sqlite.open("app:/data/notes.db");
+    const results = op === "kept-execute" ? [await kept.execute(value)]
+      : await kept.transaction(value.split(";").map((sql: string) => ({sql})));
+    return {text: results.map((r: any) => r.changes + " " + Object.keys(r).join(",")).join("; ")};
+  }
   if (op === "doc-file-codes") {
     const out: string[] = [];
     for (const path of [value, value + "/child"]) {
@@ -414,6 +441,30 @@ async function work(_source:string, args:unknown[], store:Store, storage:Storage
     }
     return {text: out.join("\n")};
   }
+  // An explicit `quality` (LLP 1069.002 A1.12): each record's type, size,
+  // width and height, then each refusal's name and message, in one answer.
+  if (op === "compress-quality") {
+    const data = storage.fs.directories.data, out: string[] = [];
+    const steps: (() => Promise<any>)[] = [
+      () => storage.fs.compressImage(data + "/in.jpg", data + "/low.jpg", { maxDimension: 32, quality: 0.1 }),
+      () => storage.fs.compressImage(data + "/in.jpg", data + "/high.jpg", { maxDimension: 32, quality: 1 }),
+      () => storage.fs.stat(data + "/high.jpg").then(high =>
+        storage.fs.compressImage(data + "/in.jpg", data + "/capped.jpg", { maxDimension: 32, maxBytes: high.size, quality: 1 })),
+      () => storage.fs.compressImage(data + "/in.jpg", data + "/plain.png", { maxDimension: 32, maxBytes: 2_000_000, type: "image/png" }),
+      () => storage.fs.compressImage(data + "/in.jpg", data + "/quality.png", { maxDimension: 32, maxBytes: 2_000_000, quality: 0.1, type: "image/png" }),
+      () => storage.fs.compressImage(data + "/in.jpg", data + "/x.jpg", { maxDimension: 32, quality: 1.5 }),
+      () => storage.fs.compressImage(data + "/in.jpg", data + "/x.jpg", { maxDimension: 32, quality: NaN }),
+      () => storage.fs.compressImage(data + "/in.jpg", data + "/x.jpg", { maxDimension: 32, quality: null as any }),
+      () => storage.fs.compressImage(data + "/in.jpg", data + "/x.jpg", { maxDimension: 32 } as any),
+      () => storage.fs.compressImage(data + "/in.jpg", data + "/x.jpg", { maxDimension: 32, maxBytes: 0, quality: 2 }),
+      () => storage.fs.compressImage(data + "/in.jpg", data + "/x.jpg", { maxDimension: 32, quality: 0.5, type: "image/webp" as any }),
+    ];
+    for (const step of steps) {
+      try { const r = await step(); out.push([r.type, r.size, r.width, r.height].join(" ")); }
+      catch (e:any) { out.push(e.name + " " + e.message); }
+    }
+    return {text: out.join("\n")};
+  }
   // `type: "image/png"` (LLP 1069.002 A1.11): the record and the file's
   // first 26 bytes (its IHDR's colour type last), then a type it refuses.
   if (op === "compress-png") {
@@ -559,7 +610,7 @@ async function work(_source:string, args:unknown[], store:Store, storage:Storage
       [socket, { exactStream, exactIdleTimeout: 3600001 }],
       [socket, { exactStream, exactIdleTimeout: 1.5 }],
       [socket, { exactIdleTimeout: 60000 }],
-      ["https://example.test/events", { exactStream, exactIdleTimeout: 60000 }],
+      ["exact-native:", { exactStream, exactIdleTimeout: 60000 }],
       ["https://example.test/poll", { exactStream, exactIdleTimeout: 60000, exactLongPoll: { cursor: "since", from: "seq" } }],
       ["https://example.test/upload", { method: "POST", body: "x", exactStream, exactUploadProgress: true, exactIdleTimeout: 60000 }],
     ];

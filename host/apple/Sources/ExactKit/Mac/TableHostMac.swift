@@ -136,7 +136,7 @@ final class TableHost {
         guard let presenter else { return nil }
         // An exiting child stays in the hierarchy as a paint ghost after it
         // leaves `views`. It is no longer the wrapper's authored row.
-        for case let child as NodeView in row.container.subviews where presenter.views[child.id] === child {
+        for child in row.childNodes where presenter.views[child.id] === child {
             return child
         }
         return nil
@@ -157,7 +157,7 @@ final class TableHost {
     /// The native cell and the painted row use the same leading paragraph.
     static func textStart(of node: NodeView) -> NodeView? {
         if node.kind == "text" { return node }
-        for case let child as NodeView in node.container.subviews where !child.isHidden {
+        for child in node.childNodes where !child.isHidden {
             if let found = textStart(of: child) { return found }
         }
         return nil

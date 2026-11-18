@@ -7,7 +7,6 @@ import UIKit
 #if os(iOS)
 /// A presented controller that paints its own surface, which a live theme
 /// edit has it paint again (`Presenter.applyThemeTint`).
-protocol PaintsSheetSurface: AnyObject { func paintSurface() }
 extension ModalController: PaintsSheetSurface {}
 #endif
 
@@ -24,6 +23,9 @@ private final class ModalController: UIViewController, UIGestureRecognizerDelega
     private(set) var pixels: UIView?
     /// What the presentation's navigation is mounted in.
     let mount = PresentationMount()
+    /// A full-screen route's own presentation and dismissal
+    /// (RouteTransitionIOS), kept here: UIKit holds the delegate weakly.
+    var routeTransitions: RoutePresenting? { didSet { transitioningDelegate = routeTransitions } }
     init(host: ModalHost, route: NodeView, fullscreen: Bool, detent: String?, grabber: String?) {
         self.host = host
         routeID = route.id
@@ -283,6 +285,8 @@ final class ZoomLanding {
 final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
     unowned let presenter: Presenter
     private var layers: [Presentation] = []
+    /// Each presentation's controller, bottom first.
+    var controllers: [UIViewController] { layers.map(\.controller) }
     // Native dismissal outlives logical removal and reload. Retire from the
     // top down, without letting an old completion touch a new owner.
     private var retiring: [Presentation] = []
@@ -317,11 +321,11 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
     var presentation: String? { layers.last?.kind }
     var coordinateView: UIView? { layers.last?.controller.viewIfLoaded }
     /// Whether the top presentation, modal as every one is (LLP 1123 D2),
-    /// makes `view` inert: it is neither in it nor in a `dialog`'s sheet,
-    /// which UIKit presents over it (HTML modal dialogs).
+    /// makes `view` inert: it is neither in it nor in a `dialog`'s sheet or
+    /// confirmation, which UIKit presents over it (HTML modal dialogs).
     func inertBehind(_ view: UIView) -> Bool {
         guard let top = coordinateView else { return false }
-        return !view.isDescendant(of: top) && !presenter.menus.sheets.shows(view)
+        return !view.isDescendant(of: top) && !presenter.dialogs.shows(view) && !presenter.menus.confirmationShows(view)
     }
     var owner: UIViewController? { layers.last?.controller }
     /// The presentations' navigations, live and retiring, bottom to top.
@@ -490,18 +494,18 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
     }
     func dismissByBackdrop(_ id: UInt32) {
         guard canDismissByBackdrop(id), let route = layers.last?.route else { return }
-        presenter.navigation.invokeBack(from: route)
+        presenter.navigationHost.sheetBack(from: route)?()
     }
     /// The agent's `back` on the top sheet (LLP 1116.006 D4): its swipe
     /// down, refused as UIKit's is (`presentationControllerShouldDismiss`)
-    /// and ending as a completed one does (`invokeBack`). nil with no sheet
+    /// and ending as a completed one does (`sheetBack`). nil with no sheet
     /// up; "" when it went, else why not.
     func agentDismiss() -> String? {
         guard let route = layers.last?.route else { return nil }
         if inTransition { return "the sheet is still moving: `clock settle` first" }
         if NavigationRules.modalRefusesDismissal(closedby: route.props["closedby"]) { return "its closedby is \"none\"" }
-        if refusesDismissal(of: route) { return presenter.navigation.backRefusal }
-        presenter.navigation.invokeBack(from: route)
+        if refusesDismissal(of: route) { return presenter.navigationHost.backRefusal }
+        presenter.navigationHost.sheetBack(from: route)?()
         return ""
     }
 
@@ -513,7 +517,7 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
             layer.sampleLanding?()
             controller.freeze()
             controller.retiringRoot = layer.route
-            controller.retiringNavigation = presenter.navigation.preserveModalContent(in: controller)
+            controller.retiringNavigation = presenter.navigationHost.preserveModalContent(in: controller)
         }
     }
 
@@ -688,8 +692,16 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
             controller.view.alpha = 0
             zoomGuard = controller
         }
+        // A full-screen route that declares its own entrance or exit plays it (LLP 1013.001 D2).
+        if layer.kind == "fullscreen", let runtime = presenter.session?.runtime {
+            let size = owner.view.bounds.size
+            controller.routeTransitions = RoutePresenting(entrance: runtime.routePart(route.id, exit: false, size: size),
+                                                          exit: runtime.routePart(route.id, exit: true, size: size))
+        }
         layers.append(layer)
         controller.isModalInPresentation = refusesDismissal(of: route)
+        // Presented from the embedder's controller, it inherits none of the navigation owner's direction.
+        presenter.turnChrome(controller)
         controller.loadViewIfNeeded()
         // What it inherits, from its first frame: a sheet a deferred sync
         // presents (the second of two, after the first is up) waits for the next batch otherwise.
@@ -722,7 +734,7 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
                 guard let self, let layer else { return }
                 if layers.contains(where: { $0 === layer }) {
                     fit()
-                    presenter.navigation.modalDidDismiss()
+                    presenter.navigationHost.modalDidDismiss()
                 }
                 // The transition's transforms are gone: a transform drag in
                 // the presented route measures again, or it stays refused
@@ -758,7 +770,7 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
         presenter.elementScrolls.cancel(inside: layer.controller.view)
         let controller = layer.controller
         layer.presentationsDidDismiss = presenter.menus.retire(over: controller, removing: layer.route)
-        presenter.navigation.retireNavigation(layer.navigation, preserving: controller.retiringNavigation != nil)
+        presenter.navigationHost.retireNavigation(layer.navigation, preserving: controller.retiringNavigation != nil)
         layers.removeLast()
         endPress(layer)
         releaseBackground(layer)
@@ -796,7 +808,7 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
                 drainRetired()
                 defer { presenter.menus.resumeAfterRouteDismissal() }
                 guard let session = presenter.session, session.state != .destroyed else { return }
-                presenter.navigation.modalDidDismiss()
+                presenter.navigationHost.modalDidDismiss()
                 fit()
                 // As after a presentation: what the dismissal's transition
                 // covered measures again (a drag in the route left on top).
@@ -812,8 +824,8 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
     }
 
     private func refusesDismissal(of route: NodeView) -> Bool {
-        presenter.views[route.id] !== route || presenter.navigation.isInactiveRoute(containing: route) ||
-            NavigationRules.modalRefusesDismissal(closedby: route.props["closedby"]) || !presenter.navigation.canInvokeBack
+        presenter.views[route.id] !== route || NavigationRules.modalRefusesDismissal(closedby: route.props["closedby"]) ||
+            presenter.navigationHost.sheetBack(from: route) == nil
     }
 
     func presentationControllerShouldDismiss(_ presentationController: UIPresentationController) -> Bool {
@@ -823,8 +835,8 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
 
     func presentationControllerDidAttemptToDismiss(_ presentationController: UIPresentationController) {
         guard layers.last?.controller === presentationController.presentedViewController,
-              !presenter.navigation.canInvokeBack else { return }
-        presenter.session?.log("modal dismissal refused: \(presenter.navigation.backRefusal)")
+              !presenter.navigationHost.canInvokeBack else { return }
+        presenter.session?.log("modal dismissal refused: \(presenter.navigationHost.backRefusal)")
     }
 
     /// A sheet the person swipes down: what is beneath shows from the
@@ -850,9 +862,10 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
         // owner before dispatch, so an action may safely keep the same route.
         DispatchQueue.main.async { [weak self, layer] in
             guard let self, layers.last === layer else { return }
+            let back = presenter.navigationHost.sheetBack(from: layer.route)
             closeTop(animated: false, refit: false)
-            presenter.navigation.invokeBack(from: layer.route)
-            presenter.navigation.modalDidDismiss()
+            back?()
+            presenter.navigationHost.modalDidDismiss()
             fit()
         }
     }
@@ -868,7 +881,7 @@ final class ModalHost: NSObject, UIAdaptivePresentationControllerDelegate {
         for layer in layers.reversed() {
             layer.controller.freeze()
             layer.controller.retiringRoot = layer.route
-            layer.controller.retiringNavigation = presenter.navigation.preserveModalContent(in: layer.controller)
+            layer.controller.retiringNavigation = presenter.navigationHost.preserveModalContent(in: layer.controller)
             closeTop(animated: false, refit: false)
         }
     }
