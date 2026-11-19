@@ -9,7 +9,7 @@ import { pathWithin } from '../../scripts/paths.mjs';
 import { parseManifest, shaderFiles } from '../../scripts/app.mjs';
 import { lockBlocks, lockChanges, memberRefusal, outsideSdkLock, series, seriesId, staleLock } from '../../scripts/app-shells.mjs';
 
-// Resolve authored keys in memory; only the bake writes the resolved manifest.
+// Resolve authored keys in memory before writing the resolved manifest.
 const merge = (base, overrides) => {
   const result = {...base};
   for (const [key, value] of Object.entries(overrides)) {
