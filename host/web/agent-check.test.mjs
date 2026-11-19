@@ -70,7 +70,10 @@ const BROKEN = `component CheckFixture
       column testId="swatch" press=toggle width=100 height=100 background-color=(on ? "#ff0000" : "#0000ff") transition="background-color 400ms linear"
 `;
 // The same kinds of views, as the platform would have them: nothing to find in either scheme.
-const CLEAN = `component CleanFixture
+// Exact's own Badge reads in either scheme: the accent and the system blue as a tint under the label's ink (white on the
+// solid system blue is 3.5:1, short of a caption's 4.5:1), red under white ink and green under dark.
+const CLEAN = `use Badge from "exact:content"
+component CleanFixture
   state n = 0
   action bump
     n = n + 1
@@ -89,6 +92,12 @@ const CLEAN = `component CleanFixture
           text "One"
         button testId="two" press=bump
           text "Two"
+      row gap=8 flex-wrap="wrap"
+        Badge(label="Accent", tint=some("AccentColor"))
+        Badge(label="Swap", tint=some("-exact-system-blue"))
+        Badge(label="Cancelled", tint=some("-exact-system-red"))
+        Badge(label="Open", tint=some("-exact-system-green"))
+        Badge(label="Locked", tint=none)
 `;
 // LLP 1116.009 D5 (focus-timer, recipe-finder, round 11): a written percentage width and the padding it does not include,
 // past what the parent gives it, inside the `scroll` that holds the overflow so nothing else sees it. `card` is the finding;
