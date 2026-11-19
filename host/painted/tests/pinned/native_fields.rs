@@ -402,9 +402,16 @@ fn caret_reveal_reports_scroll(choice: PainterChoice) {
     let source = r#"component App
   state top = -1
   state reports = 0
+  state callbackY = -1
+  state measuredY = -1
   action moved(x: number, y: number)
     top = y
     reports = reports + 1
+    let r = rangeFrame("editor", 16, 17)
+    callbackY = r.y
+  action measure
+    let r = rangeFrame("editor", 16, 17)
+    measuredY = r.y
   action findLast
     focus("editor")
     setSelectionRange("editor", 16, 17)
@@ -416,6 +423,8 @@ fn caret_reveal_reports_scroll(choice: PainterChoice) {
         text "Find last line"
       button testId="scroll-up" press=scrollUp retainFocus=true
         text "Scroll up 20"
+      button testId="measure" press=measure retainFocus=true
+        text "Measure"
       textarea id="editor" testId="editor" value="a\nb\nc\nd\ne\nf\ng\nh\ni" scroll=moved appearance="none" width=320 height=55 overflow-y="auto" font-size=15 line-height="20px"
       text `reports=${reports} top=${top}` testId="log"
 "#;
@@ -451,6 +460,11 @@ fn caret_reveal_reports_scroll(choice: PainterChoice) {
     };
     let number =
         |p: &Presenter<()>, name: &str| p.host().runner().slot(name).unwrap().as_number().unwrap();
+    let measure = |p: &mut Presenter<()>| {
+        p.tap(named(p, "measure")).unwrap();
+        p.run_commands(<()>::default);
+        number(p, "measuredY")
+    };
     let editor = named(&p, "editor");
     paint(&mut p);
     assert_eq!(p.scroll_of(editor), (0., 0.));
@@ -463,6 +477,11 @@ fn caret_reveal_reports_scroll(choice: PainterChoice) {
     assert!(end > 20., "the selection must reveal the last line");
     assert_eq!(number(&p, "top"), end as f64);
     assert_eq!(number(&p, "reports"), 1.);
+    assert_eq!(
+        number(&p, "callbackY"),
+        measure(&mut p),
+        "rangeFrame() in scroll= must see the post-reveal position"
+    );
 
     p.tap(named(&p, "scroll-up")).unwrap();
     p.run_commands(<()>::default);
@@ -479,6 +498,11 @@ fn caret_reveal_reports_scroll(choice: PainterChoice) {
         assert_eq!(p.scroll_of(editor).1, top);
         assert_eq!(number(&p, "top"), top as f64);
         assert_eq!(number(&p, "reports"), reports);
+        assert_eq!(
+            number(&p, "callbackY"),
+            measure(&mut p),
+            "rangeFrame() in scroll= after {key} must see the post-reveal position"
+        );
         paint(&mut p);
         assert_eq!(
             number(&p, "reports"),

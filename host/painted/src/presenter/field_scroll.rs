@@ -59,22 +59,18 @@ impl<D: DataSource> Presenter<D> {
         self.brush.caret_hidden = !visible;
     }
 
-    pub(crate) fn reveal_field_cursor(&mut self) -> bool {
+    pub(crate) fn reveal_field_cursor(&mut self) -> Option<ViewId> {
         if !std::mem::take(&mut self.field_reveal) {
-            return false;
+            return None;
         }
-        let Some(id) = self.focus else { return false };
-        let Some(field) = self.brush.field_text.get(&id) else {
-            return false;
-        };
+        let id = self.focus?;
+        let field = self.brush.field_text.get(&id)?;
         let next = field.reveal_cursor(self.field_cursor(id));
         if self.scroll_of(id) == next {
-            return false;
+            return None;
         }
         self.scroll.insert(id, next);
-        self.scroll_end_moved(id, Completion::Instant);
-        self.collection_scrolled(id);
-        true
+        Some(id)
     }
 }
 

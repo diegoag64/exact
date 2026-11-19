@@ -88,11 +88,27 @@ impl<D: DataSource> Presenter<D> {
             let frame = self.paint_frame(target, canvas_frame, false);
             // A field's caret, or a fragment's target as pictures arrive
             // (LLP 1153 D5), moved by this frame's layout: paint again.
-            if self.last_frame_succeeded && (self.reveal_field_cursor() | self.hold_fragment()) {
+            let revealed = self
+                .last_frame_succeeded
+                .then(|| self.reveal_field_cursor())
+                .flatten();
+            let held = self.last_frame_succeeded && self.hold_fragment();
+            let frame = if revealed.is_some() || held {
                 self.paint_frame(target, false, false)
             } else {
                 frame
+            };
+            // Report a field's caret reveal after the reveal repaint publishes
+            // its updated range geometry, so `rangeFrame()` in `scroll=` sees
+            // the post-scroll position.
+            if let Some(id) = revealed.filter(|_| self.last_frame_succeeded) {
+                self.scroll_end_moved(id, Completion::Instant);
+                self.collection_scrolled(id);
+                if self.dirty {
+                    return self.paint_frame(target, false, false);
+                }
             }
+            frame
         });
         // A geometry/accessibility snapshot has not submitted the window's new picture.
         #[cfg(windows)]
