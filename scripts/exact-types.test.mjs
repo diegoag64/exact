@@ -298,3 +298,43 @@ test('contract build does not supply game defaults to an ordinary Rust app', () 
   assert.ok(JSON.parse(result.stdout).some(d => d.id === 'app-manifest' && d.message.includes('`app.id` is required')));
   assert.ok(!existsSync(resolve(dir, '.shells')));
 }), 600_000);
+
+test('fresh game Contract builds accept flags before the source', () => {
+  for (const args of [
+    ['--json', 'app.contract'],
+    ['-o', 'app.plan', '--json', 'app.contract'],
+    ['--surface', 'gui', '--json', 'app.contract'],
+    ['--stdin', '--json', 'app.contract'],
+  ]) inDir(dir => {
+    mkdirSync(resolve(dir, 'logic/src'), { recursive: true });
+    writeFileSync(resolve(dir, 'logic/src/lib.rs'), `impl Game for Fixture { const ID: &'static str = "fixture-game"; }`);
+    const view = 'component App\n  view\n    text "Ready"\n';
+    writeFileSync(resolve(dir, 'app.contract'), view);
+    writeFileSync(resolve(dir, 'app.json'), '{"userInterfaceStyle":"dark"}');
+    const result = spawnSync(process.execPath, [resolve(import.meta.dir, 'exact.mjs'), 'contract', 'build', ...args], { cwd: dir, input: args.includes('--stdin') ? view : undefined, encoding: 'utf8', timeout: 600_000 });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    assert.deepEqual([result.stdout, result.stderr], ['[]\n', '']);
+    assert.equal(JSON.parse(readFileSync(resolve(dir, '.shells/app.json'), 'utf8')).app.id, 'com.exact.fixture-game');
+    assert.ok(!existsSync(resolve(dir, '.shells/Cargo.toml')));
+    if (args.includes('-o')) assert.ok(existsSync(resolve(dir, 'app.plan')));
+  });
+}, 600_000);
+
+test('Contract diagnostics do not generate or validate native game shells', () => inDir(dir => {
+  mkdirSync(resolve(dir, 'logic/src'), { recursive: true });
+  mkdirSync(resolve(dir, '.shells'));
+  writeFileSync(resolve(dir, 'logic/src/lib.rs'), `impl Game for Fixture { const ID: &'static str = "fixture-game"; }`);
+  writeFileSync(resolve(dir, 'app.contract'), 'component App\n  view\n    text "Ready"\n');
+  const authored = '{"game":{"render":{"crate":"fixture-game-render","hooks":"Hooks"}}}';
+  writeFileSync(resolve(dir, 'app.json'), authored);
+  for (const file of ['Cargo.toml', 'Cargo.lock', 'logic/lib.rs']) {
+    mkdirSync(dirname(resolve(dir, '.shells', file)), { recursive: true });
+    writeFileSync(resolve(dir, '.shells', file), 'untouched');
+  }
+  const result = spawnSync(process.execPath, [resolve(import.meta.dir, 'exact.mjs'), 'contract', 'build', 'app.contract', '--json'], { cwd: dir, encoding: 'utf8', timeout: 600_000 });
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual([result.stdout, result.stderr], ['[]\n', '']);
+  for (const file of ['Cargo.toml', 'Cargo.lock', 'logic/lib.rs']) assert.equal(readFileSync(resolve(dir, '.shells', file), 'utf8'), 'untouched');
+  assert.equal(readFileSync(resolve(dir, 'app.json'), 'utf8'), authored);
+  assert.equal(JSON.parse(readFileSync(resolve(dir, '.shells/app.json'), 'utf8')).app.id, 'com.exact.fixture-game');
+}), 600_000);
