@@ -837,11 +837,15 @@ impl<D: DataSource> Runner<D> {
     /// Resource `i`'s answer now. Outside its shape it fails the resource
     /// with `shape`, as a TypeScript source's answer does: the commit that
     /// asked stands, and the resource keeps what it showed, whose shape was
-    /// checked when it was taken.
+    /// checked when it was taken. A runner-owned source's answer outside its
+    /// shape is the runner's own fault and refuses the commit.
     pub(super) fn shaped_answer(&self, i: usize, value: Value) -> Result<Answer, RunnerError> {
         let Err(refusal) = self.check_shape(i, &value) else {
             return Ok(Answer::Now(value));
         };
+        if exact_plan::runner_owned_source(self.plan.str(self.resource_row(i).source)) {
+            return Err(refusal);
+        }
         let crate::failure::Failure {
             code,
             message,

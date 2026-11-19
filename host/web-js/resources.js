@@ -416,8 +416,13 @@ export function res(
           try {
             take(ans.v, a, Ov.tick());
           } catch (e) {
-            // outside its shape it fails as a reply does, keeping what it showed (runner `shaped_answer`)
-            hold();
+            // outside its shape it fails as a reply does, keeping what it showed (runner `shaped_answer`); with
+            // nothing to show, the shape refusal refuses the commit
+            try {
+              hold();
+            } catch {
+              throw e;
+            }
             return Invocation.run(invocation, () => fails(a, String(e?.message ?? e), 'shape'));
           }
           if (r.ticket) {
