@@ -416,7 +416,8 @@ export function res(
           try {
             take(ans.v, a, Ov.tick());
           } catch (e) {
-            if (!reconciling) throw e;
+            // outside its shape it fails as a reply does, keeping what it showed (runner `shaped_answer`)
+            hold();
             return Invocation.run(invocation, () => fails(a, String(e?.message ?? e), 'shape'));
           }
           if (r.ticket) {

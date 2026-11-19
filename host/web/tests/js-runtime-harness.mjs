@@ -8,12 +8,13 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { standIns } from './stand-ins.mjs';
 
-// modules.js imports the web host's `../web/address-space.js`, stood in
+// modules.js imports the web host's `../web/address-space.js` and mount.js its `../web/faults.js`, stood in
 export const root = mkdtempSync(resolve(tmpdir(), 'exact-js-baked-')), dir = resolve(root, 'web-js');
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 mkdirSync(dir);
 mkdirSync(resolve(root, 'web'));
 writeFileSync(resolve(root, 'web/address-space.js'), 'export const setSpaceState = () => {};');
+writeFileSync(resolve(root, 'web/faults.js'), 'export const checkpointFaults = () => [];');
 export const webJs = name => resolve(fileURLToPath(new URL(`../../web-js/${name}`, import.meta.url)));
 
 const REAL = ['commands.js', 'rt.js', 'format.js', 'clock.js', 'resources.js', 'tree.js', 'events.js', 'pieces.js', 'mount.js', 'strings.js', 'request-send.js', 'presence-bindings.js', 'rows.js', 'uploads.js', 'held.js', 'font-family.js', 'observers.js', 'grid.js', 'overlay.js', 'roster.js', 'router.js', 'route-pattern.js', 'schedule.js', 'budget.js', 'shape.js', 'modules.js', 'permissions.js', 'samples.js', 'spans.js', 'update.js', 'arrival.js', 'devices.js', 'wakes.js', 'reach.js', 'members.js', 'resource-inspection.js', 'sheets.js'];

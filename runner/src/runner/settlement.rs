@@ -917,7 +917,7 @@ impl<D: DataSource> Runner<D> {
                     // successful reuse skips validation; fresh/baked/fallback
                     // answers still cross the shape boundary below.
                     let reused = reuse.is_some();
-                    let mut checked = false; // a reconciling answer's shape is checked as it is asked
+                    let mut checked = false; // an answer now is checked as it is asked
                                              // A reused value keeps what an earlier pass recorded;
                                              // anything else is recorded by the branch that takes it.
                     let compiled = std::mem::replace(&mut adopted[i], false);
@@ -1015,11 +1015,9 @@ impl<D: DataSource> Runner<D> {
                             // An upload's arguments answer as it ended (D10).
                             let ledger = self.ledger_answer(i, mark.as_ref());
                             let asked = match ledger.unwrap_or_else(|| self.query(i, &args)) {
-                                // A reconciling answer outside its shape fails
-                                // the resource too.
-                                Ok(Answer::Now(v)) if reconciling => {
+                                Ok(Answer::Now(v)) => {
                                     checked = true;
-                                    self.check_shape(i, &v).map(|_| Answer::Now(v))
+                                    self.shaped_answer(i, v)
                                 }
                                 other => other,
                             };
