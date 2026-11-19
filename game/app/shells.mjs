@@ -64,7 +64,7 @@ const gameManifestSource = dir => existsSync(resolve(dir, 'app.json')) ? createH
 const writeGameManifest = (dir, app, authored) => {
   const root = resolve(dir, '.shells');
   mkdirSync(root, {recursive:true});
-  writeChanged(resolve(root, 'app.json'), JSON.stringify(app, null, 2) + '\n', false);
+  writeChanged(resolve(root, 'app.json'), JSON.stringify({game: app.game, ...app}, null, 2) + '\n', false);
   writeChanged(resolve(root, 'app-source.sha256'), authored + '\n', false);
 };
 

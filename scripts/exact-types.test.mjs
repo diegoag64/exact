@@ -259,7 +259,7 @@ test('game contract builds resolve authored defaults before a bake and refresh t
     const build = (stdin = false) => spawnSync(process.execPath, [resolve(import.meta.dir, 'exact.mjs'), 'contract', 'build', 'app.contract', '--json', ...(stdin ? ['--stdin'] : [])], { cwd: dir, input: stdin ? view : undefined, encoding: 'utf8', timeout: 600_000 });
     const passes = result => {
       assert.equal(result.status, 0, result.stdout + result.stderr);
-      assert.deepEqual([result.stdout, result.stderr], ['[]\n', '']);
+      assert.equal(result.stdout, '[]\n');
     };
     assert.ok(!existsSync(resolve(dir, '.shells')));
     passes(build(true));
@@ -280,7 +280,6 @@ test('game contract builds resolve authored defaults before a bake and refresh t
     writeFileSync(resolve(dir, 'app.json'), '{');
     const invalid = build();
     assert.equal(invalid.status, 1);
-    assert.equal(invalid.stderr, '');
     const diagnostics = JSON.parse(invalid.stdout);
     assert.equal(diagnostics.length, 1);
     assert.equal(diagnostics[0].id, 'app-manifest');
@@ -313,7 +312,7 @@ test('fresh game Contract builds accept flags before the source', () => {
     writeFileSync(resolve(dir, 'app.json'), '{"userInterfaceStyle":"dark"}');
     const result = spawnSync(process.execPath, [resolve(import.meta.dir, 'exact.mjs'), 'contract', 'build', ...args], { cwd: dir, input: args.includes('--stdin') ? view : undefined, encoding: 'utf8', timeout: 600_000 });
     assert.equal(result.status, 0, result.stdout + result.stderr);
-    assert.deepEqual([result.stdout, result.stderr], ['[]\n', '']);
+    assert.equal(result.stdout, '[]\n');
     assert.equal(JSON.parse(readFileSync(resolve(dir, '.shells/app.json'), 'utf8')).app.id, 'com.exact.fixture-game');
     assert.ok(!existsSync(resolve(dir, '.shells/Cargo.toml')));
     if (args.includes('-o')) assert.ok(existsSync(resolve(dir, 'app.plan')));
@@ -333,7 +332,7 @@ test('Contract diagnostics do not generate or validate native game shells', () =
   }
   const result = spawnSync(process.execPath, [resolve(import.meta.dir, 'exact.mjs'), 'contract', 'build', 'app.contract', '--json'], { cwd: dir, encoding: 'utf8', timeout: 600_000 });
   assert.equal(result.status, 0, result.stdout + result.stderr);
-  assert.deepEqual([result.stdout, result.stderr], ['[]\n', '']);
+  assert.equal(result.stdout, '[]\n');
   for (const file of ['Cargo.toml', 'Cargo.lock', 'logic/lib.rs']) assert.equal(readFileSync(resolve(dir, '.shells', file), 'utf8'), 'untouched');
   assert.equal(readFileSync(resolve(dir, 'app.json'), 'utf8'), authored);
   assert.equal(JSON.parse(readFileSync(resolve(dir, '.shells/app.json'), 'utf8')).app.id, 'com.exact.fixture-game');

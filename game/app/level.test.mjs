@@ -328,7 +328,7 @@ for (const kind of ['dev', 'build']) {
   });
 }
 
-test('Contract and bake infer the same game name through a directory link', () => {
+test('Contract and bake write identical game manifests through a directory link', () => {
   const root = mkdtempSync(resolve(tmpdir(), 'exact-game-link-'));
   try {
     const dir = resolve(root, 'original-game'), alias = resolve(root, 'alias-game');
@@ -337,10 +337,12 @@ test('Contract and bake infer the same game name through a directory link', () =
     writeFileSync(resolve(dir, 'app.contract'), 'component App\n  view\n    text "Ready"\n');
     symlinkSync(dir, alias, process.platform === 'win32' ? 'junction' : 'dir');
     expect(prepareContractGame(['build', resolve(alias, 'app.contract')])).toBe(true);
-    const manifest = () => JSON.parse(readFileSync(resolve(dir, '.shells/app.json'), 'utf8'));
+    const manifest = () => readFileSync(resolve(dir, '.shells/app.json'), 'utf8');
     const prepared = manifest();
     gameShells(alias, gameDefaults(alias).game, resolve(import.meta.dir, '..'));
-    expect(manifest().app.name).toBe('Original Game');
-    expect(prepared).toEqual(manifest());
+    expect(JSON.parse(manifest()).app.name).toBe('Original Game');
+    expect(prepared).toBe(manifest());
+    expect(prepareContractGame(['build', resolve(alias, 'app.contract')])).toBe(true);
+    expect(manifest()).toBe(prepared);
   } finally { rmSync(root, {recursive:true, force:true}); }
 });
