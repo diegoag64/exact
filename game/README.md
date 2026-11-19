@@ -993,8 +993,9 @@ and [authoring diaries](diaries/001-scores.md) record measurements and remaining
 
 ## Exact2 integration
 
-The first bake derives host adapters and `.shells/app.json` from the authored
-manifest. It does not rewrite an existing `app.json`. Contract owns layout, UI,
+Contract builds and bakes resolve `.shells/app.json` from the authored manifest
+and game defaults. The bake also generates host adapters. Neither rewrites an
+existing `app.json`. Contract owns layout, UI,
 accessibility and controls; the world owns the canvas contents. A HUD button with
 `action="jump"` holds that `Actions` action while pressed; its `aria-keyshortcuts`
 takes its chord (the key with exactly its modifiers) before the focused world hears
