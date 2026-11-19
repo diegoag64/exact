@@ -56,7 +56,7 @@ import { builtContract, contractTool, launch, toolEnv } from './tools.mjs';
 export { grantAdvice, grantLines } from './grant-advice.mjs';
 const { cargoEnvironment, appleExecutableName, HERMES_INSTALLER, hermesBundle, hermesTarget, pathFrom, readManifest, resolveApp, WEB_TOOLCHAIN, webToolchainEnv } = await import('./app.mjs');
 const { applyPattern, createApp, createGame, patternList, rustApp, UNCACHED_CRATES, wireSnapback } = await import('../game/new.mjs');
-const { gameDefaults, sdkFetch } = await import('../game/app/shells.mjs');
+const { gameDefaults, prepareContractGame, sdkFetch } = await import('../game/app/shells.mjs');
 const { HOST_SDKS, HOST_SWIFT, appleSdkName, developerDir, xcodeRefusal } = await import('../host/apple/devices.mjs');
 const { appleArtifacts, assertAppleIdentity } = await import('../host/apple/build.mjs');
 const { closeFilesystemReader } = await import('./filesystem.mjs');
@@ -658,7 +658,7 @@ export async function contract(args, env = process.env) {
   // (`--stdin`), whose types no file holds, neither refreshes them nor type-checks app.ts.
   const input = args[0] === 'build' && !args.includes('--stdin') ? args.slice(1).find((arg, i, rest) => !arg.startsWith('-') && rest[i - 1] !== '-o') : null;
   const cargo = compilerCargo('run', env), tool = await contractTool({ cmd: 'cargo', pre: [...cargo.args, '--'], env: cargo.env }, { env, json, file: input ?? '' });
-  if (!tool) return 1;
+  if (!tool || !prepareContractGame(args, env)) return 1;
   const result = spawnSync(tool.cmd, [...tool.pre, ...args], {stdio: ['inherit', json ? 'pipe' : 'inherit', 'inherit'], env: tool.env, encoding: 'utf8', maxBuffer: 1 << 26});
   if (result.error) throw new Error(`${tool.cmd}: ${result.error.message}${tool.cmd === 'cargo' ? ' (install rustup from https://rustup.rs)' : ''}`);
   // Cargo's own failures exit 101; one that is not rustup's refuses `+<pin>` before the compiler runs.

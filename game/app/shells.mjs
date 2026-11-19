@@ -60,6 +60,21 @@ export function gameDefaults(dir) {
   return app;
 }
 
+/** Prepare the same game manifest for a Contract build as for a bake, including unsaved editor input. */
+export function prepareContractGame(args, env = process.env) {
+  if (args[0] !== 'build' || !args[1] || args[1].startsWith('-') || args.includes('--help') || args.includes('-h')) return true;
+  const dir = dirname(resolve(args[1]));
+  try {
+    const game = gameDefaults(dir);
+    if (game) gameShells(dir, game.game, gameRoot, {env});
+    return true;
+  } catch (error) {
+    if (args.includes('--json')) process.stdout.write(JSON.stringify([{ id: 'app-manifest', severity: 'error', message: error.message, file: args[1], line: 0, col: 0, end_col: 0, related: [] }]) + '\n');
+    else console.error(error.message);
+    return false;
+  }
+}
+
 // A game without logic/Cargo.toml gets this generated member: its sources stay
 // where the author wrote them. @ref llp/1046.003-game-engine-as-built.explainer.md#one-sdk-lock-2026-09-23
 function logicManifest(dir, crate) {
