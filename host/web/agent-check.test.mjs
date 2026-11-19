@@ -878,3 +878,54 @@ test('check on the wasm web target names the target and where check runs', async
   const failed = { host: 'web', op: async () => { throw new Error('display failed'); } };
   await expect(checkOp(failed)).rejects.toThrow('display failed');
 });
+
+// On the web a sheet's header is a dialog's (docs/recipes/web-look.md): one grid over the whole sheet, its title on top and its
+// buttons at its foot. A row resting under the buttons scrolls up clear of them, so it is not covered; the header's own box, which
+// spans the sheet, is not what covers it.
+const SHEET_FOOT = `routes nav
+  home "/"
+  edit "/edit"
+component SheetFootFixture
+  action open
+    nav = go(nav, "/edit")
+  action back
+    nav = back(nav)
+  action follow(url: string)
+    nav = go(nav, url)
+  view
+    main navigationKey=\`\${top(nav).id}\` navigate=follow width="100%" height="100%"
+      for e in stack(nav) key=e.id
+        if e.name == "edit"
+          column navigationKey=\`\${e.id}\` navigationPresentation="modal" navigationScroll="form" position="absolute" inset=0
+            header
+              button press=back testId="cancel"
+                text "Cancel"
+              text "Edit Item" role="heading" aria-level=2
+              button press=back testId="save"
+                text "Save"
+            list id="form" appearance="auto" listStyle="inset-grouped" flex=1 min-height=0
+              section
+                for i in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20] key=i
+                  row
+                    text \`Row \${i}\` testId=\`row-\${i}\`
+        else
+          column navigationKey=\`\${e.id}\` position="absolute" inset=0
+            header
+              text "Home" role="heading" aria-level=1
+            button press=open testId="open"
+              text "Edit"
+`;
+
+test("a row resting under a web sheet's foot buttons scrolls clear of them, so it is not covered", async () => {
+  const session = await open({ host: 'web', url: await built('sheet-foot', SHEET_FOOT), size: [402, 874] });
+  try {
+    await session.tap('open');
+    await session.clock('settle');
+    const run = (await checkOp(session, ['light'])).check[0];
+    expect(kinds(run)).toEqual({});
+    // Under the buttons at rest: the row is drawn there, so the check had something to judge.
+    const obs = await session.op({ op: 'check' }), ids = new Map(((await session.op({ op: 'tree' })).nodes ?? []).map((n) => [n.props?.testId, n.id]));
+    const under = obs.items.find((it) => it.beneath && it.id === ids.get('row-15'));
+    expect(under).toBeDefined();
+  } finally { await session.close(); }
+}, 900000);
