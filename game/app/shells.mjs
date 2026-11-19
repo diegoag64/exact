@@ -73,8 +73,10 @@ export function prepareContractGame(args) {
   if (args[0] !== 'build' || args.includes('--help') || args.includes('-h')) return true;
   const input = args.slice(1).find((arg, i, rest) => !arg.startsWith('-') && !['-o', '--stdin-as', '--entry', '--surface'].includes(rest[i - 1]));
   if (!input) return true;
+  const parent = dirname(resolve(input));
+  if (!existsSync(parent)) return true;
   try {
-    const dir = realpathSync(dirname(resolve(input)));
+    const dir = realpathSync(parent);
     const authored = gameManifestSource(dir), game = gameDefaults(dir);
     if (game) writeGameManifest(dir, game, authored);
     return true;

@@ -344,5 +344,7 @@ test('Contract and bake write identical game manifests through a directory link'
     expect(prepared).toBe(manifest());
     expect(prepareContractGame(['build', resolve(alias, 'app.contract')])).toBe(true);
     expect(manifest()).toBe(prepared);
+    // A missing input directory is left for the Contract compiler to diagnose, not reported as a manifest error.
+    expect(prepareContractGame(['build', resolve(root, 'missing/app.contract'), '--json'])).toBe(true);
   } finally { rmSync(root, {recursive:true, force:true}); }
 });
