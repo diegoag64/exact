@@ -128,6 +128,11 @@ pub fn load(
 fn create_gpu(
     requirements: &[crate::grants::Requirements],
 ) -> Result<crate::Gpu, crate::DeviceFailure> {
+    // A headset's runtime makes the device where one answers.
+    #[cfg(all(target_os = "android", feature = "openxr"))]
+    if let Some(made) = crate::openxr::create_gpu(requirements) {
+        return made;
+    }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
         flags: crate::device::instance_flags(),
@@ -485,6 +490,11 @@ pub fn render(id: u32, width: f32, height: f32, scale: f32, now_ms: f64) -> u32 
         shader_generation: 0,
         headroom: 1.0,
     };
+    // A headset session draws the canvas into the headset instead.
+    #[cfg(all(target_os = "android", feature = "openxr"))]
+    if let Some(code) = with(|m| crate::openxr::render(m, id, now_ms)).flatten() {
+        return code;
+    }
     match with(|m| m.render(id, &frame)).flatten() {
         Some(true) => 1,
         Some(false) => 0,
@@ -834,6 +844,8 @@ macro_rules! module {
         thread_local! {
             static EXACT_GPU_OUT: ::std::cell::RefCell<Vec<u8>> = const { ::std::cell::RefCell::new(Vec::new()) };
         }
+
+        $crate::__openxr_android_init!();
 
         /// Create the device. 0 on success.
         #[no_mangle]

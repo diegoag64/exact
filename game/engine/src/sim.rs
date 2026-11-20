@@ -150,6 +150,12 @@ pub trait Game: 'static {
     fn xr_stage(_world: &World, _args: &Self::Args) -> crate::XrStage {
         crate::XrStage::default()
     }
+    /// The canvas's arguments as a native headset app runs it (app.json's
+    /// `host.android.xr`, a Quest build), where the HUD and menus are not
+    /// drawn: each bind is adjusted here before the world sees it, so a game
+    /// can start straight into play. Never called otherwise; the default
+    /// keeps the arguments the app binds.
+    fn xr_args(_args: &mut Self::Args) {}
     /// One fixed step, called after inputs and before transform propagation.
     fn tick(world: &mut World, input: &Input, args: &Self::Args);
     /// Rebuild presentation-only state (`#[derive(Presentation)]` components) from

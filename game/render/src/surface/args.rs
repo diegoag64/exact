@@ -73,6 +73,21 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         if let Some(e) = &self.error {
             return Err(e.clone());
         }
+        // A native headset app's arguments, as the game adjusts them there
+        // (`Game::xr_args`).
+        let adjusted;
+        let values = if exact_gpu::headset() {
+            match <G::Args as exact_game::Args>::decode(values) {
+                Ok(mut args) => {
+                    G::xr_args(&mut args);
+                    adjusted = exact_game::Args::values(&args);
+                    &adjusted[..]
+                }
+                Err(_) => values,
+            }
+        } else {
+            values
+        };
         let mut resample = false;
         if let Some(sim) = &mut self.sim {
             let generation = sim.generation();
