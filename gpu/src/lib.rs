@@ -75,6 +75,8 @@ mod uniform;
 mod xr;
 pub use xr::{fov_projection, pose_view, XrEye, XrScratch, XrStereo, XrView};
 pub mod xr_capture;
+pub mod xr_input;
+pub use xr_input::{XrHand, XrInput, XrPose};
 #[cfg(windows)]
 mod window;
 pub use uniform::FrameUniform;
@@ -1540,6 +1542,8 @@ pub fn headset() -> bool {
 /// A native headset session (OpenXR on Android; `docs/quest.md`).
 #[cfg(all(target_os = "android", feature = "openxr"))]
 pub mod openxr;
+#[cfg(all(target_os = "android", feature = "openxr"))]
+mod openxr_input;
 /// The module's Android initialization for a headset session, which
 /// [`module!`] defines: with the `openxr` feature on Android, a
 /// `gpu_android_init` that keeps the Java VM and Context for the session.

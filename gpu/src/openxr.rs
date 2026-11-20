@@ -447,6 +447,11 @@ struct Headset {
     vk_instance: ash::Instance,
     hal_device_ready: bool,
     capture: Capture,
+    /// The controllers' actions; None where the runtime refused them.
+    controls: Option<crate::openxr_input::Controls>,
+    /// The last frame's time on the host's clock: what the next frame's
+    /// input is stamped with, so the world's next tick takes it.
+    last_frame_ms: Option<f64>,
 }
 
 struct Swapchain {
@@ -781,6 +786,13 @@ fn make(
         (Some(fov), Some(config), Some(update)) => Some(Foveation { fov, config, update }),
         _ => None,
     };
+    let controls = match crate::openxr_input::Controls::new(&instance, &session) {
+        Ok(controls) => Some(controls),
+        Err(e) => {
+            log(true, &format!("controllers: {e}; the canvas hears none"));
+            None
+        }
+    };
     *HEADSET.lock().unwrap_or_else(|e| e.into_inner()) = Some(Headset {
         instance,
         system,
@@ -802,6 +814,8 @@ fn make(
         vk_instance: ash_instance,
         hal_device_ready: true,
         capture: Capture::default(),
+        controls,
+        last_frame_ms: None,
     });
     log(false, "session made; waiting for READY");
     Ok(Gpu {
@@ -864,6 +878,11 @@ impl Headset {
                 Event::InstanceLossPending(_) => {
                     self.running = false;
                     self.exiting = true;
+                }
+                Event::InteractionProfileChanged(_) => {
+                    if let Some(controls) = &self.controls {
+                        controls.profile_changed(&self.instance, &self.session);
+                    }
                 }
                 Event::DisplayRefreshRateChangedFB(change) => log(
                     false,
@@ -1272,8 +1291,23 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
         log(false, &format!("canvas {id} draws in the headset"));
         headset.canvas = Some(id);
     }
+    // The controllers, before the world advances to this frame: stamped at
+    // the last frame's time, so the next tick takes them rather than the one
+    // whose window holds this frame's display time.
+    let now_ms = xr_ms + offset;
+    if let Some(controls) = headset.controls.as_mut() {
+        let at_ms = headset.last_frame_ms.unwrap_or(now_ms).min(now_ms);
+        let (input, messages) = controls.frame(&headset.session, space, time, || JAVA.get().and_then(external_files_dir));
+        if let Some(input) = input {
+            module.input(id, &crate::InputEvent::Xr { input, at_ms });
+        }
+        for text in messages {
+            module.input(id, &crate::InputEvent::Message { text, at_ms });
+        }
+    }
+    headset.last_frame_ms = Some(now_ms);
     let encode = Instant::now();
-    let drawn = module.render_xr_stereo(id, xr_ms + offset, swapchain.format, &stereo);
+    let drawn = module.render_xr_stereo(id, now_ms, swapchain.format, &stereo);
     let encode_ms = encode.elapsed().as_secs_f64() * 1e3;
     if capture.is_some() && drawn.is_some() {
         if let Some(gpu) = module.gpu() {
