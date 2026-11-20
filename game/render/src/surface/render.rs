@@ -206,6 +206,11 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
     pub fn sim(&self) -> Option<&Sim<G>> {
         self.sim.as_ref()
     }
+    /// The last drawn frame's renderer work; an immersive frame's is both
+    /// eyes' together (`Stats::add`).
+    pub fn stats(&self) -> crate::Stats {
+        self.perf.stats
+    }
     /// Read presentation diagnostics owned by this canvas's render hooks.
     pub fn render_hooks(&self) -> &H {
         &self.hooks

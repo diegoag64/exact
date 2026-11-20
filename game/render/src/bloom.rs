@@ -233,6 +233,7 @@ impl BloomTargets {
                     bind: &wgpu::BindGroup,
                     size: (u32, u32),
                     stamps: (bool, bool)| {
+            crate::counters::pass();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("game bloom bright"),
                 color_attachments: targets,
@@ -242,8 +243,10 @@ impl BloomTargets {
                 multiview_mask: None,
             });
             crate::renderer::viewport(&mut pass, size);
+            crate::counters::pipeline();
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind, &[0]);
+            crate::counters::commands(1);
             pass.draw(0..3, 0..1);
         };
         let attach = |view| {
@@ -301,6 +304,7 @@ impl BloomTargets {
         size: (u32, u32),
         offset: u32,
     ) {
+        crate::counters::pass();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(if add {
                 "game bloom up"
@@ -326,8 +330,10 @@ impl BloomTargets {
             multiview_mask: None,
         });
         crate::renderer::viewport(&mut pass, size);
+        crate::counters::pipeline();
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, bind, &[offset]);
+        crate::counters::commands(1);
         pass.draw(0..3, 0..1);
     }
 }

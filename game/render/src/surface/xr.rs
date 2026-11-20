@@ -71,7 +71,7 @@ pub(super) fn encode_eyes<const ASSETS: bool>(
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("exact xr eye"),
         });
-        stats = renderer.encode_hooked(
+        let eye_stats = renderer.encode_hooked(
             &mut encoder,
             &eye.target,
             eye.size,
@@ -82,6 +82,7 @@ pub(super) fn encode_eyes<const ASSETS: bool>(
             poses,
             None,
         )?;
+        stats.add(&eye_stats);
         queue.submit([encoder.finish()]);
         renderer.submitted();
     }

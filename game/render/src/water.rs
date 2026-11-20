@@ -211,8 +211,10 @@ impl Passes {
         above: bool,
     ) {
         let pipeline = self.surface[usize::from(above)].as_ref();
+        crate::counters::pipeline();
         pass.set_pipeline(pipeline.expect("prepared from this side"));
         pass.set_bind_group(0, scene, &[0]);
+        crate::counters::commands(1);
         pass.draw(0..3, 0..1);
     }
 
@@ -225,6 +227,7 @@ impl Passes {
         timestamps: Option<&wgpu::QuerySet>,
     ) {
         let shafts = self.shafts.as_ref().expect("prepared with shafts");
+        crate::counters::pass();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("game water shafts"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -242,8 +245,10 @@ impl Passes {
             multiview_mask: None,
         });
         crate::renderer::viewport(&mut pass, size);
+        crate::counters::pipeline();
         pass.set_pipeline(&shafts.pipeline);
         pass.set_bind_group(0, shafts.bind.as_ref().unwrap(), &[]);
+        crate::counters::commands(1);
         pass.draw(0..3, 0..1);
     }
 }

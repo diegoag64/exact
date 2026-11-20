@@ -33,6 +33,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         if !self.prepass_active || direct {
             return 0;
         }
+        crate::counters::pass();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("opaque depth prepass"),
             color_attachments: &[],
