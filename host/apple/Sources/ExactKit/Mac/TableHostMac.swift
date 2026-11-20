@@ -15,9 +15,9 @@
 #if os(macOS)
 import AppKit
 
-final class TableHost {
+package final class TableHost {
     private weak var presenter: Presenter?
-    private(set) var feeds: [UInt32: TableFeed] = [:]
+    private(set) package var feeds: [UInt32: TableFeed] = [:]
     private var pressContact: PressNode?
     private weak var pressCell: TableRowCell?
 
@@ -131,7 +131,7 @@ final class TableHost {
 
     /// A windowed row's authored first root. The wrapper remains the row for
     /// geometry and shadow intent.
-    func authoredRow(of row: NodeView) -> NodeView? {
+    package func authoredRow(of row: NodeView) -> NodeView? {
         guard row.props["listItemKey"] != nil else { return row }
         guard let presenter else { return nil }
         // An exiting child stays in the hierarchy as a paint ghost after it
@@ -299,7 +299,7 @@ final class TableHost {
     }
     /// Whether the separator under a painted row is drawn: a split's
     /// selected row hides those beside it (SplitMac.swift `mark`).
-    func hideLine(of row: NodeView, _ hidden: Bool) {
+    package func hideLine(of row: NodeView, _ hidden: Bool) {
         guard let line = lines[row.id], line.isHidden != hidden else { return }
         CATransaction.begin(); CATransaction.setDisableActions(true)
         line.isHidden = hidden

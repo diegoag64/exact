@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// A pop UIKit runs reaches the app (`NavigationHost.followPops`, and a
 /// swipe's end in `completeTransition`): the app follows a pop UIKit

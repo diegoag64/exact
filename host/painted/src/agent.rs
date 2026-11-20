@@ -180,7 +180,9 @@ fn answer_line<D: DataSource>(p: &mut Presenter<D>, line: &str) -> String {
             p.tell_replacement_pending();
             // Host-only sections report `unavailable` instead of disappearing
             // (LLP 1035.002 D2), distinguishing no keyboard from no report.
-            let mut s = p.host().agent(line);
+            let runner = p.host().runner();
+            let observed = p.live_time().unwrap_or_else(|| runner.now_ms());
+            let mut s = exact_runner::agent::state_at(runner, line, observed);
             if s.ends_with('}') && !s.starts_with("{\"error\"") {
                 s.pop();
                 s.push_str(&p.state_sections());

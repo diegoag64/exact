@@ -641,11 +641,4 @@ package enum AudioSession {
         center.addObserver(forName: AVAudioSession.routeChangeNotification, object: nil, queue: .main) { _ in tell(4) }
     }
 }
-/// The built-in audio session behind `MediaLink.audioSession`.
-final class BuiltInAudioSession: AudioSessionControlling {
-    func beginPresentation() { AudioSession.beginPresentation() }
-    func endPresentation() { AudioSession.endPresentation() }
-    func backgroundExecutionEligible() -> Bool { AudioSession.backgroundExecutionEligible() }
-    func enteredBackground() { AudioSession.enteredBackground() }
-}
 #endif

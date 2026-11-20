@@ -59,20 +59,18 @@ impl<D: DataSource> Presenter<D> {
         self.brush.caret_hidden = !visible;
     }
 
-    pub(crate) fn reveal_field_cursor(&mut self) -> bool {
+    pub(crate) fn reveal_field_cursor(&mut self) -> Option<ViewId> {
         if !std::mem::take(&mut self.field_reveal) {
-            return false;
+            return None;
         }
-        let Some(id) = self.focus else { return false };
-        let Some(field) = self.brush.field_text.get(&id) else {
-            return false;
-        };
+        let id = self.focus?;
+        let field = self.brush.field_text.get(&id)?;
         let next = field.reveal_cursor(self.field_cursor(id));
         if self.scroll_of(id) == next {
-            return false;
+            return None;
         }
         self.scroll.insert(id, next);
-        true
+        Some(id)
     }
 }
 
@@ -122,11 +120,34 @@ mod tests {
     }
 
     #[test]
+    fn scrolled_selection_keeps_the_visible_parts_of_the_full_range() {
+        let value = "אב 😀 a line long enough to wrap in the field\n\n".repeat(16);
+        let (mut p, id) = fixture("textarea", &value);
+        p.frame();
+        let geometry = &p.brush.field_text[&id].geometry;
+        let len = value.encode_utf16().count() as u32;
+        for (start, end) in [(0, len), (3, len - 5)] {
+            let all = geometry.highlight(start, end, None);
+            let bottom = all.last().unwrap().1;
+            for top in [-100., 0., 57.5, bottom - 24., bottom + 200.] {
+                let clip = top..top + 48.;
+                let expected: Vec<_> = all
+                    .iter()
+                    .copied()
+                    .filter(|r| r.1 + r.3 >= clip.start && r.1 <= clip.end)
+                    .collect();
+                assert_eq!(geometry.highlight(start, end, Some(clip)), expected);
+            }
+        }
+    }
+
+    #[test]
     fn multiline_caret_reveals_scrolls_and_hits_the_visible_text() {
         let value = (1..=12)
             .map(|n| format!("line {n}"))
             .collect::<Vec<_>>()
-            .join("\n");
+            .join("\n")
+            + "\n";
         let (mut p, id) = fixture("textarea", &value);
         assert_caret_in_field(&mut p, id);
         let end = p.scroll_of(id).1;
@@ -151,6 +172,7 @@ mod tests {
         p.hold_modifier("ControlLeft", true);
         p.field_key(id, "End", 2.);
         p.hold_modifier("ControlLeft", false);
+        assert_caret_in_field(&mut p, id);
         p.field_key(id, "!", 3.);
         assert_caret_in_field(&mut p, id);
         assert!(p.field_text(id).ends_with('!'));
@@ -356,5 +378,188 @@ mod tests {
         assert_eq!(p.caret_frame(), None);
         p.set_focus(None, 1.);
         assert_eq!(p.caret_frame(), None);
+    }
+
+    #[test]
+    fn multiline_textarea_paints_scrolling_text_through_vertical_padding() {
+        let source = r##"component App
+  view
+    textarea testId="editor" value="VVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\nVVVVV\n" width=300 height=200 box-sizing="border-box" appearance="none" border-width=0 padding="10px 4px 64px" background-color="#ffffff" color="#000000" font-size=14 line-height="20px"
+"##;
+        let (mut p, error) = Presenter::boot_with_fixture_fonts(
+            &crate::test_plan(source),
+            (),
+            (320., 220.),
+            1.,
+            PathBuf::new(),
+            PainterChoice::Cpu,
+        )
+        .unwrap();
+        assert!(error.is_none(), "{error:?}");
+        let frame = p.frame();
+        // Content box ends at y = 200 - 64 = 136; rows 8..10 paint inside the
+        // bottom padding strip (y = 140..195) just as in Chrome.
+        let dark_in_bottom_padding = (140..195).any(|y| {
+            (4..80).any(|x| {
+                let px = frame.pixel(x, y).unwrap();
+                px.red() < 200 || px.green() < 200 || px.blue() < 200
+            })
+        });
+        assert!(
+            dark_in_bottom_padding,
+            "expected textarea ink to paint into vertical padding below y=136"
+        );
+    }
+
+    #[test]
+    fn a_scrolled_textarea_paints_the_first_glyph_inside_its_horizontal_padding() {
+        let source = r##"component App
+  view
+    textarea id="editor" value="M\n0123456789012345678901234567890123456789" width=200 height=90 box-sizing="border-box" appearance="none" border="none" padding="16px 28px" color="#000000" background-color="#ffffff" font-size=16 line-height=1.6 white-space="pre"
+"##;
+        let (mut p, error) = Presenter::boot_with_fixture_fonts(
+            &crate::test_plan(source),
+            (),
+            (240., 120.),
+            1.,
+            PathBuf::new(),
+            PainterChoice::Cpu,
+        )
+        .unwrap();
+        assert!(error.is_none(), "{error:?}");
+        let first_line = |p: &mut Presenter<()>| {
+            let frame = p.frame();
+            (0..180)
+                .filter(|&x| (16..42).any(|y| frame.pixel(x, y).unwrap().red() < 128))
+                .collect::<Vec<_>>()
+        };
+        let at_start = first_line(&mut p);
+        assert!(at_start.first().is_some_and(|&x| x >= 28));
+        for dx in [23., -23.] {
+            p.scroll_element_by(&[
+                exact_plan::Value::str("editor"),
+                exact_plan::Value::Number(dx),
+                exact_plan::Value::Number(0.),
+            ]);
+            let expected = if dx > 0. {
+                at_start.iter().map(|x| x - 23).collect()
+            } else {
+                at_start.clone()
+            };
+            assert_eq!(first_line(&mut p), expected, "scroll by {dx}");
+        }
+    }
+
+    #[test]
+    fn first_click_on_horizontally_scrolled_textarea_hits_visible_text_not_old_caret() {
+        let source = r##"component App
+  state body = "LEFT EDGE | abcdefghijklmnopqrstuvwxyz | ABCDEFGHIJKLMNOPQRSTUVWXYZ | RIGHT EDGE"
+  view
+    column width=300 height=240 padding=12 gap=10 background-color="#ffffff"
+      button "Park" id="park" testId="park" width=80 height=30
+      textarea id="field" testId="field" value=body width=180 height=120 padding=8 white-space="pre" overflow-x="auto" overflow-y="auto" font-size=16
+"##;
+        let (mut p, error) = Presenter::boot_with_fixture_fonts(
+            &crate::test_plan(source),
+            (),
+            (300., 240.),
+            1.,
+            PathBuf::new(),
+            PainterChoice::Cpu,
+        )
+        .unwrap();
+        assert!(error.is_none(), "{error:?}");
+        p.frame();
+        let (park, field) = {
+            let k = p.host.kernel();
+            (
+                k.node_by_key(k.find_by_test_id("park")[0]).unwrap().id,
+                k.node_by_key(k.find_by_test_id("field")[0]).unwrap().id,
+            )
+        };
+        let rect = p.rect_of(field).unwrap();
+        let click = (rect.0 + 36., rect.1 + 16.);
+        // First measure with caret near 0.
+        p.set_focus(Some(park), 0.);
+        p.mark_field(field, &p.field_text(field), FieldSelection::caret(0), false);
+        p.scroll_to(field, (0., 0.));
+        p.frame();
+        p.pointer_down(click.0, click.1, 10.).unwrap();
+        p.pointer_up(click.0, click.1, 15.).unwrap();
+        let near_offset = p.field_selection(field).start;
+        // Now place caret far right (offset 70), scroll back to left edge, blur
+        // onto Park, and click the exact same visible point.
+        p.set_focus(Some(park), 20.);
+        p.mark_field(
+            field,
+            &p.field_text(field),
+            FieldSelection::caret(70),
+            false,
+        );
+        p.scroll_to(field, (0., 0.));
+        p.frame();
+        assert_eq!(p.scroll_of(field).0, 0.);
+        p.pointer_down(click.0, click.1, 30.).unwrap();
+        p.pointer_up(click.0, click.1, 35.).unwrap();
+        let far_offset = p.field_selection(field).start;
+        assert_eq!(
+            far_offset, near_offset,
+            "clicking visible text must not jump to old caret before hit-testing"
+        );
+        assert!(
+            near_offset < 12,
+            "expected offset near LEFT EDGE, got {near_offset}"
+        );
+    }
+
+    #[test]
+    fn unchanged_textarea_reuses_retained_field_geometry_across_redraws() {
+        let source = r##"component App
+  state clicks = 0
+  state body = "line one\nline two\nline three\nline four\n"
+  action inc
+    clicks = clicks + 1
+  action edit(v: string)
+    body = v
+  view
+    column width=300 height=200 padding=8 gap=8
+      button "Inc" testId="inc" press=inc width=60 height=24
+      text `${clicks}`
+      textarea testId="editor" value=body input=edit width=260 height=120 font-size=14
+"##;
+        let (mut p, error) = Presenter::boot_with_fixture_fonts(
+            &crate::test_plan(source),
+            (),
+            (300., 200.),
+            1.,
+            PathBuf::new(),
+            PainterChoice::Cpu,
+        )
+        .unwrap();
+        assert!(error.is_none(), "{error:?}");
+        p.frame();
+        let (inc, editor) = {
+            let k = p.host.kernel();
+            (
+                k.node_by_key(k.find_by_test_id("inc")[0]).unwrap().id,
+                k.node_by_key(k.find_by_test_id("editor")[0]).unwrap().id,
+            )
+        };
+        let first = p.brush.field_text[&editor].geometry.clone();
+        p.tap(inc).unwrap();
+        p.frame();
+        let second = p.brush.field_text[&editor].geometry.clone();
+        assert!(
+            std::rc::Rc::ptr_eq(&first, &second),
+            "unchanged textarea must reuse its cached Geometry across unrelated redraws"
+        );
+        p.set_focus(Some(editor), 10.);
+        p.type_text(editor, "x").unwrap();
+        p.frame();
+        let third = p.brush.field_text[&editor].geometry.clone();
+        assert!(
+            !std::rc::Rc::ptr_eq(&first, &third),
+            "editing the textarea must rebuild Geometry"
+        );
     }
 }

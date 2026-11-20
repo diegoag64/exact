@@ -106,10 +106,11 @@ pub enum Capability {
     /// its own, so the web links nothing for it.
     Io,
     /// What a native engine plays that CSS plays on the web: a `transition`,
-    /// a `-exact-layout-transition` or a shared element's flight. A native
-    /// host's motion engine moves them; without them it only settles values
-    /// (LLP 1047.001). The browser plays them, so the web links nothing for
-    /// it.
+    /// a `-exact-layout-transition` or a shared element's flight, and the
+    /// `transition` shorthand's grammar. A native host's motion engine moves
+    /// them; without them it only settles values (LLP 1047.001). The browser
+    /// plays them, so the web counts it linked and links only the grammar
+    /// (`exact_web::link::link`, the JS target's motion module).
     Transitions,
     /// iOS's photo picker (LLP 1047.001.000 E): a file input whose `accept`
     /// is only images and videos, or is computed. Linking it costs every
@@ -208,11 +209,55 @@ pub enum Capability {
     /// `device.periodic-background-sync`, `device.geolocation-background`)
     /// or a background transfer's or a geofence's names. Native only.
     Wakes,
+    /// The display held awake (LLP 1125 D11): a `wakelock` that can be
+    /// `screen`. Native only.
+    WakeLock,
+    /// Video and audio elements' players, and an image's picture in
+    /// picture, which the video arm carries (LLP 1098; LLP 1042 §9): a
+    /// `video` or `audio` node, or a plan that runs
+    /// `requestPictureInPicture`. Native only.
+    Video,
+    /// Iframes' web views (LLP 1020): an `iframe` node. Native only.
+    WebViews,
+    /// The voice table's output and the runner's audio (LLP 1096; LLP 1125
+    /// D3): a plan that [`runs_sounds`] or reads `exactTransport`. Native
+    /// only.
+    Sound,
+    /// MIDI ports and the MIDI queue's output (LLP 1125 D6–D8): a plan that
+    /// [`keeps_midi`]. Native only.
+    Midi,
+    /// Route stacks, tabs and their bars as the platform's navigation, with
+    /// route modals (LLP 1008 §9, LLP 1115.000): a plan that binds a
+    /// navigation root's or a route's props (`navigationBack`,
+    /// `navigationKey`, `navigationPresentation` and the rest). Native only.
+    Navigation,
+    /// Selecting non-editable text (LLP 1115.000 D11.6): a `user-select`
+    /// that can be `text` or `all`, which iOS needs to make text
+    /// selectable. Native only; the Mac's set always names it, since
+    /// AppKit's document text is selectable unsaid.
+    TextSelection,
+    /// A widget's or a Live Activity's entry (LLP 1126 D2, D8): the app's
+    /// publication of its generations to the App Group and the observation
+    /// of the store the extension writes; an entry boots only where it is
+    /// linked. An entry's plan (`snapshot_entry`) selects it, and so do Live
+    /// Activities, whose sends name the published generation. Native only.
+    Widgets,
+    /// The content index (LLP 1133.023 D4, D9): the mirror
+    /// `@exact/search-index` writes, Spotlight's index of it, and the entries
+    /// an entity parameter offers. Selected by that package's names. Native
+    /// only.
+    ContentIndex,
+    /// HTML's `dialog` shown as UIKit's sheet, or as the author's box in the
+    /// top layer when its author paints it (LLP 1115.000 D11.5, LLP 1035.001
+    /// D11): a node that can be a `dialog`. iOS and tvOS only: the Mac's
+    /// top-layer stack, which a sheet route shares, presents a `dialog` in its
+    /// core ([`Uses::MAC_CORE`]).
+    Dialogs,
 }
 
 impl Capability {
     /// Every capability, in bit order.
-    pub const ALL: [Capability; 51] = [
+    pub const ALL: [Capability; 61] = [
         Capability::Markdown,
         Capability::Motion,
         Capability::Collections,
@@ -264,6 +309,16 @@ impl Capability {
         Capability::HostEvents,
         Capability::Activities,
         Capability::Wakes,
+        Capability::WakeLock,
+        Capability::Video,
+        Capability::WebViews,
+        Capability::Sound,
+        Capability::Midi,
+        Capability::Navigation,
+        Capability::TextSelection,
+        Capability::Widgets,
+        Capability::ContentIndex,
+        Capability::Dialogs,
     ];
 
     /// The name an entry, a refusal and a report use.
@@ -320,6 +375,16 @@ impl Capability {
             Capability::HostEvents => "host_events",
             Capability::Activities => "activities",
             Capability::Wakes => "wakes",
+            Capability::WakeLock => "wake_lock",
+            Capability::Video => "video",
+            Capability::WebViews => "web_views",
+            Capability::Sound => "sound",
+            Capability::Midi => "midi",
+            Capability::Navigation => "navigation",
+            Capability::TextSelection => "text_selection",
+            Capability::Widgets => "widgets",
+            Capability::ContentIndex => "content_index",
+            Capability::Dialogs => "dialogs",
         }
     }
 
@@ -359,7 +424,22 @@ impl Uses {
         .with(Capability::Notifications)
         .with(Capability::HostEvents)
         .with(Capability::Activities)
-        .with(Capability::Wakes);
+        .with(Capability::Wakes)
+        .with(Capability::WakeLock)
+        .with(Capability::Video)
+        .with(Capability::WebViews)
+        .with(Capability::Sound)
+        .with(Capability::Midi)
+        .with(Capability::Navigation)
+        .with(Capability::TextSelection)
+        .with(Capability::Widgets)
+        .with(Capability::ContentIndex)
+        .with(Capability::Dialogs);
+
+    /// The native roster's entries the Mac's core presents itself, which a
+    /// macOS set never names: a `dialog` is an entry of the top-layer stack
+    /// a sheet route presents in too.
+    pub const MAC_CORE: Uses = Uses::NONE.with(Capability::Dialogs);
 
     /// This set and `capability`.
     pub const fn with(self, capability: Capability) -> Uses {
@@ -559,14 +639,6 @@ pub fn uses(plan: &Plan) -> Uses {
                 {
                     uses = uses.with(Capability::Motion);
                 }
-                // A native engine plays every transition, a layout's too.
-                if matches!(
-                    StyleId::from_bit(u32::from(binding.id)),
-                    Some(StyleId::Transition | StyleId::LayoutTransition)
-                ) && can_be(&binding, &|v| !matches!(v.trim(), "" | "none"))
-                {
-                    uses = uses.with(Capability::Transitions);
-                }
             }
         }
     }
@@ -580,7 +652,8 @@ pub fn uses(plan: &Plan) -> Uses {
             EventKind::Heightrelease
             | EventKind::Transformgeometry
             | EventKind::Transformrelease
-            | EventKind::Reorderdrop => {
+            | EventKind::Reorderdrop
+            | EventKind::Reordertargetchange => {
                 uses = uses.with(Capability::Motion).with(Capability::Drag);
             }
             // Dropped and pasted files become `doc:` handles (studio diary
@@ -741,6 +814,7 @@ fn stdlib_calls(plan: &Plan) -> (bool, bool, bool) {
                     Some(
                         Stdlib::Frame
                         | Stdlib::RangeFrame
+                        | Stdlib::ScrollMetrics
                         | Stdlib::Measure
                         | Stdlib::ElementFromPoint
                         | Stdlib::ElementsFromPoint

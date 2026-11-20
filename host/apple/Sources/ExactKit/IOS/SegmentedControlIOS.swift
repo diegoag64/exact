@@ -78,7 +78,7 @@ open class LabelledSegmentedControl: UISegmentedControl {
 extension UISegmentedControl {
     /// Its segments as an assistive client reads them, in segment order
     /// (`segmentElements`).
-    var accessibilitySegments: [NSObject] {
+    package var accessibilitySegments: [NSObject] {
         segmentElements(declaredElements(accessibilityElements, count: accessibilityElementCount(), at: accessibilityElement(at:)))
     }
 
@@ -101,7 +101,7 @@ extension UISegmentedControl {
     /// Writes `id` as `element`'s accessibility identifier when it differs: a
     /// view's or an element's, since `UIView` has the property without
     /// conforming to `UIAccessibilityIdentification` at runtime (iOS 27.1).
-    static func identify(_ element: NSObject, as id: String?) {
+    package static func identify(_ element: NSObject, as id: String?) {
         if let view = element as? UIView {
             if view.accessibilityIdentifier != id { view.accessibilityIdentifier = id }
         } else if let element = element as? UIAccessibilityElement, element.accessibilityIdentifier != id {

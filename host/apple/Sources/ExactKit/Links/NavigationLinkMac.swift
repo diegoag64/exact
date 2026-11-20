@@ -143,6 +143,28 @@ package protocol BackSwiping: AnyObject {
     func swiped(deltaX: CGFloat) -> Bool
 }
 
+/// What a window's owner asks of the split view it composes.
+package protocol WindowSplitting: NSViewController {
+    /// Whether it shows the root tab bar as a sidebar.
+    var hasSidebar: Bool { get }
+    func install(in window: NSWindow)
+    /// Give the view back and leave the window.
+    func dismantle()
+    /// The window's `viewport-fit` changed: the page's pane is pinned again.
+    func viewportFitChanged()
+}
+
+/// How a window's split view is composed.
+package struct WindowSplitOptions {
+    package var autosaveName: String?
+    package var minimumPageWidth: CGFloat
+    package var sidebar: Bool
+    package var minimumDetailWidth: CGFloat?
+    package init(autosaveName: String?, minimumPageWidth: CGFloat, sidebar: Bool, minimumDetailWidth: CGFloat?) {
+        (self.autosaveName, self.minimumPageWidth, self.sidebar, self.minimumDetailWidth) = (autosaveName, minimumPageWidth, sidebar, minimumDetailWidth)
+    }
+}
+
 /// A route's sheet's own rows round the route it holds (navigation's `RouteChrome`).
 package protocol SheetChrome: NSView {
     func hold(_ content: BlockView)
@@ -172,9 +194,14 @@ package protocol SheetHeading {
 
 /// The slots are set before any session is made, and read on the main thread.
 package enum NavigationLink {
-    package static var make: ((Presenter) -> any NavigationHosting)? = { NavigationHost(presenter: $0) }
-    package static var makeSidebar: ((Presenter) -> any SidebarHosting)? = { SidebarHost($0) }
-    package static var makeBackSwipe: ((Presenter) -> any BackSwiping)? = { BackSwipe($0) }
+    package static var make: ((Presenter) -> any NavigationHosting)?
+    package static var makeSidebar: ((Presenter) -> any SidebarHosting)?
+    package static var makeBackSwipe: ((Presenter) -> any BackSwiping)?
+    /// The split view a window's owner composes when the app's root tab bar is
+    /// its sidebar or a stack shows a list beside its detail
+    /// (`ExactView.wantsWindowSidebar`, `wantsWindowSplit`, which are false
+    /// without navigation).
+    package static var makeWindowSplit: ((ExactView, WindowSplitOptions) -> any WindowSplitting)?
 }
 
 /// Navigation where the composition links none. The input gates a batch

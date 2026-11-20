@@ -23,6 +23,8 @@ package enum CoreExports {
     package static var collectionFixedSize: ((ExactRuntime, UInt32, UInt32, UInt32, UInt32) -> Double)?
     package static var collectionSnap: ((ExactRuntime, UInt32, Double, Double, Double, Double, Double) -> Double)?
     package static var collectionSnapStop: ((ExactRuntime, UInt32, Double, Double, Double, Double, Double) -> Double)?
+    /// A batch's `collections` items decoded; absent, they are skipped.
+    package static var collectionSnapshots: ((inout BatchReader) throws -> [CollectionSnapshot]?)?
     /// The events native extensions raised (LLP 1133.004 D6), notification
     /// actions among them; absent, the session hears none and does not ask.
     package static var moduleEvent: ((ExactRuntime, Int) -> UInt32)? = exact_module_event

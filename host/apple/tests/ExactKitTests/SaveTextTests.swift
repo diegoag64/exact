@@ -6,6 +6,7 @@ import AppKit
 #endif
 import XCTest
 @testable import ExactKit
+@testable import ExactPickers
 
 /// `saveFile(id, text=…, suggestedName=…)` writes the text to a scratch file
 /// for the panel or picker to copy from; that file holds the app's text, so

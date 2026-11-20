@@ -37,7 +37,7 @@ extension Presenter {
 
     /// The document in the viewport, which scrolls it as a page, or (`fixed`)
     /// in its mount, where a native container's bars are UIKit's to place.
-    func hostDocument(fixed: Bool) {
+    package func hostDocument(fixed: Bool) {
         let host: UIView = fixed ? documentMount : viewport
         guard root.superview !== host else { return }
         host.addSubview(root)

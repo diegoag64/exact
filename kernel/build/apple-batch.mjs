@@ -35,7 +35,7 @@ const codecs = {
   orientation: ['OrientationRequest?', 'nil', 'batchOrientation()'],
   rootTabs: ['[RootTabs]?', 'nil', 'batchRootTabs()'],
   sequence: ['(UInt64, UInt64)?', 'nil', 'batchSequence()'],
-  collectionSnapshots: ['[CollectionSnapshot]?', 'nil', 'collectionSnapshots()'],
+  collectionSnapshots: ['[CollectionSnapshot]?', 'nil', 'linkedCollectionSnapshots()'],
 };
 const identifier = name => name.replace(/-([a-z])/g, (_, letter) => letter.toUpperCase());
 const quoted = JSON.stringify;

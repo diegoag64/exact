@@ -11,7 +11,7 @@
 //! refused here too, and so is what the fold doesn't cover (a virtualized
 //! list, a relative length): the render then renders again with a kernel.
 
-use super::*;
+use super::{theme::ThemeIndex, *};
 use exact_kernel::id::IdMap;
 use exact_kernel::{NodeFacts, PropList, SortedMap, StyleId};
 use exact_plan::EventKind;
@@ -227,11 +227,13 @@ impl Tree {
         &self,
         plan: &Plan,
         sites: &SiteIndex,
+        theme: &ThemeIndex,
         fonts: Rc<RefCell<bridge::RuntimeFonts>>,
     ) -> Result<DocTree, DocTreeError> {
         let mut build = Build {
             plan,
             sites,
+            theme,
             fonts,
             doc: DocTree::default(),
             shared: vec![None; plan.nodes.len()],
@@ -255,6 +257,7 @@ impl Tree {
 struct Build<'p> {
     plan: &'p Plan,
     sites: &'p SiteIndex,
+    theme: &'p ThemeIndex,
     fonts: Rc<RefCell<bridge::RuntimeFonts>>,
     doc: DocTree,
     /// Each plan node's rows when every style binding it has reads nothing:
@@ -460,10 +463,22 @@ impl Build<'_> {
                 BindingKind::Prop => match bridge::prop_value(binding.id, value) {
                     Ok((prop, value)) => {
                         let value = bridge::icon_source(plan, prop, value);
-                        props.set(
-                            prop,
-                            bridge::atom_face_paint(plan, prop, value, &mut Vec::new()),
-                        );
+                        let value = match prop {
+                            exact_kernel::PropId::DecorationStyles => {
+                                // A detached runner has no accepted paint to reuse.
+                                self.theme.decoration_styles(n.view, &value).map_or_else(
+                                    || {
+                                        crate::decorations::resolve_styles(
+                                            plan, n.tuple, &value, None,
+                                        )
+                                        .value
+                                    },
+                                    |styles| styles.value.clone(),
+                                )
+                            }
+                            _ => bridge::atom_face_paint(plan, prop, value, &mut Vec::new()),
+                        };
+                        props.set(prop, value);
                     }
                     // Cleared, with a journal line on a kernel's commit.
                     Err(

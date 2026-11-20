@@ -5,6 +5,7 @@ import AppKit
 #endif
 import XCTest
 @testable import ExactKit
+@testable import ExactSharing
 
 /// `share`'s anchor (LLP 1069.003 D3): the pressed node's view; a menu
 /// row's popover invoker when the row is not on screen; the content's

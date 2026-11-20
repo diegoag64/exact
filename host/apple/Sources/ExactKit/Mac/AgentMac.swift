@@ -65,7 +65,7 @@ extension Agent {
         Thread { serve(fd: 0) }.start()
     }
 
-    var presenter: Presenter { session.presenter }
+    package var presenter: Presenter { session.presenter }
 
     /// A modal route's sheet has arrived or left by the time the input
     /// that asked for it returns (AppKit's `beginSheet` and `endSheet` do
@@ -341,6 +341,9 @@ extension Agent {
         let b = presenter.inlineFrame(UInt32(id)) ?? box(host, region: local)
         var space: [String: Any] = ["viewport": rect(b), "local": ["w": Agent.r2(local.width), "h": Agent.r2(local.height)],
                                     "capture": ["scale": Agent.r2(host.pixelScale ?? 1)]]
+        if let baseline = host.firstPaintedBaseline(presenter.inlineText(UInt32(id))) {
+            space["baseline"] = Agent.r2(box(host, region: CGRect(origin: baseline, size: .zero)).minY)
+        }
         if let w = host.window, let content = w.contentView {
             let inWindow = host.convert(local, to: nil)
             space["window"] = rect(NSRect(x: inWindow.origin.x, y: content.frame.height - inWindow.maxY, width: inWindow.width, height: inWindow.height))
@@ -429,7 +432,7 @@ extension Agent {
         return reply
     }
 
-    func view(_ req: [String: Any]) -> NodeView? {
+    package func view(_ req: [String: Any]) -> NodeView? {
         guard let id = req["id"] as? Int else { return nil }
         return presenter.textHost(UInt32(id))
     }
@@ -1172,7 +1175,7 @@ extension Agent {
     /// EXACT_AGENT_ACTIVATE=1 (only scripts/measure-controls.mjs sets it): an
     /// activated run, whose pictures say whether they were (ExactMac main.swift).
     nonisolated static let activated = ExactEnv.agentMode && ExactEnv.environment["EXACT_AGENT_ACTIVATE"] == "1"
-    static func ownWindowImage(_ number: Int) -> CGImage? { WindowServerPicture.ownWindow(number) }
+    package static func ownWindowImage(_ number: Int) -> CGImage? { WindowServerPicture.ownWindow(number) }
 
     /// The window server's own composite of `window` and `attached`, all
     /// this process's, in `window`'s frame: one over another as a person

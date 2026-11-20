@@ -254,7 +254,7 @@ package enum InspectHost {
             if let node = v as? NodeView, !node.isHidden { return (session, node.id, node, nil) }
             if let button = v as? NativeButtonIOS, let owner = button.owner { return (session, owner.id, owner, nil) }
             if let owned = v as? InspectionOwned, let id = owned.inspectionViewId { return (session, id, v, nil) }
-            if let title = v as? HeaderTitleView, let id = title.groupId { return (session, id, title, nil) }
+            if let id = session.presenter.navigation.inspectTitle(v) { return (session, id, v, nil) }
             // A swipe action UIKit draws for a row: the action's node.
             if let button = v as? UIButton, !(v is NativeButtonIOS), let id = session.presenter.swipeActions.action(for: button) { return (session, id, button, nil) }
             // A grouped list's cell (its rows are no NodeViews): its switch's
@@ -318,7 +318,7 @@ extension UINavigationBar {
     /// labels saying it the title is the lowest (a large title is under
     /// Back's row), then the nearest the bar's middle (an inline one is
     /// centred; Back's is at the leading edge).
-    func titleFrame(_ title: String?) -> CGRect? {
+    package func titleFrame(_ title: String?) -> CGRect? {
         guard let title, !title.isEmpty else { return nil }
         var found: [CGRect] = [], pending: [UIView] = subviews.filter { !$0.isHidden && $0.alpha > 0.01 }
         while !pending.isEmpty {

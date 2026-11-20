@@ -466,6 +466,9 @@ impl<D: DataSource> Presenter<D> {
         {
             return;
         }
+        // Defer any pending caret reveal until after hit-testing against the
+        // text currently visible under the pointer.
+        let deferred_reveal = std::mem::take(&mut self.field_reveal);
         self.boxes();
         let (x, y) = self
             .boxes
@@ -483,6 +486,8 @@ impl<D: DataSource> Presenter<D> {
             if let Some(mark) = self.fields.get_mut(&id) {
                 mark.upstream = cursor.upstream;
             }
+        } else {
+            self.field_reveal |= deferred_reveal;
         }
     }
 
@@ -686,13 +691,10 @@ impl<D: DataSource> Presenter<D> {
             let id = self.text_field(name)?;
             let node = self.host.kernel().node(id).ok_or("no live field")?;
             let textarea = node.props.str(PropId::SemanticTag) == Some("textarea");
-            if node.props.str(PropId::Markup) == Some("markdown")
-                || (!textarea
-                    && !matches!(
-                        node.props.str(PropId::Type).unwrap_or("text"),
-                        "text" | "search" | "url" | "tel" | "password"
-                    ))
-            {
+            if node.props.str(PropId::Markup) == Some("markdown") {
+                return Err("this host edits Markdown as plain source");
+            }
+            if !self.has_selection_api(id) {
                 return Err("not a plain text field");
             }
             let text = args

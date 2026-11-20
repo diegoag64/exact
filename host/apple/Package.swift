@@ -37,6 +37,7 @@ let allCapabilities: [(name: String, target: String)] = [
     ("collections", "ExactCollections"),
     ("surfaces", "ExactSurfaces"),
     ("drag", "ExactDrag"),
+    ("picker", "ExactPickers"),
     ("media_picker", "ExactMediaPicker"),
     ("auth_session", "ExactAuthSession"),
     ("numerals", "ExactNumerals"),
@@ -54,13 +55,33 @@ let allCapabilities: [(name: String, target: String)] = [
     ("activities", "ExactActivities"),
     ("wakes", "ExactWakeCarriers"),
     ("gradients", "ExactGradients"),
+    ("traces", "ExactTraces"),
+    ("wake_lock", "ExactWakeLock"),
+    ("content_regions", "ExactContentRegions"),
+    ("video", "ExactVideo"),
+    ("web_views", "ExactWebViews"),
+    ("sound", "ExactSound"),
+    ("midi", "ExactMIDI"),
+    ("animations", "ExactAnimations"),
+    ("navigation", "ExactNavigation"),
+    ("text_selection", "ExactTextSelection"),
+    ("widgets", "ExactWidgetPublication"),
+    ("tools", "ExactToolDoor"),
+    ("content_index", "ExactIndexMirror"),
+    ("dialogs", "ExactDialogs"),
+    ("share", "ExactSharing"),
 ]
 // What a family imports beyond ExactKit and CExact: another family's product,
 // which the roster links with it, or ExactCore's package API. Surfaces' Canvas
 // 2D images fetch and decode through the images family's static API, which
 // needs no install.
-let capabilityNeeds: [String: [Target.Dependency]] = ["ExactCollections": ["ExactCore"], "ExactNativeViews": ["ExactFormaBinding"], "ExactSvg": ["ExactCore", "ExactEffects"], "ExactSurfaces": ["ExactImages"], "ExactGradients": ["ExactCore"]]
-let capabilities = allCapabilities.filter { links($0.name) }
+let capabilityNeeds: [String: [Target.Dependency]] = ["ExactCollections": ["ExactCore"], "ExactContentRegions": ["ExactCore"], "ExactPickers": ["ExactCore"], "ExactTraces": ["ExactCore"], "ExactNativeViews": ["ExactFormaBinding", "ExactHeavyLeaves"], "ExactVideo": ["ExactHeavyLeaves"], "ExactWebViews": ["ExactHeavyLeaves"], "ExactSvg": ["ExactCore", "ExactEffects", "ExactAnimations"], "ExactSurfaces": ["ExactImages"], "ExactGradients": ["ExactCore"], "ExactNavigation": ["ExactCore"], "ExactDrag": ["ExactCore"], "ExactTextSelection": ["ExactCore"], "ExactWidgetPublication": ["ExactCore"], "ExactActivities": ["ExactCore", "ExactWidgetPublication"], "ExactIndexMirror": ["ExactCore"]]
+// The host lowers a box's transitions, drags and motion to the same
+// `animations` op as its CSS animations, which ExactAnimations plays, so any
+// of them links that product without the keyframe grammar the `animations`
+// capability links into the Rust archive (link.mjs's `PLAYED`).
+let played = ["animations", "motion", "drag", "timelines", "transitions"]
+let capabilities = allCapabilities.filter { $0.name == "animations" ? played.contains(where: links) : links($0.name) }
 
 // `swift test` builds every target a package declares, and the two UIKit
 // executables cannot build for macOS. EXACT_TESTS=1 narrows the package to
@@ -80,7 +101,8 @@ let devTools: [SwiftSetting] = ProcessInfo.processInfo.environment["EXACT_UPDATE
 // ExactKit target does not compile the carrier or inspection implementation,
 // nor hatch diagnostics (LLP 1047.001 D11), nor the plan from a URL and its
 // live design: network plan loading is compiled only into dev-capable hosts
-// (LLP 1023 §8). Development keeps the same sources and API it has always had.
+// (LLP 1023 §8), nor the build channel that reports to the design server
+// over it. Development keeps the same sources and API it has always had.
 let agentSources = ProcessInfo.processInfo.environment["EXACT_UPDATE_TRUST"] == "production" ? [
     "ActivityAgent.swift",
     "Agent.swift",
@@ -93,6 +115,7 @@ let agentSources = ProcessInfo.processInfo.environment["EXACT_UPDATE_TRUST"] == 
     "AgentScrollProbe.swift",
     "AgentSensors.swift",
     "AgentSocketStartup.swift",
+    "BuildChannel.swift",
     "HatchDiagnostics.swift",
     "LiveDesign.swift",
     "PlanURL.swift",
@@ -110,7 +133,6 @@ let agentSources = ProcessInfo.processInfo.environment["EXACT_UPDATE_TRUST"] == 
     "Mac/AgentMac.swift",
     "Mac/AgentMouseMac.swift",
     "Mac/AgentNativeMac.swift",
-    "Mac/AgentPictureInPictureMac.swift",
     "Mac/AgentStdio.swift",
 ] : []
 
@@ -126,7 +148,7 @@ let sharedCore = ProcessInfo.processInfo.environment["EXACT_CORE_FRAMEWORK"]
 let watchSync = ProcessInfo.processInfo.environment["EXACT_WATCH_SYNC"] == "1"
 let watchSyncDependency: [Target.Dependency] = watchSync ? [.target(name: "ExactWatchSync")] : []
 let watchSyncSettings: [SwiftSetting] = watchSync ? [.define("EXACT_WATCH_SYNC")] : []
-let core: [Target] = [
+var core: [Target] = [
     .systemLibrary(name: "CExact", path: "Sources/CExact"),
     // C, so its constructor runs before `main` and can read the process start and prewarm flag.
     .target(name: "CExactLaunch", path: "Sources/CExactLaunch"),
@@ -137,20 +159,27 @@ let core: [Target] = [
         swiftSettings: [.unsafeFlags(["-application-extension"])] + devTools,
         linkerSettings: (widgetCore ? [.unsafeFlags(["-Xlinker", "-force_load", "-Xlinker", libDir + "/lib" + libName + ".a"])] : [.unsafeFlags(["-L", libDir]), .linkedLibrary(libName)]) + [.linkedLibrary("c++"), .linkedFramework("ImageIO")]
     ),
-    // The snapshot driver (LLP 1126 D4, D5): SwiftUI over a headless
-    // session's node model, for WidgetKit's archive. Linked by an app with
-    // entries and its extension, never by a presenter.
-    .target(name: "ExactSnapshot", dependencies: ["ExactCore", "CExact"], path: "Sources/ExactSnapshot", swiftSettings: [.unsafeFlags(["-application-extension"])]),
+    // The headless session and the snapshot driver (LLP 1126 D4, D5, D8):
+    // SwiftUI over its node model, for WidgetKit's archive. Linked by an
+    // entry's extension, the watch app and a development build's widget
+    // gallery; a production presenter never links it.
+    .target(name: "ExactSnapshot", dependencies: ["ExactCore", "CExact"], path: "Sources/ExactSnapshot", swiftSettings: [.unsafeFlags(["-application-extension"])] + devTools),
     .target(name: "ExactKit", dependencies: [.target(name: "ExactCore"), .target(name: "CExact"), .target(name: "CExactLaunch")] + (gallery ? [.target(name: "ExactSnapshot")] : []), path: "Sources/ExactKit", exclude: agentSources + (intentFiles ? [] : ["IntentFiles.swift"]), swiftSettings: devTools + gallerySettings + intentFileSettings),
     .target(name: "ExactWatchSync", dependencies: ["ExactCore", "CExact"], path: "Sources/ExactWatchSync"),
     .target(name: "ExactUpdates", dependencies: ["ExactKit", "CExact"], path: "Sources/ExactUpdates"),
     // The binding core (LLP 1121 D12): no roster row of its own; the native
     // module family answers a module's bindings through it, and links it.
     .target(name: "ExactFormaBinding", dependencies: ["ExactKit", "CExact"], path: "Sources/ExactFormaBinding", swiftSettings: devTools),
-] + allCapabilities.map {
-    .target(name: $0.target, dependencies: ["ExactKit", "CExact"] + (capabilityNeeds[$0.target] ?? []), path: "Sources/\($0.target)", swiftSettings: devTools)
-} + [
-    .target(name: "ExactLaunchParts", dependencies: ["ExactKit"], path: launchParts,
+    .target(name: "ExactHeavyLeaves", dependencies: ["ExactKit"], path: "Sources/ExactHeavyLeaves", swiftSettings: devTools),
+]
+core += allCapabilities.map {
+    .target(name: $0.target, dependencies: ["ExactKit", "CExact"] + (capabilityNeeds[$0.target] ?? []), path: "Sources/\($0.target)",
+            // The tool door answers a file face's landing, compiled only for one (`EXACT_INTENT_FILES`).
+            swiftSettings: devTools + ($0.target == "ExactToolDoor" ? intentFileSettings : []))
+}
+core += [
+    // A launch part may call the tool door (`ExactTools.call`), which a plan with a tool links.
+    .target(name: "ExactLaunchParts", dependencies: ["ExactKit"] + (links("tools") ? ["ExactToolDoor"] : []), path: launchParts,
             swiftSettings: launchPartsTarget.map { [.unsafeFlags(["-target", $0])] } ?? []),
     .target(name: "ExactComposition", dependencies: [.target(name: "ExactKit")] + (composition == "updating" ? [.target(name: "ExactUpdates")] : [])
                 + capabilities.map { .target(name: $0.target) } + watchSyncDependency,
@@ -176,7 +205,7 @@ let tests: [Target] = [
     .target(name: "MediaCaptureImplementation", dependencies: ["ExactPackage"], path: "tests/MediaCaptureImplementation"),
     .target(name: "SignInImplementation", dependencies: ["ExactPackage"], path: "tests/SignInImplementation"),
     .target(name: "PasskeysImplementation", dependencies: ["ExactPackage"], path: "tests/PasskeysImplementation"),
-    .target(name: "ExactWidgetTimeline", dependencies: ["ExactCore"], path: "widget", exclude: ["Timeline.swift"], sources: ["WidgetTimelineWaiters.swift"]),
+    .target(name: "ExactWidgetTimeline", dependencies: ["ExactCore", "ExactSnapshot"], path: "widget", exclude: ["Timeline.swift"], sources: ["WidgetTimelineWaiters.swift"]),
     // The sound arm's C mixer (LLP 1096 D8), rendered offline by the tests,
     // and its AVAudioEngine calls (ARC, cleaning up on a caught exception, as
     // the arm's build); the arm itself is a dylib build.mjs makes, never a product.
@@ -193,7 +222,7 @@ let tests: [Target] = [
     // (`ExactTestsInstall`, `TestsInstall.swift`).
     .target(name: "ExactTestsInstall", path: "tests/ExactTestsInstall"),
     .testTarget(name: "ExactKitTests", dependencies: ["ExactWatchSync", "ExactPackage", "MediaCaptureImplementation", "SignInImplementation", "PasskeysImplementation", "ExactWidgetTimeline", "ExactCore", "ExactSnapshot", "ExactKit", "ExactUpdates", "ExactComposition", "ExactTestsInstall"]
-                + allCapabilities.map { .target(name: $0.target) } + ["ExactFormaBinding", "ExactSoundRender", "ExactNowPlaying", "ExactShare", "ExactSharePlain"], path: "tests/ExactKitTests",
+                + allCapabilities.map { .target(name: $0.target) } + ["ExactFormaBinding", "ExactHeavyLeaves", "ExactSoundRender", "ExactNowPlaying", "ExactShare", "ExactSharePlain"], path: "tests/ExactKitTests",
                 resources: [.copy("ColorFixtures"), .copy("SnapshotFixtures")], swiftSettings: devTools + gallerySettings + caltrainSettings),
 ]
 

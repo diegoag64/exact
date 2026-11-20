@@ -212,9 +212,26 @@ fn main() -> std::process::ExitCode {
   };
 }
 
-/** A host crate's files for the generated workspace: a Rust-data app's without app.ts (`rustCrateFiles`), else the
- * TypeScript app's, composed with the data crate when the manifest names one. */
-const hostCrateFiles = (kind, options) => options.data && !options.typescript ? rustCrateFiles(kind, options) : crateFiles(kind, options);
+/** Both generated and authored host crates link the app's declared sources and packages. */
+function hostConfiguration(dir, manifest, name, members, generated) {
+  const data = rustDataOf(manifest), dataCrate = data && members.find(crate => crate.name === data.krate);
+  if (data && !dataCrate) {
+    const joins = generated ? ` that joins the app's workspace (package.workspace = "${MEMBER_OF.host}")` : '';
+    throw new Error(`app.json's rust.data.crate is ${data.krate}, which is not a crate beside app.json${joins}`);
+  }
+  return {
+    name, title: manifest.app?.name ?? manifest.name ?? titleOf(name),
+    data, dataCrate, typescript: existsSync(resolve(dir, 'app.ts')),
+    native: nativePackages(dir).map(pkg => pkg.name), preload: Object.keys(manifest.preload ?? {}).length > 0,
+    updates: manifest.deploy?.store?.android === 'A',
+  };
+}
+
+function hostCrateFiles(kind, config, app, dep) {
+  const data = config.data && { ...config.data, dependency: dep(config.dataCrate.dir) };
+  const files = data && !config.typescript ? rustCrateFiles : crateFiles;
+  return files(kind, { ...config, native: config.native.length > 0, data, app, dep });
+}
 
 /** A host crate's files, keyed by path under the crate's directory. `dep(path)` is a dependency's path from there and
  * `app` the app directory's, as Rust strings' content; `native` attaches the factory the bake writes for a package
@@ -462,15 +479,22 @@ fn main() {
   throw new Error(`no host crate of kind ${kind}`);
 }
 
-/** A host crate's files for an authored workspace: the crate at `<dir>/<kind>`, the app one level up. `update` writes
- * `linux/` into an older authored app with it (game/new.mjs). */
-export const authoredCrate = (dir, kind, name, title) =>
-  Object.fromEntries(Object.entries(crateFiles(kind, { name, title, app: '..', dep: path => `{ path = ${JSON.stringify(pathFrom(resolve(dir, kind), resolve(ROOT, path)))} }` })).map(([file, text]) => [`${kind}/${file}`, text]));
+export function authoredCrates(dir, manifest, name, kinds) {
+  const config = hostConfiguration(dir, manifest, name, appCrates(dir), false);
+  return Object.fromEntries(kinds.map(kind => {
+    const dep = path => `{ path = ${JSON.stringify(pathFrom(resolve(dir, kind), resolve(ROOT, path)))} }`;
+    return [kind, hostCrateFiles(kind, config, '..', dep)];
+  }));
+}
 
 /** For each host crate, its build script as `.exact/shells/` writes it and as it reads beside app.json: a crate copied up
  * (LLP 1153 D1.4) whose script is still the first gets the second from `update` (game/new.mjs). */
 export const copiedBuildScripts = () => Object.fromEntries(Object.values(PLATFORMS).concat('web').filter((kind, i, all) => all.indexOf(kind) === i)
   .map(kind => [kind, ['../../..', '..'].map(app => crateFiles(kind, { name: 'app', title: 'App', app, dep: () => '' })['build.rs'])]));
+
+/** The Canvas entry a generated TypeScript crate can bring to an authored workspace. */
+export const copiedAndroidEntries = () => [false, true].flatMap(updates => [false, true].flatMap(preload =>
+  [false, true].map(native => crateFiles('android', {title: 'App', dep: () => '', updates, preload, native})['src/lib.rs'])));
 
 const titleOf = name => name.split('-').map(w => w[0].toUpperCase() + w.slice(1)).join(' ');
 const stampOf = (shells) => { try { return JSON.parse(readFileSync(resolve(shells, '.stamp.json'), 'utf8')); } catch { return null; } };
@@ -541,19 +565,14 @@ function besideApp(dir, wanted) {
 export function ensureShells(dir, manifest = readManifest(dir), name = null) {
   dir = realpathSync(dir);
   name = appCrateName(dir, name ?? basename(dir));
-  const shells = shellsDir(dir), title = manifest.app?.name ?? manifest.name ?? titleOf(name);
-  // The package that fills the native slot (LLP 1154 D3); the bake refuses two.
-  const crates = shellCrates(manifest), native = nativePackages(dir).map(p => p.name), members = appMembers(dir, name);
-  const updates = manifest.deploy?.store?.android === 'A';
+  const shells = shellsDir(dir), crates = shellCrates(manifest), members = appMembers(dir, name);
+  const config = hostConfiguration(dir, manifest, name, members.host, true);
+  const { title, native, data, dataCrate, typescript, preload, updates } = config;
   // The paths written are relative (`pathWithin`), which reads real directories.
   for (const kind of crates) mkdirSync(resolve(shells, kind), { recursive: true });
   const copied = ['rust-toolchain.toml', '.cargo/config.toml'].map(file => [file, readFileSync(resolve(ROOT, file), 'utf8')]);
   const patches = patchLines(shells, pathWithin);
   const own = members.host.map(member => pathWithin(shells, member.dir));
-  // The data crate the hosts link (LLP 1153.003 D2), one of the app's own; with app.ts beside it, the two compose.
-  const data = rustDataOf(manifest), typescript = existsSync(resolve(dir, 'app.ts'));
-  const dataCrate = data && members.host.find(member => member.name === data.krate);
-  if (data && !dataCrate) throw new Error(`app.json's rust.data.crate is ${data.krate}, which is not a crate beside app.json that joins the app's workspace (package.workspace = "${MEMBER_OF.host}")`);
   // A crate the host links is the data crate or a helper of it (D1.1). Without rust.data no host crate links one, so
   // unless a module of the app's own answers (rust.module.package), nothing answers the app's requests.
   if (!data && !manifest.rust?.module?.package && members.host.length) {
@@ -561,21 +580,19 @@ export function ensureShells(dir, manifest = readManifest(dir), name = null) {
     throw new Error(undeclaredDataCrate(`${dir}: ${named} beside app.json ${members.host.length > 1 ? 'join' : 'joins'} the app's generated workspace`,
       'its host crates link a crate of the app\'s only as the data crate rust.data names, so they would answer none of the app\'s requests', members.host, manifest));
   }
-  const options = (kind, app, dep) => ({ name, title, native: native.length > 0, preload: Object.keys(manifest.preload ?? {}).length > 0, app, dep, typescript, updates,
-    data: data && { ...data, dependency: `{ path = ${JSON.stringify(pathWithin(resolve(shells, kind), dataCrate.dir))} }` } });
   // The inputs whose change rewrites the workspace: the app's path, the checkout's and its commit, the templates (this
   // module), the files copied from the checkout, its patch table and its lock (a dependency the SDK moved), the
   // manifest's platforms, the app's name, its own crates and the package that fills the native slot.
   const commit = spawnSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).stdout?.trim() ?? '';
   const stamp = {
     exact2: ROOT, app: dir, commit, name, title, crates, native, members: own, data, typescript,
-    ...(Object.keys(manifest.preload ?? {}).length ? { preload: true } : {}),
+    ...(preload ? { preload } : {}),
     ...(updates ? { updates } : {}),
     inputs: createHash('sha256').update([readFileSync(fileURLToPath(import.meta.url), 'utf8'), APPLE_BUILD_SCRIPT, ...copied.map(([, text]) => text), ...patches, readFileSync(resolve(ROOT, 'Cargo.lock'), 'utf8')].join('\0')).digest('hex'),
   };
   besideApp(dir, members.host.length + members.gpu.length > 0);
   const captured = resolve(dir, 'Cargo.lock'), before = stampOf(shells);
-  const expected = ['Cargo.toml', 'Cargo.lock', ...copied.map(([file]) => file), ...(data ? ['module/Cargo.toml', 'module/src/lib.rs'] : []), ...crates.flatMap(kind => Object.keys(hostCrateFiles(kind, options(kind, '', () => ''))).map(file => `${kind}/${file}`))];
+  const expected = ['Cargo.toml', 'Cargo.lock', ...copied.map(([file]) => file), ...(data ? ['module/Cargo.toml', 'module/src/lib.rs'] : []), ...crates.flatMap(kind => Object.keys(hostCrateFiles(kind, config, '', () => '')).map(file => `${kind}/${file}`))];
   const complete = expected.every(file => existsSync(resolve(shells, file)));
   if (before && JSON.stringify(before) === JSON.stringify(stamp) && complete) {
     // The captured lock is the workspace's whenever it changed (`bun exact.mjs lock`, a pull).
@@ -605,7 +622,7 @@ ${patches.join('\n')}
 `);
   for (const [file, text] of copied) wrote = writeChanged(resolve(shells, file), text) || wrote;
   for (const kind of crates) {
-    const files = hostCrateFiles(kind, options(kind, '../../..', path => `{ path = ${JSON.stringify(pathWithin(resolve(shells, kind), resolve(ROOT, path)))} }`));
+    const files = hostCrateFiles(kind, config, '../../..', path => `{ path = ${JSON.stringify(pathWithin(resolve(shells, kind), resolve(ROOT, path)))} }`);
     for (const [file, text] of Object.entries(files)) wrote = writeChanged(resolve(shells, kind, file), text) || wrote;
     // A file an earlier shape wrote (app.ts added or removed, the dev driver) goes.
     const keep = new Set(Object.keys(files));

@@ -42,7 +42,7 @@ pub use cli::{main, main_with};
 pub use direct::boot_swap_js;
 pub use executor::{pump, Executor};
 pub use page::{capture, capture_js, page, page_with_rules, scroll_document_js};
-pub use pages::pages;
+pub use pages::{pages, Listed};
 pub use requests::{render_with_at, settle};
 pub use serve::{expire_renders, Serve, Server, Stopper};
 pub use source::Anonymous;
@@ -377,17 +377,20 @@ pub(crate) fn render_with_faults_at<D: DataSource + 'static, F: Fn() -> D>(
     let (document, handlers) = match settled_tree {
         Some(settled) => settled,
         None => {
-            let mut booted = Runner::boot_checkpoint(
-                plan.clone(),
-                Anonymous::new(data()),
-                Kernel::with_monospace_on_demand(),
-                &state,
-                Vec::new(),
-                delivery.clone(),
-                viewport,
-                location,
-            )
-            .map_err(|e| format!("boot from the checkpoint: {e:?}"))?;
+            let mut booted = exact_runner::page::Platform::Web
+                .boot(|| {
+                    Runner::boot_checkpoint(
+                        plan.clone(),
+                        Anonymous::new(data()),
+                        Kernel::with_monospace_on_demand(),
+                        &state,
+                        Vec::new(),
+                        delivery.clone(),
+                        viewport,
+                        location,
+                    )
+                })
+                .map_err(|e| format!("boot from the checkpoint: {e:?}"))?;
             booted
                 .build_every_tab()
                 .map_err(|e| format!("boot from the checkpoint: {e:?}"))?;
@@ -506,15 +509,17 @@ pub(crate) fn settle_at<D: DataSource + 'static, F: Fn() -> D>(
         }
     };
     let boot = |source| {
-        Runner::boot_at(
-            plan.clone(),
-            source,
-            kernel(),
-            viewport,
-            location,
-            now_ms,
-            delivery.clone(),
-        )
+        exact_runner::page::Platform::Web.boot(|| {
+            Runner::boot_at(
+                plan.clone(),
+                source,
+                kernel(),
+                viewport,
+                location,
+                now_ms,
+                delivery.clone(),
+            )
+        })
     };
     // A realm made ahead (or kept warm) is active, so boot asks its sources
     // itself: a call the deadline stops there is the deadline, as it is in

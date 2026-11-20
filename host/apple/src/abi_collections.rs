@@ -66,7 +66,13 @@ impl<D: DataSource> Bridge<D> {
     /// `Runner::show_split_placeholder`) and kind 15 hides it again; their
     /// four floats are unused. Kind 16 is the border box a person dragged
     /// the box's `resize` grip to (`Runner::resize_box`): f32 width and
-    /// height, a NaN keeping that axis, and two unused.
+    /// height, a NaN keeping that axis, and two unused. Kind 21 is a content
+    /// owner's update (LLP 1123 D2): a u32 byte length, then the update as
+    /// `exact_kernel::OwnerUpdate::encode` writes it, applied after the
+    /// blocks (`Host::set_claims` says when one is refused). Kind 22 is a
+    /// target native code registered for the session (D9, "Registration"):
+    /// a u32 byte length, then the registration as
+    /// `exact_kernel::encode_registration` writes it, refused as an update is.
     pub fn covers(&mut self, len: usize) -> u32 {
         let bytes = self.input.get(..len).unwrap_or(&[]);
         let out = if let Ok(records) = records(bytes) {
@@ -131,6 +137,7 @@ impl<D: DataSource> Bridge<D> {
                     &lists,
                     &restyles,
                     &locals,
+                    owners.reports,
                 )
             })
         } else {
@@ -362,6 +369,11 @@ pub(super) fn records(bytes: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
         let size = match u32::from_le_bytes(rest[4..8].try_into().unwrap()) {
             4 => 28,
             6 | 13 => 36,
+            // An owner update's or a registration's length follows its kind
+            21 | 22 => match rest.get(8..12) {
+                Some(len) => 12 + u32::from_le_bytes(len.try_into().unwrap()) as usize,
+                None => return Err("covers: truncated record"),
+            },
             _ => 24,
         };
         let Some((record, after)) = rest.split_at_checked(size) else {
@@ -381,11 +393,15 @@ pub(super) fn records(bytes: &[u8]) -> Result<Vec<&[u8]>, &'static str> {
 pub(super) struct BlockChanges {
     pub blocks: Vec<(u32, Option<exact_kernel::HostBlock>)>,
     pub placements: Vec<(u32, Option<exact_runner::BlockPlacement>)>,
+    /// Content owners' updates, each beside its block, and registered
+    /// targets (LLP 1123 D2, D9).
+    pub reports: crate::host::OwnerReports,
 }
 
 impl BlockChanges {
-    /// Whether this record is an owner allocation or placement; an error
-    /// for a block whose try tactic is no side permutation.
+    /// Whether this record is an owner allocation, placement, update or
+    /// registration; an error for a block whose try tactic is no side
+    /// permutation or an update or registration that does not decode.
     pub fn push(&mut self, r: &[u8]) -> Result<bool, &'static str> {
         let word = |i: usize| [r[i], r[i + 1], r[i + 2], r[i + 3]];
         let edge = |i: usize| f32::from_le_bytes(word(i));
@@ -424,6 +440,14 @@ impl BlockChanges {
                 ));
             }
             7 => self.placements.push((view, None)),
+            21 => {
+                let update = exact_kernel::OwnerUpdate::decode(&r[12..])?;
+                self.reports.updates.push((view, update));
+            }
+            22 => {
+                let registration = exact_kernel::decode_registration(&r[12..])?;
+                self.reports.registrations.push(registration);
+            }
             _ => return Ok(false),
         }
         Ok(true)

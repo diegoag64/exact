@@ -68,6 +68,10 @@ rerun those tests; the upstream suite alone does not cover the patch.
 
 8. **`adapter.rs`, menu lifetime events.** A Menu added to or removed from
    the exposed tree raises UIA MenuOpened or MenuClosed. Visibility and role
-   changes do the same; activation from a placeholder announces the menus
-   before their focused item. The Windows status popup uses this adapter,
-   including while the app's main window is hidden.
+   changes do the same. An explicitly hidden menu stays closed even if the
+   host still has keyboard focus. Activation from a placeholder announces
+   the menus before their focused item. A status popup serves the complete
+   menu on its first request. If UIA clients are already listening when
+   the popup opens, it initializes the adapter early and raises MenuOpened
+   after the HWND is shown. The native client test observes popup focus and
+   invokes Exit while listening for MenuClosed through HWND destruction.

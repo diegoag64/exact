@@ -7,6 +7,7 @@ import XCTest
 import AppKit
 #endif
 @testable import ExactKit
+@testable import ExactTraces
 @testable import ExactNativeViews
 
 /// LLP 1079 D3–D5 on Apple: the trailer's `seq`, the sampler's arithmetic

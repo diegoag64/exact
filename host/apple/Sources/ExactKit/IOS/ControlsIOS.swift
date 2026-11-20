@@ -144,7 +144,7 @@ package final class ControlHost: NSObject {
     /// A closed box now shows in Exact's views (the agent's top layer, a
     /// sheet, a context menu's preview): its buttons get their controls now,
     /// whether or not a batch laid it out.
-    func syncShown() {
+    package func syncShown() {
         if waiting.contains(where: { presenter.views[$0].map { !unshown($0) } ?? false }) { sync(contents: false) }
     }
 

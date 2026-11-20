@@ -215,7 +215,7 @@ extension Presenter {
     /// While a video's full-screen player shows, AVKit handles the remote:
     /// the session's own Menu and Play/Pause recognizers come off.
     var remoteKeysSuspended: Bool { views.values.contains { $0.video?.isFullscreen == true } }
-    func remoteKeysChanged() {
+    package func remoteKeysChanged() {
         menuKey.sync()
         playPauseKey.sync()
     }

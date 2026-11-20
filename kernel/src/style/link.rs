@@ -9,6 +9,7 @@ pub fn link_all() {
     link_effects();
     link_grid();
     link_animations();
+    link_transitions();
     link_gradients();
     link_corners();
     link_shadows();

@@ -187,6 +187,48 @@ impl Replayer {
         })
     }
 
+    /// A non-negative rectangle covering whole pixels, unclipped, is zeroed directly.
+    fn clear_whole_pixels(&mut self, x: f64, y: f64, w: f64, h: f64) -> bool {
+        if !(x.is_finite() && y.is_finite() && w.is_finite() && h.is_finite()) || w < 0.0 || h < 0.0
+        {
+            return false;
+        }
+        let ts = self.device();
+        if self.state.clip.is_some()
+            || ts.kx.abs() > 1e-6
+            || ts.ky.abs() > 1e-6
+            || ts.sx <= 0.0
+            || ts.sy <= 0.0
+        {
+            return false;
+        }
+        let l = ts.sx as f64 * x + ts.tx as f64;
+        let t = ts.sy as f64 * y + ts.ty as f64;
+        let r = l + ts.sx as f64 * w;
+        let b = t + ts.sy as f64 * h;
+        let whole = |v: f64| (v - v.round()).abs() < 1e-3;
+        if !(whole(l) && whole(t) && whole(r) && whole(b)) {
+            return false;
+        }
+        let (pw, ph) = (self.pixmap.width() as i64, self.pixmap.height() as i64);
+        let (x0, x1) = (
+            (l.round() as i64).clamp(0, pw),
+            (r.round() as i64).clamp(0, pw),
+        );
+        let (y0, y1) = (
+            (t.round() as i64).clamp(0, ph),
+            (b.round() as i64).clamp(0, ph),
+        );
+        if x0 >= x1 || y0 >= y1 {
+            return true;
+        }
+        let data = Arc::make_mut(&mut self.pixmap).data_mut();
+        for row in y0..y1 {
+            data[((row * pw + x0) * 4) as usize..((row * pw + x1) * 4) as usize].fill(0);
+        }
+        true
+    }
+
     fn device(&self) -> Transform {
         self.base.pre_concat(self.state.author)
     }
@@ -437,7 +479,8 @@ impl Replayer {
                     }
                 }
                 Op::ClearRect => {
-                    if let Some(p) = Self::rect_path(r.at(0), r.at(1), r.at(2), r.at(3)) {
+                    if self.clear_whole_pixels(r.at(0), r.at(1), r.at(2), r.at(3)) {
+                    } else if let Some(p) = Self::rect_path(r.at(0), r.at(1), r.at(2), r.at(3)) {
                         // Destination-out with opaque black clears what the
                         // rectangle covers; tiny-skia's `Clear` ignores the mask.
                         let paint = Paint {

@@ -1,5 +1,6 @@
 import { viewChildren, unwrapListItem, viewParent } from "./lists.js";
-import { fold, launched, onFold, launchLocation, launchVisits } from "./environment.js";
+import { fold, foldColumns, launched, onFold, launchLocation, launchVisits } from "./environment.js";
+import { agentParameters } from "./agent-parameters.js";
 import { inertAncestor } from "./layers.js";
 import { popoverObservation } from "./popover.js";
 import { sheetGone, sheetsLeft, stackSheets } from "./sheet-stack.js";
@@ -190,6 +191,42 @@ function selectedDetent(route) {
   }
   return chosen;
 }
+// Keep the scrim on its stack's parent so it can fade out after the last sheet leaves.
+function setScrim(parent, modal) {
+  const value = modal ? "on" : "off", previous = parent.getAttribute("data-exact-scrim");
+  if (value !== previous && (modal || previous !== null)) {
+    parent.setAttribute("data-exact-scrim", value);
+  }
+}
+// The first vertical scroller on the last in-flow child's chain owns the bottom inset, as in
+// kernel/cover.rs (LLP 1116 D2). A form control scrolls its own value.
+const bottomScrollers = new WeakMap();
+function bottomScroller(route) {
+  let el = route.lastElementChild;
+  while (el) {
+    const style = getComputedStyle(el);
+    if (style.display === "none" || style.position === "absolute" || style.position === "fixed") {
+      el = el.previousElementSibling;
+      continue;
+    }
+    if (el.matches("textarea, select")) return null;
+    if (style.overflowY === "auto" || style.overflowY === "scroll") return el;
+    el = el.lastElementChild;
+  }
+  return null;
+}
+function sheetScroller(route, inSheet) {
+  const previous = bottomScrollers.get(route), current = inSheet ? bottomScroller(route) : null;
+  if (previous === current || (!previous && !current)) return;
+  previous?.removeAttribute("data-exact-bottom-inset");
+  if (current) {
+    bottomScrollers.set(route, current);
+    current.setAttribute("data-exact-bottom-inset", "");
+  } else {
+    bottomScrollers.delete(route);
+  }
+  route.toggleAttribute("data-exact-bottom-scroller", !!current);
+}
 /** The frame of `routes[index]`: its own detent, or its sheet's when it was pushed inside one; written only where it
  * changed. `shownIn` is the sheet each route shows in (`sheetAt`), `inUse` the sheets something shown is in,
  * `selected` the stack's shown route. The projection frames a stack's routes in order, and with the last one the
@@ -221,6 +258,7 @@ function sheetFrame(routes, index, shownIn, inUse, selected) {
   if (route.style.getPropertyValue("--exact-sheet-detent") !== (chosen?.css ?? "")) {
     route.style.setProperty("--exact-sheet-detent", chosen?.css ?? "");
   }
+  sheetScroller(route, inUse.has(at));
   if (index === routes.length - 1) {
     stackSheets(routes, shownIn, inUse, selected);
   }
@@ -260,8 +298,9 @@ const linked = (href) => href?.startsWith("/") && !href.startsWith("//") && rout
 /** Outermost press owners; unlike candidate discovery, this walk crosses a navigationKey. */
 function listRows(list) {
   const rows = [], walk = (parent) => {
+    const section = parent.localName === "section" && parent.parentElement === list;
     for (const el of parent.children) {
-      if (excluded(el)) {
+      if (section && (el.localName === "header" || el.localName === "footer") || excluded(el)) {
         continue;
       }
       const press = rowPress(el), href = rowHref(el);
@@ -337,9 +376,11 @@ export function splitOf([route]) {
       rows: []
     };
   }
-  const said = route?.getAttribute("navigationSplit"), explicit = Number(said);
+  const said = route?.getAttribute("navigationSplit"), explicit = Number(said), named = Number.isFinite(explicit) && explicit > 0;
   const found = route && said !== "none" && !sheet(route) ? pushingList(route) : null;
-  const width = route && said !== "none" && !sheet(route) && wide() && /^(absolute|fixed)$/.test(getComputedStyle(route).position) ? Number.isFinite(explicit) && explicit > 0 ? explicit : found ? 320 : 0 : 0;
+  const placed = route && said !== "none" && !sheet(route) && /^(absolute|fixed)$/.test(getComputedStyle(route).position);
+  const atFold = placed && (found || named) ? foldColumns(route) : null;
+  const width = atFold ? atFold.list : placed && wide() ? named ? explicit : found ? 320 : 0 : 0;
   if (route) {
     if (found && (width || splitLists.has(route))) {
       splitLists.set(route, found.list);
@@ -349,6 +390,8 @@ export function splitOf([route]) {
   }
   return {
     width,
+    // Where the detail starts: after the fold's gap at the fold, else beside the list
+    detail: atFold?.detail ?? width,
     list: found?.list,
     rows: found?.rows ?? []
   };
@@ -443,20 +486,18 @@ export function routeFlags(root) {
 }
 // LLP 1153 D8 — both runtimes' agent `tree` flags an element as the projection left the page, for one read: 1 (`inactive`) under a route or panel `unselected` names, which a split's list beside its detail is not; 2 (`hidden` too) where the projection hid that route, every one but a page a sheet covers
 const routesOf = (nav) => stacksOf(nav).find((routes) => routes.some((r) => r.getAttribute("navigationKey") === nav.getAttribute("navigationKey"))) ?? [];
+/** The selected stack through its top. Inputs can read it before this module has projected the tree. */
+export function focusStack(nav) {
+  const key = nav.getAttribute("navigationKey"), projected = shownRoutes.get(nav), top = projected?.at(-1);
+  if (top && top.getAttribute("navigationKey") === key &&
+      projected.every((route) => route.isConnected && nav.contains(route) && !route.hasAttribute("data-exiting"))) {
+    return projected;
+  }
+  const routes = routesOf(nav);
+  return routes.slice(0, routes.findIndex((route) => route.getAttribute("navigationKey") === key) + 1);
+}
 const selectedRoute = (nav) => routesOf(nav).find((r) => r.getAttribute("navigationKey") === nav.getAttribute("navigationKey"));
 const browserIndex = () => globalThis.navigation?.currentEntry?.index ?? null;
-// Agent launch facts belong to the carrier, not the router's typed URL. Keep
-// them on every History entry so a browser reload retains its agent adapter.
-const agentParameters = [
-  "agent",
-  "seed",
-  "locale",
-  "formatLocale",
-  "timeZone",
-  "epoch",
-  "storage",
-  "failFetch"
-];
 export function historyURL(path) {
   // (exported for its test) the document's URL with the route's path, query and fragment: History refuses a URL whose userinfo differs (HTML, "can have its URL rewritten")
   // "/." keeps a leading "//" a path, as the router has it (route/src/location.rs): the URL parser drops the dot segment, where alone it would read "//b" as a host
@@ -464,10 +505,14 @@ export function historyURL(path) {
   url.pathname = route.pathname;
   url.search = route.search;
   url.hash = route.hash;
+  // Carry exactly the drive's launch parameters: a listed name the launch lacks is the app's, which the launch route
+  // leaves out (`launchLocation`) and a reload would read as the drive's
   if (AGENT_ADMITTED && ["", "1"].includes(facts?.get("agent"))) {
     for (const key of agentParameters) {
       if (facts.has(key)) {
         url.searchParams.set(key, facts.get(key));
+      } else {
+        url.searchParams.delete(key);
       }
     }
   }
@@ -1241,8 +1286,13 @@ export const navigation = {
     }
     for (const { nav, key, at, list, panels, stacks, facts } of projections) {
       if (TABS) {
-        for (const panel of managed.get(nav) ?? []) {
+        const previous = managed.get(nav) ?? [];
+        if (SHEETS && panels.length && !previous.length) {
+          setScrim(nav, false);
+        }
+        for (const panel of previous) {
           if (!panels.includes(panel)) {
+            SHEETS && setScrim(panel, false);
             panel.style.visibility = "";
             setInert(panel, !!panel.authoredInert);
           }
@@ -1250,8 +1300,16 @@ export const navigation = {
         managed.set(nav, panels);
       }
       if (key === undefined) {
+        shownRoutes.delete(nav);
         // No route is framed, so no stack of sheets is reached: one whose routes have left this root goes here.
-        SHEETS && sheetsLeft();
+        if (SHEETS) {
+          for (const [stack, routes] of stacks.entries()) {
+            if (!routes.length) {
+              setScrim(panels[stack] ?? nav, false);
+            }
+          }
+          sheetsLeft();
+        }
         continue;
       }
       // Every tab but the selected one stays mounted, hidden and inert.
@@ -1278,11 +1336,8 @@ export const navigation = {
           }
         }
         const modal = over[presented], beneath = routes.findLastIndex((r, i) => i < presented && !over[i]);
-        // The scrim under a presented sheet is its stack's parent's (neutral.css): written once a sheet has shown, so
-        // it fades out as the last one leaves.
-        const scrim = routes[presented]?.getAttribute("navigationPresentation") === "modal" ? "on" : "off", parent = viewParent(routes[0]);
-        if (SHEETS && parent && parent.getAttribute("data-exact-scrim") !== scrim && (scrim === "on" || parent.hasAttribute("data-exact-scrim"))) {
-          parent.setAttribute("data-exact-scrim", scrim);
+        if (SHEETS) {
+          setScrim(panels[stack] ?? nav, routes[presented]?.getAttribute("navigationPresentation") === "modal");
         }
         detailRows(routes, found);
         if (stack === at && list) {
@@ -1304,6 +1359,7 @@ export const navigation = {
             column ? route.setAttribute("data-exact-split", column) : route.removeAttribute("data-exact-split");
           }
           route.style.setProperty("--exact-split", column ? `${split}px` : "");
+          route.style.setProperty("--exact-split-detail", column ? `${found.detail}px` : "");
           sheetFrame(routes, index, shownIn, inUse, selected);
           appBarBack(nav, routes, index, split > 0, active || covered, headers[index]);
           clearBar(route);
@@ -1336,7 +1392,9 @@ export const navigation = {
         box?.toggleAttribute("data-exact-split-empty", empty && !own);
         if (empty) {
           box.style.setProperty("--exact-split", `${split}px`);
-          own && routes[0].style.setProperty("--exact-split-pane", `${(routes[0].offsetParent ?? box).clientWidth - split}px`);
+          box.style.setProperty("--exact-split-detail", `${found.detail}px`);
+          own && routes[0].style.setProperty("--exact-split-gap", `${found.detail - split}px`);
+          own && routes[0].style.setProperty("--exact-split-pane", `${(routes[0].offsetParent ?? box).clientWidth - found.detail}px`);
         }
       }
     }
@@ -1418,4 +1476,4 @@ export const navigation = {
     },
   }),
 };
-export { queue, sheet, commit, root, log, settled, agentParameters, pop, last };
+export { queue, sheet, commit, root, log, settled, pop, last };

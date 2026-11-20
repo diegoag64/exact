@@ -11,16 +11,16 @@
 //   bun host/web-js/render.mjs <dist> --serve [--port 8830]        the site, as `serve` serves it (host/web/serve.mjs)
 import { parseFaults } from '../web/faults.js';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import vm from 'node:vm';
 import { brotliCompressSync, createBrotliCompress, constants } from 'node:zlib';
 import { createDocument, esc } from './dom.js';
 import { cachingFetch, directives, FRESH } from './http-cache.mjs';
-import { canonical, mountedHref, withBase } from './route-pattern.js';
+import { canonical, matchPattern, mountedHref, withBase } from './route-pattern.js';
 import { select, tokens } from './page-style.mjs';
 import { buildPageFiles, pageRoute, writeCrawlerFiles } from '../web/crawl.mjs';
-import { buildBase, generationOf, withGenerationBase } from '../web/generations.mjs';
+import { buildBase, generationOf, treeAt, withGenerationBase } from '../web/generations.mjs';
 import { lockHeld } from '../web/build-lock.mjs';
 
 const DEADLINE = 3000;
@@ -403,13 +403,13 @@ export function renderer(dist, { closed = false, read = path => readFileSync(res
   render.production = true;
   try { render.production = JSON.parse(read('app.version.json').toString('utf8')).production; }
   catch (error) { if (error.code !== 'ENOENT') throw error; }
+  // Each value route `name`'s source lists (LLP 1048.000 D2), with its location or why the route's pattern can't hold it
   render.pages = async ({ name, pattern, source, args }, deadline = DEADLINE) => {
     let made, timer;
     try {
       made = realm();
       const expired = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("it didn't answer before the deadline")), deadline); });
-      const locations = await Promise.race([made.ctx.__pages(pattern, source, args, deadline), expired]);
-      return locations.map(location => ({ location, notfound: false }));
+      return await Promise.race([made.ctx.__pages(pattern, source, args, deadline), expired]);
     } catch (error) {
       throw new Error(`route \`${name}\`'s pages (${source}): ${error?.message ?? error}`);
     } finally { clearTimeout(timer); made?.dispose(); }
@@ -420,6 +420,20 @@ export function renderer(dist, { closed = false, read = path => readFileSync(res
     return ctx.__markdown();
   };
   return render;
+}
+
+/** Route `route`'s listed pages, as the render host's `exact_render::pages` keeps them (LLP 1048.000 D2): `pages`, the
+ * route's own, and `refused`, why each other value is no page of it. The router gives a location to the first declared
+ * pattern that matches it, and the route's own matches it, so the route that answers is this one or one declared before. */
+function listedPages(route, values, routes) {
+  const fail = why => `route \`${route.name}\`'s pages (${route.source}): ${why}`, listed = { pages: [], refused: [] };
+  for (const { value, location, error } of values) {
+    const other = location === undefined ? null : routes[matchPattern(routes, canonical(location))]?.name;
+    if (other === route.name) listed.pages.push({ location, notfound: false });
+    else if (location === undefined) listed.refused.push(fail(`the value ${JSON.stringify(value)} can't be a path segment: ${error}. Leave the value out of the list`));
+    else listed.refused.push(fail(`the value ${JSON.stringify(value)} is at ${location}, which route \`${other}\`, declared before \`${route.name}\`, answers, so the page there is \`${other}\`'s, not \`${route.name}\`'s. Leave the value out of the list, or give one of the two routes another path`));
+  }
+  return listed;
 }
 
 const refusedLine = ([name, api]) => `resource ${name} is pending: ${api} needs the reader's device; the reader's page asks it`;
@@ -530,20 +544,22 @@ export function pageServer(dist, render = renderer(dist), log = console.log) {
  * whose `render=request` and `cached` routes are then served their shell. */
 export function sitePages(dist, { pageServer: makeServer = (read, id) => pageServer(dist, renderer(dist, { read, generation: id })) } = {}) {
   const swapping = () => lockHeld(dist + '.lock');
-  const identity = tree => { try { const st = statSync(tree); return st.dev + ':' + st.ino; } catch { return null; } };
   const treeOf = id => generationOf(dist) === id ? dist : resolve(dist + '.gen', id);
   // `op(tree)` on generation `id`'s tree: its answer when that tree was the generation's from before it to after it.
   // Synchronous, as the renderer's reads are; the wait is only for a swap's renames.
   const inGeneration = (id, op) => {
     if (!id) return op(dist);
     for (const end = Date.now() + 1000; ;) {
-      const tree = treeOf(id), before = identity(tree);
+      const tree = treeOf(id), before = treeAt(tree);
       let value, error = null;
       try { value = op(tree); } catch (e) { error = e; }
-      if (before && generationOf(tree) === id && identity(tree) === before) { if (error) throw error; return value; }
-      // Moved, or replaced by the same bytes: asked again where it is now. A swap moves a generation once.
-      if (treeOf(id) !== tree || (generationOf(tree) === id && identity(tree) !== before)) continue;
-      if (!swapping()) throw Object.assign(new Error(`build generation ${id} is no longer kept`), { gone: true });
+      if (before && generationOf(tree) === id && treeAt(tree) === before) { if (error) throw error; return value; }
+      // Moved: asked again where it is now, at once (a swap moves a generation once)
+      if (treeOf(id) !== tree) continue;
+      // Replaced by the same bytes: asked again within the second, as generations.mjs `generationFile` asks
+      const replaced = generationOf(tree) === id && treeAt(tree) !== before;
+      if (!replaced && !swapping())
+        throw Object.assign(new Error(`build generation ${id} is no longer kept`), { gone: true });
       if (Date.now() >= end) throw Object.assign(new Error('the build is being replaced'), { busy: true });
       Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 10);
     }
@@ -595,21 +611,34 @@ if (import.meta.main) {
     const render = renderer(dist);
     if (args.includes('--build')) {
       const listed = JSON.parse(readFileSync(resolve(dist, '.gen/pages.json'), 'utf8')), pages = [], docs = [];
-      render.ahead = false;
-      for (const route of listed) {
-        const locations = route.source ? await render.pages(route) : [route];
-        for (const page of locations) pages.push(page);
-      }
       const routes = JSON.parse(readFileSync(resolve(dist, 'routes.json'), 'utf8')).routes;
+      render.ahead = false;
+      // A build reports every refusal in its one run: it lists and renders every page, then fails
+      let failed = false;
+      for (const route of listed) {
+        // Refuse a pattern that takes the not-found document's location, as the render host does (page.rs
+        // `build_locations`, LLP 1048.000 D7): the document would be that route's page
+        const taken = route.notfound ? routes[matchPattern(routes, canonical(route.location))]?.name : undefined;
+        if (taken !== undefined) {
+          console.error(`the not-found document renders at ${route.location}, which route \`${taken}\` matches, so it would be that route's page. Give \`${taken}\` a pattern that doesn't match ${route.location}, or declare the not-found route render=request or render=client`);
+          failed = true;
+          continue;
+        }
+        if (!route.source) { pages.push(route); continue; }
+        try {
+          const found = listedPages(route, await render.pages(route), routes);
+          pages.push(...found.pages);
+          for (const refusal of found.refused) { console.error(refusal); failed = true; }
+        } catch (error) { console.error(error.message); failed = true; }
+      }
       const files = buildPageFiles(dist, pages, routes);
       let origin = null;
-      let drew = false;
       for (const [i, p] of pages.entries()) {
         const page = await render(withBase(p.location, buildBase(dist)));
         // Write no page whose render drew randomness, which every reader of a page made at build would share (LLP 1048.000
         // D7, LLP 1069.005 D2)
         if (page.drew) {
-          drew = true;
+          failed = true;
           console.error(`${p.location}: route \`${pageRoute(p, routes)?.name}\` is render=build, but its render drew randomness, and a page made at build would give every reader the same random values (LLP 1069.005 D2). Declare the route render=request, rendered for each request, or render=client, rendered in the browser`);
           continue;
         }
@@ -622,7 +651,7 @@ if (import.meta.main) {
         for (const failure of page.failed) console.log(`  ${p.location}: resource ${failure}`);
         for (const refused of page.refused) console.log(`  ${p.location}: ${refusedLine(refused)}`);
       }
-      if (drew) process.exitCode = 1;
+      if (failed) process.exitCode = 1;
       else writeCrawlerFiles(dist, docs, origin, routes, buildBase(dist));
     } else for (const location of args.slice(1)) {
       const page = await render(withBase(location, buildBase(dist)));

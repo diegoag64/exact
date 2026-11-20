@@ -18,7 +18,7 @@ impl Painter {
         geometry: &BoxGeometry,
         rect: Rect4,
         ts: Transform,
-    ) {
+    ) -> Option<(f32, f32)> {
         let mut content = geometry.content;
         let s = node.style;
         let kernel = walk.scene.kernel;
@@ -65,9 +65,7 @@ impl Painter {
             let spec = build();
             (!spec.is_empty()).then(|| self.text.borrow_mut().paragraph(&spec, Some(width)))
         };
-        let Some(paragraph) = paragraph else {
-            return;
-        };
+        let paragraph = paragraph?;
         let mut palette = Vec::new();
         text_palette(kernel, node, self.dark, walk.reveal, &mut palette);
         presented_text_colors(walk, node, &paragraph, &mut palette, self.dark);
@@ -121,7 +119,11 @@ impl Painter {
                     && !control::ringless(n)
             });
         let focus = focus.map(|focused| (focused.id, control::ring(&focused, self.dark)));
-        let at = |painter: &mut Self, shown: &Paragraph, origin: (f32, f32)| {
+        let mut baseline = None;
+        let mut at = |painter: &mut Self, shown: &Paragraph, origin: (f32, f32)| {
+            if baseline.is_none() {
+                baseline = shown.baseline_at(origin);
+            }
             groups.visit(&mut |paint| match paint {
                 inline_opacity::Paint::Begin(index, opacity) => {
                     if opacity < 1. {
@@ -177,11 +179,12 @@ impl Painter {
         };
         if frags.is_empty() {
             // The kernel places the anonymous text item.
-            return at(
+            at(
                 self,
                 &shown,
                 (content.0, content.1 + kernel.text_line_offset(node)),
             );
+            return baseline;
         }
         for g in frags {
             if g.lines.0 == g.lines.1 {
@@ -193,6 +196,7 @@ impl Painter {
             at(self, &shown, (content.0 + g.dx, content.1 + g.dy));
             self.backend.pop_clip();
         }
+        baseline
     }
 
     /// A multi-column container's `column-rule`: centred in each gap between

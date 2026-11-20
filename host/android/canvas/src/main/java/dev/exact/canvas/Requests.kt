@@ -26,6 +26,8 @@ import android.view.HapticFeedbackConstants
  * clipboard and its Sharesheet. Nothing is imitated, and the reader has no dependency for any of it.
  */
 internal class Requests(private val activity: ExactActivity) {
+    private val appTitle = activity.title
+
     /** The view a haptic is played through and whose keyboard is shown: the activity's reader, as it is made. */
     var view: ExactView? = null
     /** Called with whether system Back has somewhere to go in the app (LLP 1115.001 D6). */
@@ -58,6 +60,8 @@ internal class Requests(private val activity: ExactActivity) {
     private var listening = false
     private var sound: SoundOutput? = null
     private var foreground = true
+
+    fun soundState() = sound?.state()
 
     fun foreground(on: Boolean) { foreground = on; sound?.foreground(on) }
 
@@ -118,6 +122,7 @@ internal class Requests(private val activity: ExactActivity) {
                     SOUND -> sounds(string(words, body).first)
                     FILES -> files(id, words, body)
                     ASSETS -> { sound?.reroot(); activity.assetsMoved() }
+                    WINDOW_TITLE -> activity.title = if (body == i) appTitle else string(words, body).first
                 }
             } catch (e: RuntimeException) {
                 // The platform refused (no activity to start from, a full clipboard transaction): the app goes on.
@@ -223,7 +228,7 @@ internal class Requests(private val activity: ExactActivity) {
 
     /** The clipboard. From Android 13 the system shows what was copied itself. */
     private fun copy(text: String) {
-        activity.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(activity.title, text))
+        activity.getSystemService(ClipboardManager::class.java).setPrimaryClip(ClipData.newPlainText(appTitle, text))
         if (log) Log.i(TAG, "copied ${text.length} characters")
     }
 
@@ -329,6 +334,7 @@ internal class Requests(private val activity: ExactActivity) {
         const val AUTH_END = 19
         const val FILES = 18
         const val ASSETS = 20
+        const val WINDOW_TITLE = 22
         /** How long after the activity is in front again a share sheet's choice is still waited for. */
         private const val DISMISSED_MS = 500L
     }

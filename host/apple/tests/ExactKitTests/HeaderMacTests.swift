@@ -9,6 +9,7 @@
 import AppKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 @testable import ExactImages
 
 final class HeaderMacTests: XCTestCase {

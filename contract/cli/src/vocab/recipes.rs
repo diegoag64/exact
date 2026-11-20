@@ -28,6 +28,7 @@ macro_rules! pattern {
 
 pub const RECIPES: &[(&str, &str)] = &[
     recipe!("after-a-write"),
+    recipe!("alternate-app-icons"),
     recipe!("app-json"),
     recipe!("background-transfers"),
     recipe!("background-work"),
@@ -87,6 +88,7 @@ pub const RECIPES: &[(&str, &str)] = &[
     recipe!("report-errors"),
     recipe!("responsive-columns"),
     recipe!("rest-backend"),
+    recipe!("rolling-stat"),
     recipe!("properties"),
     recipe!("screen-capture"),
     recipe!("second-window"),
@@ -113,6 +115,7 @@ pub const RECIPES: &[(&str, &str)] = &[
     recipe!("usb-hid-serial"),
     recipe!("waveform-and-tail"),
     recipe!("web-look"),
+    recipe!("web-sessions"),
     recipe!("website"),
     recipe!("website-hosting"),
 ];

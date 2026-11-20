@@ -699,6 +699,17 @@ impl NodeWrapper<'_> {
             .and_then(|level| level.try_into().ok())
     }
 
+    fn heading_level(&self) -> Option<i32> {
+        if self.node.role() != Role::Heading {
+            return None;
+        }
+        let level = self.node.level()?.checked_add(1)?;
+        match level {
+            1..=9 => Some(HeadingLevel1.0 + (level - 1) as i32),
+            _ => None,
+        }
+    }
+
     fn is_selection_pattern_supported(&self) -> bool {
         self.node.is_container_with_selectable_children()
     }
@@ -1349,6 +1360,7 @@ properties! {
     (UIA_IsRequiredForFormPropertyId, is_required),
     (UIA_IsPasswordPropertyId, is_password),
     (UIA_LevelPropertyId, level),
+    (UIA_HeadingLevelPropertyId, heading_level),
     (UIA_PositionInSetPropertyId, position_in_set),
     (UIA_SizeOfSetPropertyId, size_of_set),
     (UIA_AriaPropertiesPropertyId, aria_properties),

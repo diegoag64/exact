@@ -38,6 +38,11 @@ mod tree;
 use tree::props_json;
 pub use tree::tagged;
 
+/// Whether this launch carries the native agent in either clock mode.
+pub fn carried() -> bool {
+    matches!(std::env::var("EXACT_AGENT").as_deref(), Ok("1" | "live"))
+}
+
 /// Answer one request: `{"op":"tree"}`, `{"op":"state"}`,
 /// `{"op":"logs","since":N}`, `{"op":"node","id":V}` — the runner's half
 /// of `layout <node>` (LLP 1035.002 D1) — or `{"op":"tags"}`, the identity
@@ -780,6 +785,11 @@ pub fn state<D: DataSource>(runner: &Runner<D>) -> String {
 
 /// [`state`] for a request, which may ask `"sounds":"all"` (LLP 1096 D10).
 pub fn state_with<D: DataSource>(runner: &Runner<D>, request: &str) -> String {
+    state_at(runner, request, runner.now_ms())
+}
+
+/// Read committed state, evaluating the sound journal at the observation time.
+pub fn state_at<D: DataSource>(runner: &Runner<D>, request: &str, observed_ms: f64) -> String {
     let plan = runner.plan();
     let mut s = String::new();
     let _ = write!(
@@ -1000,7 +1010,7 @@ pub fn state_with<D: DataSource>(runner: &Runner<D>, request: &str) -> String {
         s.push_str(",\"wake\":");
         s.push_str(&wake.to_string());
     }
-    sound::state(runner, request, &mut s);
+    sound::state(runner, request, observed_ms.max(runner.now_ms()), &mut s);
     crate::wakelock::state(runner, &mut s);
     crate::orientation::state(runner, &mut s);
     crate::desktop::state(runner, &mut s);

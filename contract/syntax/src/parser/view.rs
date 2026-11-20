@@ -3,11 +3,20 @@
 use super::*;
 
 impl Parser {
+    pub(super) fn view_range(&mut self, owner: Span, start: Span) {
+        if self.view_ranges {
+            self.names
+                .view_ranges
+                .insert(owner, (start, self.tokens[self.pos - 1].span));
+        }
+    }
+
     /// `if cond`, with `else if` and `else` as an action's (@ref LLP 1116.015 D1).
     #[inline(never)]
     pub(super) fn node_if(&mut self, span: Span) -> R<Node> {
         self.next();
         let cond = self.expr()?;
+        self.view_range(span, span);
         self.newline()?;
         let then = self.required_block(span, "if", |p| p.node())?;
         let mut otherwise = Vec::new();
@@ -61,6 +70,7 @@ impl Parser {
         self.expect_word("key")?;
         self.expect_punct("=")?;
         let key = self.expr()?;
+        self.view_range(span, span);
         self.newline()?;
         let body = self.block(|p| p.node())?;
         Ok(Node::Each {

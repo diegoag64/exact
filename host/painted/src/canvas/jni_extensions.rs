@@ -18,9 +18,9 @@ pub(crate) fn take_bound() -> Option<String> {
     PENDING.lock().unwrap_or_else(|e| e.into_inner()).take()
 }
 
-/// Whether this process runs under the agent (`EXACT_AGENT=1`).
+/// Whether this process runs under the agent.
 pub fn agent() -> bool {
-    std::env::var("EXACT_AGENT").is_ok_and(|v| v == "1")
+    exact_runner::agent::carried()
 }
 
 /// The frame and input clock, ms, without waiting for the owner's thread

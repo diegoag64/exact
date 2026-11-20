@@ -20,7 +20,7 @@ final class TextRasterizer {
             case queued, running, abandoned, finished(TextRasterImage?), consumed
         }
         private var state = State.queued
-        init(_ node: NodeView, key: TextRasterKey, namespace: Int) {
+        package init(_ node: NodeView, key: TextRasterKey, namespace: Int) {
             self.node = node; self.key = key; self.namespace = namespace; incarnation = node.incarnation
             diagnosticNode = node.id
             group.enter()
@@ -797,7 +797,7 @@ final class TextClips {
     /// No reach, the travel the next frames will show, and the lead's.
     let reaches: [CGFloat]
     var soon: CGFloat { reaches[1] }
-    init(_ viewport: UIView, soon: CGFloat, reach: CGFloat) {
+    package init(_ viewport: UIView, soon: CGFloat, reach: CGFloat) {
         self.viewport = viewport; reaches = [0, soon, reach]
     }
 
@@ -824,7 +824,7 @@ final class TextClips {
         return CGPoint(x: s.x + view.frame.minX - view.bounds.minX, y: s.y + view.frame.minY - view.bounds.minY)
     }
     /// `node`'s bounds in viewport space.
-    func frame(_ node: NodeView) -> CGRect {
+    package func frame(_ node: NodeView) -> CGRect {
         rect(node.bounds, of: node, shift: shift(node, above: entry(node.superview).shift))
     }
     /// What `Presenter.textBand` finds by walking, for this reach or none;
@@ -889,7 +889,7 @@ extension Presenter {
     /// paragraph that uses a raster has it whole, no geometry is read. True while
     /// some paragraph lacks pixels: the pump's refresh has work then.
     @discardableResult
-    func paintVisibleText() -> Bool {
+    package func paintVisibleText() -> Bool {
         guard !applying else { return true }
         // UIKit may paint a transition after changing the window but before
         // delivering the descendants’ didMoveToWindow callbacks.

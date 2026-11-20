@@ -12,7 +12,7 @@
 use super::material::Icon;
 use super::{look, neutral, rgba, Backend, Rect4, Shape};
 use exact_kernel::generated::metric;
-use exact_kernel::{Appearance, FieldChrome, NodeRef, NodeType, PropId, StyleMask};
+use exact_kernel::{Appearance, FieldChrome, NodeRef, NodeType, PropId, StyleId, StyleMask};
 use tiny_skia::Transform;
 
 /// This painter's own accent, Chrome's default `#0075ff`: what a control
@@ -283,6 +283,7 @@ impl super::Painter {
     /// A closed select, or a field that shows a value (LLP 1069.001 D7):
     /// the neutral look's field with the text, and a caret when it opens a
     /// menu; else Material's filled field with its trailing icon.
+    /// Returns the outline for scrollbar coverage when the field paints its ground.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn field_control(
         &mut self,
@@ -294,7 +295,7 @@ impl super::Painter {
         ts: Transform,
         text: &str,
         chevron: bool,
-    ) {
+    ) -> Option<Shape> {
         let bare = node.style.appearance == Appearance::None;
         let dark = self.dark;
         if bare || look::neutral() {
@@ -368,14 +369,14 @@ impl super::Painter {
             if focused && !unringed && node.props.bool(PropId::Disabled) != Some(true) {
                 self.field_ring(&shape, ring(node, dark), ts);
             }
-            return;
+            return (!bare && !node.style.written.has(StyleId::BackgroundColor)).then_some(shape);
         }
         let icon = match node.props.str(PropId::Type) {
             Some("select") => Icon::Menu,
             Some("time") => Icon::Clock,
             _ => Icon::Calendar,
         };
-        self.filled_value(node, content, focused, ts, text, icon);
+        Some(self.filled_value(node, content, focused, ts, text, icon))
     }
 
     /// A range (LLP 1069.001 D7): Chrome's track, filled with the accent to
@@ -691,7 +692,7 @@ fn material_spinner(
     };
     let layer = crate::host::lower::spinner_layer(key);
     let base = [0.0, 0.0, 1.0, 0.0, 1.0, 0.0, c];
-    let layered = backend.layer_begin(layer, ts, (cx, cy), base);
+    let layered = backend.layer_begin(layer, ts, (cx, cy), (0., 0.), base);
     backend.svg_path(&paint, ts);
     if layered {
         backend.layer_end();

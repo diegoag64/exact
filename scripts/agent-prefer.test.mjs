@@ -3,7 +3,7 @@
 import { test, expect } from 'bun:test';
 import { PREFERENCES, mediaHeard, preferGroups, preferWeb } from './agent-prefer.mjs';
 import { MalformedOperation } from './agent-keys.mjs';
-import { pageReporter } from '../host/web/navigation/environment.js';
+import { displayMode, pageReporter, preferDisplayMode, preferences } from '../host/web/navigation/environment.js';
 
 test('screen-reader is a page substitute with three values', () => {
   for (const value of ['on', 'off', 'unknown']) {
@@ -37,6 +37,9 @@ test('the midi group names what a request finds and the ports by name (LLP 1125 
 });
 
 test('an unknown fact or a value it does not take is refused naming what is expected', () => {
+  expect(preferGroups({ safeArea: '47 0 34 0' }).page).toEqual({ 'safe-area': '47 0 34 0' });
+  for (const bad of ['34', '1 2 3 -1', '1 2 3 4.5', '0 0 2147483648 0'])
+    expect(() => preferGroups({ 'safe-area': bad })).toThrow('four nonnegative integers');
   for (const facts of [{ 'prefers-color-scheme': 'banana' }, { theme: 'dark' }, { 'has-focus': undefined }]) expect(() => preferGroups(facts)).toThrow(MalformedOperation);
   expect(() => preferGroups({ 'color-scheme': 'blue' })).toThrow(/^prefer: prefers-color-scheme blue: expected .*prefers-color-scheme dark\|light/);
   expect(() => preferGroups({ banana: 'split' })).toThrow(/^prefer: banana split: expected display-mode /);
@@ -48,19 +51,47 @@ test('an unknown fact or a value it does not take is refused naming what is expe
   expect(() => preferGroups({ gap: '4' })).toThrow('prefer: gap needs segments');
 });
 
-test('Chrome refuses display-mode emulation instead of reporting an unapplied override', async () => {
-  await expect(preferWeb({ media: { 'display-mode': 'fullscreen' }, page: {} }))
-    .rejects.toThrow('Chrome prefer cannot emulate display-mode fullscreen');
-  expect((await preferWeb({ media: { 'display-mode': 'fullscreen' }, page: {} }).catch(e => e)).malformed).toBeUndefined();
+// LLP 1039 D7: Chrome takes CDP's display-mode emulation and changes nothing, so the glue substitutes it. On a stand-in
+// page whose own query says `browser`: no CDP call, the glue asked, and the reply the substitute's.
+test('Chrome\'s display-mode is the glue\'s substitute, not its emulation', async () => {
+  const saved = globalThis.matchMedia, calls = [], asked = [];
+  globalThis.matchMedia = (query) => ({ matches: query === '(display-mode: browser)' });
+  try {
+    const reply = await preferWeb({ media: { 'display-mode': 'standalone' }, page: {}, emulated: {}, frame: async () => {},
+      call: async (method, params) => calls.push([method, params]), evaluate: async (expression) => (0, eval)(expression),
+      ask: async (request) => { asked.push(request); preferDisplayMode(request.media['display-mode']); return { page: {}, fold: {} }; } });
+    expect(calls).toEqual([]);
+    expect(asked).toEqual([{ op: 'prefer', media: { 'display-mode': 'standalone' } }]);
+    expect(reply.media['display-mode']).toBe('standalone');
+    expect(matchMedia('(display-mode: browser)').matches).toBe(true);
+  } finally { globalThis.matchMedia = saved; delete globalThis.__exactDisplayMode; }
 });
 
-test('segments and gap are malformed before a display-mode refusal', async () => {
+// The facts word's bits 29–31 are the substitute's, 6 (`tabbed`) setting the sign bit, and no other bit moves. The
+// module keeps the first `matchMedia` lists it reads, so the test compares against its own first reading.
+test('the display-mode substitute replaces the page\'s reading and nothing else', () => {
+  const saved = globalThis.matchMedia;
+  globalThis.matchMedia = (query) => ({ matches: ['(display-mode: browser)', '(prefers-color-scheme: dark)', '(pointer: coarse)'].includes(query), addEventListener() {} });
+  try {
+    const read = preferences(), own = displayMode(), others = (bits) => bits & ~(7 << 29);
+    for (const mode of ['standalone', 'tabbed']) {
+      preferDisplayMode(mode);
+      expect([displayMode(), others(preferences())]).toEqual([mode, others(read)]);
+    }
+    const refused = (() => { try { preferDisplayMode('kiosk'); } catch (e) { return e; } })();
+    expect([refused?.message, refused?.malformed, displayMode()]).toEqual(['prefer: display-mode: kiosk is not a display mode', true, 'tabbed']);
+    preferDisplayMode(own);
+    expect(preferences()).toBe(read);
+  } finally { globalThis.matchMedia = saved; delete globalThis.__exactDisplayMode; }
+});
+
+test('segments and gap are malformed', async () => {
   const invalid = [
     ...['0x1', '1x0', '-1x1', '1.5x1', '1x1.5', `${'9'.repeat(400)}x1`].map(segments => ({ segments })),
     ...[-1, NaN, Infinity, 'banana'].map(gap => ({ segments: '2x1', gap })),
   ];
   for (const facts of invalid) {
-    const error = await (async () => preferWeb(preferGroups({ 'display-mode': 'fullscreen', ...facts })))().catch(e => e);
+    const error = await (async () => preferWeb(preferGroups(facts)))().catch(e => e);
     expect(error).toBeInstanceOf(MalformedOperation);
     expect(error.malformed).toBe(true);
   }

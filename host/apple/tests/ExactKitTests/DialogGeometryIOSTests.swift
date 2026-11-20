@@ -2,6 +2,8 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactDialogs
+@testable import ExactNavigation
 
 final class DialogGeometryIOSTests: XCTestCase {
     private var session: ExactSession?

@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 @testable import ExactCollections
 
 /// Hand-written swipe rows in a route's page (`host/apple/tests/fixtures/swipe-push.contract`),

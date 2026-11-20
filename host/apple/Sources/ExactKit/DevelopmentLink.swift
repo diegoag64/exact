@@ -1,9 +1,12 @@
 // A development link (LLP 1030.000 §7): consumed by the host executables in
-// every build, so that a production one, which registers no development
-// scheme, claims none. What it opens is the plan connection, which only a
-// development build links (LLP 1023 §8).
+// every build. What it opens is the plan connection, which only a
+// development build compiles (LLP 1023 §8); a production build registers no
+// development scheme (`build.mjs` bakes one only with `--url`), so there it
+// is the no-op at the end of this file, and LLP 1047.001 D6 keeps the rest
+// development's.
 import Foundation
 
+#if EXACT_INSPECT
 /// Explicit development-only opening action (LLP 1030.000 §7). The locator
 /// stays an HTTP(S) URL; the outer app-specific scheme only selects the client.
 /// The scheme is derived from the public app id and the loader's identity and
@@ -84,3 +87,13 @@ public enum ExactDevelopmentLink {
         return a.scheme?.lowercased() == b.scheme?.lowercased() && ha == b.host?.lowercased() && pa == port(b)
     }
 }
+#else
+/// A production build's: it has no development scheme, so it admits, claims
+/// and opens no link.
+public enum ExactDevelopmentLink {
+    public static func page(_ link: URL, scheme: String, origins: [String], token: String) -> URL? { nil }
+    public static func page(_ link: URL) -> URL? { nil }
+    public static func claims(_ link: URL) -> Bool { false }
+    @discardableResult public static func open(_ link: URL) -> Bool { false }
+}
+#endif

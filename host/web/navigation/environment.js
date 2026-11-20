@@ -1,5 +1,5 @@
 import { beneathApp } from "./type.js";
-import { agentParameters } from "./routes.js";
+import { agentParameters } from "./agent-parameters.js";
 const AGENT_ADMITTED = true; // false in a release, as the release gate writes it (agent-gate.mjs, LLP 1069.007 D2)
 // Read safe-area insets from probe padding and keyboard height from the visual viewport
 let probe;
@@ -111,6 +111,30 @@ function foldRects(cols, rows) {
   return rects;
 }
 export const fold = () => globalThis.exact?.foldSubstitute ?? readFold();
+/** @ref LLP 1078 D6 (amended 2026-11-20) — where a list and its detail split across a fold, two viewport segments side
+ * by side, as distances from the inline-start edge of `route`'s containing block: the list ends where the segment at the
+ * inline start ends and the detail starts where the other begins, so the band between them holds neither column. The web
+ * gives a column no safe area of its own to keep content off the band, which UIKit's columns, meeting at the fold's
+ * centre, clear (LLP 1127 §1). Null unless the containing block covers both segments, as a stack that fills the window
+ * does: one that reaches part of the way keeps the wide rule rather than split into a sliver. */
+export function foldColumns(route) {
+  const { cols, rows, rects } = fold();
+  if (cols !== 2 || rows !== 1 || rects.length !== 2) {
+    return null;
+  }
+  const style = getComputedStyle(route), parent = route.offsetParent;
+  if (style.position !== "fixed" && !parent) {
+    return null;
+  }
+  // The border box must cover both segments; the padding box places an absolute route, and the viewport a fixed one
+  const fixed = style.position === "fixed", box = fixed ? null : parent.getBoundingClientRect();
+  const [[x0, , w0], [x1, , w1]] = rects;
+  if (!fixed && (box.left > x0 + 0.5 || box.right < x1 + w1 - 0.5)) {
+    return null;
+  }
+  const left = fixed ? 0 : box.left + parent.clientLeft, right = left + (fixed ? document.documentElement.clientWidth : parent.clientWidth);
+  return style.direction === "rtl" ? { list: right - x1, detail: right - (x0 + w0) } : { list: x0 + w0 - left, detail: x1 - left };
+}
 /** layout.env's names (LLP 1012 section 1). */
 export function foldEnv() {
   const f = fold();
@@ -127,9 +151,17 @@ export function foldBits() {
   return (f.posture === "folded" ? 256 : 0) | (f.cols & 255) << 9 | (f.rows & 255) << 17;
 }
 export function onFold(changed) {
-  // Install media queries even when no resource reads viewport facts.
+  // Install the segment media queries even when no resource reads viewport facts, and where `window.viewport.segments`
+  // answers the read: a fold or an unfold that keeps the window's size fires no resize, and the posture's change can
+  // come before the segments change, so these queries' `change` reports a change in the segments' count. No event
+  // reports a fold that moves while the count, the window's size and the posture stay, or a containing block that moves
+  // without a resize: the columns follow either at the next projection
   readFold();
+  foldCount("horizontal");
+  foldCount("vertical");
   foldListeners.add(changed);
+  // The agent's substitute, which it announces once a `prefer` is applied: from its own copy of this module on the JS target
+  addEventListener(FOLD_EVENT, changed);
   globalThis.navigator?.devicePosture?.addEventListener?.("change", changed);
   addEventListener("resize", changed);
 }
@@ -164,7 +196,9 @@ export function evenSegments(width, height, cols, rows, gap = 0) {
   }
   return out;
 }
-/** The agent's substitute (`prefer`'s `fold` group): `posture`, `cols`, `rows`, `gap`; `null` drops it and the browser's own readings return. */
+/** The window event an agent dispatches once its fold substitute is set or dropped, which no browser event reports. */
+export const FOLD_EVENT = "exact-fold";
+/** The agent's substitute (`prefer`'s `fold` group): `posture`, `cols`, `rows`, `gap`; `null` drops it and the browser's own readings return. The caller announces it (`FOLD_EVENT`) once the whole `prefer` is applied. */
 export function preferFold(request) {
   if (request == null) {
     (globalThis.exact ??= {}).foldSubstitute = null;
@@ -239,8 +273,19 @@ const queries = () => preferenceQueries ??= [
 ].map(([q, bits]) => [matchMedia(q), bits]);
 export const preferences = () => {
   const bits = queries().reduce((bits, [q, bit]) => bits | (q.matches ? bit : 0), 0), meta = globalThis.document?.querySelector?.("meta[name=\"color-scheme\"]")?.content, pinned = globalThis.exact?.systemScheme ?? (meta === "light" || meta === "dark" ? meta : null);
-  return pinned ? bits & ~16 | (pinned === "dark" ? 16 : 0) : bits;
+  const schemed = pinned ? bits & ~16 | (pinned === "dark" ? 16 : 0) : bits, mode = DISPLAY_MODES.indexOf(globalThis.__exactDisplayMode);
+  return mode < 0 ? schemed : schemed & ~(7 << 29) | mode << 29;
 };
+// @ref LLP 1039 D7 — the agent's `prefer display-mode`, which Chrome's emulation cannot set: the facts read `value`
+// until the next one, and the page's own `display-mode` query does not change. It is a global of its own, which the
+// carrier also sets in each new document before the page's scripts run: the web-js agent reads its own copy of this
+// module, and the wasm glue replaces `globalThis.exact` at boot. The caller re-answers the runner.
+export function preferDisplayMode(value) {
+  if (!DISPLAY_MODES.includes(value)) {
+    throw Object.assign(new Error(`prefer: display-mode: ${value} is not a display mode`), { malformed: true });
+  }
+  globalThis.__exactDisplayMode = value;
+}
 // a dev pin's scheme is the system's (LLP 1122 D4; dev.js), else the manifest's fixed `userInterfaceStyle` (the shell's `<meta name="color-scheme">`, look.mjs), as `UIUserInterfaceStyle` is an iOS app's
 export const displayMode = () => DISPLAY_MODES[preferences() >>> 29 & 7];
 // @ref LLP 1101.003 D6 — Media Queries 4's `update`: 0 `fast` (a screen, and a page that cannot ask), 1 `slow`, 2 `none` (print). The preference bits have no room for it; the wasm host takes it through `exact_set_update`.

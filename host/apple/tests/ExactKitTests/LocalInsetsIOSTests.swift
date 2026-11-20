@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// LLP 1123 D9 over `scripts/fixtures/bar-insets.contract`: a route's content
 /// reads its controller's safe area, the navigation bar's height in it, as

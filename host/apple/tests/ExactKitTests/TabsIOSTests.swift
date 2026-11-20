@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// Exact's tab container built from `UITab`s (TabsIOS.swift) over
 /// `scripts/fixtures/search-tabs.contract`: the search tab a `UISearchTab`
@@ -367,10 +368,11 @@ final class TabsIOSTests: XCTestCase {
         }
     }
 
-    /// LLP 1083.000 D4: a column the author placed beside routes offset past it paints
-    /// over the native container, whose box is the page's, and takes the
-    /// touches there, as the web shows it. A box a route's box meets keeps
-    /// CSS's order, under the container that stands for the routes.
+    /// LLP 1083.000 D4: a column the author placed beside routes offset past it, below the
+    /// container's top edge, paints over the native container, whose box is the page's, takes
+    /// the touches there, as the web shows it, and grows the container's leading safe area up
+    /// to where the routes begin. A box a route's box meets keeps CSS's order, under the
+    /// container that stands for the routes.
     func testABoxBesideTheRoutesPaintsOverTheNativeContainer() throws {
         let session = try fixture("EXACT_BESIDE_ROUTES_PLAN")
         let navigation = session.presenter.navigationHost
@@ -384,22 +386,33 @@ final class TabsIOSTests: XCTestCase {
         XCTAssertTrue(hit === sidebar || hit.isDescendant(of: sidebar), "the column takes the touch, not \(hit)")
         let route = try node(session, "route")
         XCTAssertGreaterThanOrEqual(route.convert(route.bounds, to: window).minX, 289, "the route stays where it was laid out")
-        // The bar's contents clear the column, and the route, already past it, is not inset again.
+        // The bar's contents start where the route begins, past the column, and the route is not inset again.
         let owner = try XCTUnwrap(navigation.primaryOwner)
-        XCTAssertEqual(owner.additionalSafeAreaInsets.left, sidebar.bounds.width, accuracy: 0.5)
+        let begins = route.convert(route.bounds, to: holder).minX
+        XCTAssertEqual(owner.additionalSafeAreaInsets.left, begins, accuracy: 0.5)
         let nav = try XCTUnwrap(navigation.primaryNavigation)
-        until("the bar's layout clears the column") { nav.navigationBar.safeAreaInsets.left >= sidebar.bounds.width - 0.5 }
+        until("the bar's layout clears the column") { nav.navigationBar.safeAreaInsets.left >= begins - 0.5 }
         if case .edges(let edges)? = navigation.covers[route.id] { XCTAssertEqual(edges.left, 0, "no left cover on the route") }
         // What an app's hatch adds to the container's safe area stays beside Exact's.
         owner.additionalSafeAreaInsets.bottom = 50
         navigation.reportCovers()
         XCTAssertEqual(owner.additionalSafeAreaInsets.bottom, 50)
-        XCTAssertEqual(owner.additionalSafeAreaInsets.left, sidebar.bounds.width, accuracy: 0.5)
+        XCTAssertEqual(owner.additionalSafeAreaInsets.left, begins, accuracy: 0.5)
         // Two boxes beside the routes keep their z-index order above the container.
         let low = try node(session, "low"), lower = try node(session, "lower")
         XCTAssertGreaterThan(lower.layer.zPosition, holder.layer.zPosition)
         XCTAssertGreaterThan(low.layer.zPosition, lower.layer.zPosition, "z-index -1 over -2")
         XCTAssertGreaterThan(sidebar.layer.zPosition, low.layer.zPosition, "z-index auto over -1")
+        // A bar below routes that end above it, with no native bar there: it paints over the container and takes its touches
+        let player = try node(session, "player")
+        until("the bar below the routes is over the container") { player.layer.zPosition > holder.layer.zPosition }
+        let below = player.convert(CGPoint(x: player.bounds.midX, y: player.bounds.midY), to: window)
+        let under = try XCTUnwrap(window.hitTest(below, with: nil))
+        XCTAssertTrue(under === player || under.isDescendant(of: player), "the bar takes the touch, not \(under)")
+        // A box with no area beside the routes is decided by the badge it holds, which shows outside it
+        let pin = try node(session, "pin")
+        XCTAssertTrue(pin.bounds.isEmpty, "the box has no area")
+        until("the box with no area is over the container") { pin.layer.zPosition > holder.layer.zPosition }
     }
 }
 

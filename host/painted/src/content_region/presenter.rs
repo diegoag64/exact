@@ -86,13 +86,35 @@ impl<D: DataSource> Presenter<D> {
                 }
             }
             let frame = self.paint_frame(target, canvas_frame, false);
-            // A field's caret, or a fragment's target as pictures arrive
-            // (LLP 1153 D5), moved by this frame's layout: paint again.
-            if self.last_frame_succeeded && (self.reveal_field_cursor() | self.hold_fragment()) {
-                self.paint_frame(target, false, false)
+            if !self.last_frame_succeeded {
+                return frame;
+            }
+            let immediate = !self.display.submitting();
+            let scrollbar_hover = immediate && self.scrollbars_shown();
+            // Layout can move a caret, a fragment target (LLP 1153 D5),
+            // or the exposed part of a scrollbar under a resting pointer.
+            let revealed = self.reveal_field_cursor();
+            let held = self.hold_fragment();
+            let frame = if revealed.is_some() || held || scrollbar_hover {
+                let frame = self.paint_frame(target, false, false);
+                if immediate && self.last_frame_succeeded {
+                    self.scrollbars_shown();
+                }
+                frame
             } else {
                 frame
+            };
+            // Report a field's caret reveal after the reveal repaint publishes
+            // its updated range geometry, so `rangeFrame()` in `scroll=` sees
+            // the post-scroll position.
+            if let Some(id) = revealed.filter(|_| self.last_frame_succeeded) {
+                self.scroll_end_moved(id, Completion::Instant);
+                self.collection_scrolled(id);
+                if self.dirty {
+                    return self.paint_frame(target, false, false);
+                }
             }
+            frame
         });
         // A geometry/accessibility snapshot has not submitted the window's new picture.
         #[cfg(windows)]
@@ -117,7 +139,6 @@ impl<D: DataSource> Presenter<D> {
         self.prepare_overlay();
         if self.brush.scrollbars.enabled {
             self.brush.scrollbars.limits = self.collection_scroll_limits();
-            self.brush.scrollbars.pointer = self.hover_point;
         }
         self.brush.placements = self.surfaces.placements(&self.host, true);
         self.brush.composites.canvases = self.surfaces.composites();

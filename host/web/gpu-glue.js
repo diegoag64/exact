@@ -246,6 +246,7 @@ function restoreChild(row) {
   if (!row.original) return;
   placementOpacity(row.el, 1);
   Object.assign(row.el.style, row.original.style); row.el.inert = row.original.inert;
+  delete row.el.exactPlaced;
   delete row.original;
 }
 function supplyChildren(entry, module = gpu, staging = false) {
@@ -285,6 +286,15 @@ function clipPath(h, width, height) {
   }
   return cut ? `polygon(${(points.length ? points : [[0,0]]).map(([x,y]) => `${x}px ${y}px`).join(",")})` : "";
 }
+function beforeStyle(el) {
+  for (const entry of surfaces.values()) for (const row of entry.children ?? [])
+    if (row.el === el) restoreChild(row);
+}
+function afterStyle(el) {
+  for (const entry of surfaces.values()) if (entry.children?.some(row => row.el === el)) {
+    supplyChildren(entry); placeChildren(entry);
+  }
+}
 function placeChildren(entry) {
   if (!entry.children) return;
   const h = new Float32Array(16), placed = [];
@@ -294,7 +304,13 @@ function placeChildren(entry) {
     const outcome = gpu.gpu_placement(entry.id, i, h), el = row.el;
     row.hidden = outcome === 2;
     if (outcome === 0) { restoreChild(row); continue; }
-    row.original ??= {style:Object.fromEntries(["transform","transformOrigin","zIndex","visibility","position"].map(k => [k, el.style[k]])), inert:el.inert};
+    if (!row.original) {
+      row.original = {
+        style:Object.fromEntries(["transform","transformOrigin","zIndex","visibility","position"].map(k => [k, el.style[k]])),
+        inert:el.inert, staticPosition:getComputedStyle(el).position === "static",
+      };
+      el.exactPlaced = true;
+    }
     el.style.visibility = outcome === 2 ? "hidden" : row.original.style.visibility;
     el.inert = outcome === 2 || row.original.inert;
     // Read only for a child the surface places and shows; a module without the export fades nothing.
@@ -304,7 +320,7 @@ function placeChildren(entry) {
     const [x,y] = row.frame;
     el.style.transformOrigin = "0 0";
     // Relative positioning makes z-index apply to ordinary block children too.
-    if (!row.original.style.position || row.original.style.position === "static") el.style.position = "relative";
+    if (row.original.staticPosition) el.style.position = "relative";
     el.style.transform = `matrix3d(${[h[0]-x*h[6],h[3]-y*h[6],0,h[6],h[1]-x*h[7],h[4]-y*h[7],0,h[7],0,0,1,0,h[2]-x*h[8],h[5]-y*h[8],0,h[8]].join(",")})`;
     // The authored clip-path is kept, and restored, once a placement has cut the child.
     const clip = clipPath(h, row.frame[2], row.frame[3]);
@@ -1227,15 +1243,7 @@ const api = {
       if (row.hidden && (row.el === el || row.el.contains(el))) return true;
     return false;
   },
-  beforeStyle(el) {
-    for (const entry of surfaces.values()) for (const row of entry.children ?? [])
-      if (row.el === el) restoreChild(row);
-  },
-  afterStyle(el) {
-    for (const entry of surfaces.values()) if (entry.children?.some(row => row.el === el)) {
-      supplyChildren(entry); placeChildren(entry);
-    }
-  },
+  beforeStyle, afterStyle,
   layout() { for (const entry of surfaces.values()) if (entry.id && !entry.terminal) { supplyChildren(entry); placeChildren(entry); } schedule(); },
   /// A live window opens (`perf frames live`, frames.js): each world leaves the seek for its own frame loop
   /// at the page's lent clock with empty, armed rings. Closing returns the world's perf and hook diagnostics.

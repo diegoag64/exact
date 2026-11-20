@@ -1,9 +1,13 @@
 // The dev loop's file form (LLP 1007 §6): a local development bake, a plan
 // with its optional module pair, applied to every session when it changes,
 // or installed as the launch generation. The dev menus' Reload applies it;
-// the network form is the plan from a URL (PlanURL.swift).
+// the network form is the plan from a URL (PlanURL.swift). The host
+// executables name it in every build; a production one takes no development
+// file override (LLP 1047.001 D6), so there it applies, installs and watches
+// nothing.
 import Foundation
 
+#if EXACT_INSPECT
 /// A fixed JavaScript/Rust generation crosses the data seam as one candidate.
 package enum DevelopmentModules {
     package static func combine(javascript: ExactModule?, rust: ExactModule?) throws -> ExactModule? {
@@ -24,6 +28,7 @@ package enum DevelopmentModules {
         return ExactModule(receipt: receipt, bytecode: bytes)
     }
 }
+#endif
 
 /// A local development bake is a plan plus its optional, inseparable module
 /// pair (LLP 1027 D7). Watch all three files: a writer can replace them in
@@ -43,6 +48,8 @@ public struct ExactDevelopmentPlan {
     }
 
     public var hasModule: Bool { files.dropFirst().contains { FileManager.default.fileExists(atPath: $0.path) } }
+
+    #if EXACT_INSPECT
 
     /// Identity and subsecond modification time, including missing files.
     public var revision: [Double] {
@@ -143,4 +150,23 @@ public struct ExactDevelopmentPlan {
         _ = apply()
         return revision
     }
+    #else
+    // A production build's: it applies, installs and watches no development
+    // plan, and says so. `hasModule` still reads the files, so a host that
+    // checks it does not boot a module bake's plan bytes without the module.
+    public var revision: [Double] { [] }
+    @discardableResult
+    public func apply(to app: ExactApp) -> ExactApplyResult { apply(to: app, now: false) }
+    func apply(to app: ExactApp, now: Bool) -> ExactApplyResult {
+        fputs("exact: a production build applies no development plan\n", stderr)
+        return .refused("a production build applies no development plan")
+    }
+    public func installInitial(on app: ExactApp) -> String? { "a production build installs no development plan" }
+    /// A timer that is never scheduled, so it never fires.
+    public func watch(_ app: ExactApp) -> DispatchSourceTimer {
+        let t = DispatchSource.makeTimerSource(queue: .main)
+        t.resume()
+        return t
+    }
+    #endif
 }

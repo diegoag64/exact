@@ -2,6 +2,7 @@
 import AppKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 final class RouteSheetPushMacTests: XCTestCase {
     private func make(navigate: Bool = false, closedby: String = "closerequest", detail: String = "", detailClosedby: String = "closerequest", bar: Bool = true, heading: Bool = true) throws -> SheetFixture {

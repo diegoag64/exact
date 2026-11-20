@@ -30,8 +30,11 @@ fn motion_is_a_spring_or_a_gesture_that_holds_a_value() {
     // `transitions` (LLP 1047.001), never as motion.
     assert_eq!(css.to_string(), "transitions");
     assert!(!css.has(Capability::Motion));
+    // Every value of the row parses by the transitions grammar, `none` too
+    // (LLP 1047.001 §9.9), but `none` plays nothing as motion.
     let none = used("component A\n  view\n    text \"a\" opacity=0.5 transition=\"none\"\n");
-    assert_eq!(none, Uses::NONE, "a transition of none plays nothing");
+    assert_eq!(none.to_string(), "transitions");
+    assert!(!none.has(Capability::Motion));
     let spring = used(
         "component A\n  view\n    text \"a\" scale=1.5 transition=\"scale -exact-spring(180, 12, 1)\"\n",
     );
@@ -267,6 +270,20 @@ fn linked_grammars_follow_literal_class_and_computed_rows() {
         ("grid-row", "rail / 2", "span 2", "grid"),
         ("grid-auto-flow", "column dense", "row", "grid"),
         ("justify-items", "safe center", "stretch", "grid"),
+        ("transition", "opacity 1s", "none", "transitions"),
+        ("-exact-layout-transition", "1s", "none", "transitions"),
+        (
+            "background-image",
+            "linear-gradient(#000, #fff)",
+            "none",
+            "gradients",
+        ),
+        (
+            "mask-image",
+            "linear-gradient(#000, #fff)",
+            "none",
+            "gradients",
+        ),
     ] {
         for source in [
             format!("component A\n  view\n    box {row}=\"{value}\"\n"),
@@ -298,6 +315,8 @@ fn every_row_a_linked_grammar_parses_names_its_capability() {
             StyleCodec::Animations => Some("animations"),
             StyleCodec::Filter | StyleCodec::ClipPath => Some("effects"),
             StyleCodec::Tracks | StyleCodec::Placement => Some("grid"),
+            StyleCodec::Transitions => Some("transitions"),
+            StyleCodec::BackgroundImage | StyleCodec::MaskImage => Some("gradients"),
             _ => None,
         };
         if let Some(wanted) = wanted {

@@ -405,6 +405,7 @@ pub struct Update<'a> {
     pub env: Env<'a>,
     /// Run-time installed-family stack ids shared across commits in a session.
     pub fonts: Option<Rc<RefCell<bridge::RuntimeFonts>>>,
+    pub(crate) roles: Option<&'a Rc<exact_kernel::style::roles::Roles>>,
     /// Immutable child sites for this environment's plan.
     pub sites: &'a SiteIndex,
     /// The id allocator.
@@ -491,6 +492,7 @@ impl<'a> Update<'a> {
         Update {
             env,
             fonts: None,
+            roles: None,
             sites,
             ids,
             ops: Vec::new(),
@@ -979,6 +981,9 @@ impl NodeInst {
                         let pv = bridge::icon_source(plan, prop, pv);
                         let value = match prop {
                             exact_kernel::PropId::AtomFaces => self.faces(u, i, pv),
+                            exact_kernel::PropId::DecorationStyles => {
+                                Some(self.decoration_styles(u, i, pv))
+                            }
                             _ => Some(pv),
                         };
                         if let Some(value) = value {

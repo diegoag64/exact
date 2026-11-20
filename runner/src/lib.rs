@@ -94,6 +94,7 @@ pub use runner::picker::shared as share_in;
 pub mod canvas_performance;
 pub mod machine;
 pub mod midi;
+pub mod native_geometry;
 pub mod rows;
 pub mod secrets;
 pub mod share;
@@ -151,7 +152,9 @@ pub use runner::{
     RESIZE_UNDELIVERED, TIMER_FIRE_LIMIT, VIRTUAL_FRAME_MS,
 };
 pub use runner::{AppState, Forma, LiveApplied, LiveRefusal, Place};
-pub use runner::{CallHow, Lists, ModuleLinks, Modules, PresenceSecrets, TextAxes, Tools, WakeHow};
+pub use runner::{
+    Audio, CallHow, Lists, ModuleLinks, Modules, PresenceSecrets, TextAxes, Tools, WakeHow,
+};
 pub use runner::{ModuleIdentity, ModuleInstance};
 pub use upload::{UPLOAD_PROGRESS, UPLOAD_SENDING};
 /// The binding core's names (LLP 1121 D12): what `contract forma gen rust`

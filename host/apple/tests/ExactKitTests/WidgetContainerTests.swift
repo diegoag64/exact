@@ -5,6 +5,8 @@ public func testWidgetReload(_ bytes: UnsafePointer<UInt8>?, _ length: Int) { pr
 #else
 import XCTest
 import ExactCore
+import ExactSnapshot
+import ExactWidgetPublication
 
 @MainActor
 final class WidgetContainerTests: XCTestCase {

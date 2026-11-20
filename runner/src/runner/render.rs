@@ -3,6 +3,13 @@
 use super::*;
 
 impl<D: DataSource> Runner<D> {
+    pub(super) fn instance_update<'a>(&'a self, ids: &'a mut Ids) -> Update<'a> {
+        let mut update = Update::new(self.env(&[], &[]), &self.sites, ids);
+        update.fonts = Some(self.fonts.clone());
+        update.roles = Some(self.roles());
+        update
+    }
+
     /// Re-evaluate every site and apply one batch. A failure here means the
     /// instance tree and the kernel may disagree; the runner is poisoned and
     /// the host restarts it — never a half-applied frame.
@@ -74,8 +81,7 @@ impl<D: DataSource> Runner<D> {
             let cell_margins = |view| cell_margins(&self.kernel, view);
             let scroll_margin = |view| scroll_margin(&self.kernel, view);
             let scroll_padding = |view| scroll_padding(&self.kernel, view);
-            let mut u = Update::new(self.env(&[], &[]), &self.sites, &mut ids);
-            u.fonts = Some(self.fonts.clone());
+            let mut u = self.instance_update(&mut ids);
             u.scroll_padding = Some(&scroll_padding);
             u.scroll_margin = Some(&scroll_margin);
             if self.kernel.arena().env().cell_spaces {

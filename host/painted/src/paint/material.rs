@@ -397,10 +397,10 @@ impl super::Painter {
         ts: Transform,
         text: &str,
         icon: Icon,
-    ) {
+    ) -> Shape {
         let dark = self.dark;
         let off = disabled(node);
-        self.filled_field(node, rect, focused, true, ts);
+        let shape = self.filled_field(node, rect, focused, true, ts);
         let style = node.computed_style(StyleMask::INHERITED);
         // An inherited `color` does not tint the field (D9); the node's own does.
         let ink = match (off, node.style.mask.has(StyleId::TextColor)) {
@@ -466,6 +466,7 @@ impl super::Painter {
             Icon::Clock => self.glyph_face(role_path(CLOCK, false), &style, at, tint, ts),
             Icon::Menu => self.glyph_face(role_path(MENU, true), &style, at, tint, ts),
         }
+        shape
     }
 }
 

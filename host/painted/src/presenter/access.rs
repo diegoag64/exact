@@ -10,6 +10,8 @@
 //! accessibility service is on. It is made again only when a commit, a
 //! paint, a scroll, a bar or the top layer moved on since the last one, and
 //! told only when it differs from what was last told.
+//! Detached menus retain their presented data for the native window's first
+//! query and build nodes only when requested.
 //!
 //! **What a node is.** From the kernel's tree, as the Apple hosts read it
 //! (`Accessibility.swift`): a pressable is one element named by its label,
@@ -46,6 +48,8 @@
 mod menu;
 mod surface;
 mod walk;
+
+pub use surface::PopupAccess;
 
 use super::requests::string;
 use super::scrollers::Scroller;
@@ -121,26 +125,14 @@ pub mod role {
     /// A `video` or `audio`, named by its author: where a reader hosts
     /// its player's controller, the controller's own view stands here.
     pub const MEDIA: i32 = 31;
-}
-
-/// A table's or a description list's element as its role (HTML-AAM): a
-/// node that holds what it heads or holds, named by its author, if at all.
-fn structure_role(node: &NodeRef<'_>) -> Option<i32> {
-    if node.node_type != exact_kernel::NodeType::View {
-        return None;
-    }
-    Some(match node.props.str(PropId::SemanticTag)? {
-        "table" => role::TABLE,
-        "caption" => role::CAPTION,
-        "tr" => role::ROW,
-        "td" => role::CELL,
-        "th" if node.props.str(PropId::Scope) == Some("row") => role::ROW_HEADER,
-        "th" => role::COLUMN_HEADER,
-        "dl" => role::DESCRIPTION_LIST,
-        "dt" => role::TERM,
-        "dd" => role::DEFINITION,
-        _ => return None,
-    })
+    /// A static `list` (`role="list"`, `ul`, `ol`).
+    pub const LIST: i32 = 32;
+    /// An item of a static list (`role="listitem"`, `li`).
+    pub const LIST_ITEM: i32 = 33;
+    /// A dialog identified by its author.
+    pub const DIALOG: i32 = 34;
+    /// A dialog requiring a response to an alert.
+    pub const ALERT_DIALOG: i32 = 35;
 }
 
 /// A node's flags.
@@ -176,6 +168,8 @@ pub mod flag {
     /// A range takes a value set to it ([`act::SET`]): a native range. A
     /// drawn one only steps, by its author's keys.
     pub const SETTABLE: i32 = 1 << 14;
+    /// The dialog makes the rest of the page inert.
+    pub const MODAL: i32 = 1 << 15;
 }
 
 /// What changed of a node since the last statement.
@@ -365,6 +359,7 @@ struct Scope {
 }
 
 /// A tree being built.
+#[derive(Default)]
 struct Build {
     out: Vec<Node>,
     used: BTreeSet<i32>,
@@ -379,6 +374,13 @@ struct Build {
     limits: BTreeMap<ViewId, f32>,
     /// An open popover's root, which the page's walk passes over.
     top: Option<ViewId>,
+}
+
+#[derive(Clone)]
+struct BarNodeInfo {
+    id: i32,
+    disabled: bool,
+    hint: String,
 }
 
 impl Build {
@@ -569,10 +571,6 @@ impl<D: DataSource> Presenter<D> {
         if node.node_type == NodeType::Text {
             return self.access_inline_words(node);
         }
-        let face = self.host.kernel().press_face(node.id);
-        if let Some(title) = face.and_then(|face| face.title.or(face.label)) {
-            return title;
-        }
         let words = self.access_words(node, false);
         match node.props.str(PropId::Title) {
             Some(title) if words.trim().is_empty() && !title.is_empty() => title.to_string(),
@@ -624,7 +622,8 @@ impl<D: DataSource> Presenter<D> {
             painted.rect.2,
             painted.rect.3,
         );
-        let shows = intersect(rect, scope.clip)?;
+        let shows = intersect(rect, scope.clip)
+            .or_else(|| walk::empty_item_bounds(rect, scope.clip, node, role))?;
         let (name, value) = words()?;
         let id = b.unique(match scope.hash {
             Some(hash) => rowed(hash),
@@ -781,9 +780,21 @@ impl<D: DataSource> Presenter<D> {
         name: String,
         (rect, frame): (Rect4, [f32; 4]),
     ) -> i32 {
+        b.bar_node(
+            view,
+            parent,
+            role,
+            flags,
+            name,
+            [frame[0] + rect.0, frame[1] + rect.1, rect.2, rect.3],
+            self.access_bar_info(view),
+        )
+    }
+
+    fn access_bar_info(&self, view: ViewId) -> BarNodeInfo {
         let kernel = self.host.kernel();
         let node = kernel.node(view);
-        let said = node.as_ref().map(|n| {
+        let disabled = node.as_ref().is_some_and(|n| {
             let mut at = Some(n.id);
             let mut disabled = None;
             while let (None, Some(id)) = (disabled, at) {
@@ -795,31 +806,15 @@ impl<D: DataSource> Presenter<D> {
             }
             disabled.unwrap_or(false)
         });
-        let id = b.unique(if view == 0 {
-            UP
-        } else {
-            identity(kernel, view)
-        });
-        b.out.push(Node {
-            id,
-            parent,
-            view,
-            role,
-            flags: flags
-                | if said == Some(true) {
-                    flag::DISABLED
-                } else {
-                    0
-                },
-            rect: [frame[0] + rect.0, frame[1] + rect.1, rect.2, rect.3],
-            range: [0.0; 3],
-            set: (0, 0),
-            grid: [0; 4],
-            name,
-            value: String::new(),
+        BarNodeInfo {
+            id: if view == 0 {
+                UP
+            } else {
+                identity(kernel, view)
+            },
+            disabled,
             hint: node.map(|n| self.access_hint(&n)).unwrap_or_default(),
-        });
-        id
+        }
     }
 
     /// The top app bar's nodes: the Up arrow, the leading buttons, the
@@ -924,6 +919,7 @@ impl<D: DataSource> Presenter<D> {
             .filter_map(|n| match n.role {
                 role::TABLIST => Some((n.id, role::TAB)),
                 role::DESCRIPTION_LIST => Some((n.id, role::TERM)),
+                role::LIST => Some((n.id, role::LIST_ITEM)),
                 _ => None,
             })
             .collect();

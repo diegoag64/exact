@@ -78,6 +78,20 @@ export async function assertWebDistApp(dist, app) {
       `web dist is not a complete build for selected app ${app.id}; stale receipt ${resolve(dist, '.exact-build.json')}; run ${ownWebBuild(app, dist) ?? `EXACT_APP_DIR=${shellQuote(app.dir)} EXACT_WEB_DIST=${shellQuote(resolve(dist))} bun host/web/build.mjs ${app.crate('web')}`}`,
     );
 }
+/** Install the first launch's settings in the namespace the app actually opens. */
+export function storedScript(env, origin) {
+  if (env?.EXACT_AGENT_STORAGE_FRESH !== '1' || !env.EXACT_AGENT_STORED) return '';
+  const entries = JSON.parse(env.EXACT_AGENT_STORED);
+  const install = (origin, entries) => {
+    if (window !== window.top || location.origin !== origin) return;
+    globalThis.__exactSeedStored = prefix => {
+      for (const [name, json] of entries) localStorage.setItem(prefix + name, json);
+      delete globalThis.__exactSeedStored;
+    };
+  };
+  return `(${install})(${JSON.stringify(origin)},${JSON.stringify(entries)})`;
+}
+
 export const openWeb = async options => {
   const { browser, reuse, url, facts, mediaClock = 'wall', lineHeight = null } = options,
     selected = resolveApp(options.app);
@@ -87,7 +101,7 @@ export const openWeb = async options => {
     ).backendPreflight(selected, resolve(options.webDist ?? defaultWebDist(selected)));
   if (browser === 'chrome' && reuse) {
     if (
-      reuse.browser === 'chrome' &&
+      !options.env?.EXACT_AGENT_STORED && reuse.browser === 'chrome' &&
       JSON.stringify(reuse.launchFacts) === JSON.stringify(facts) &&
       (reuse.mediaClock ?? 'wall') === mediaClock &&
       (reuse.lineHeight ?? null) === lineHeight
@@ -453,6 +467,8 @@ async function openWebUnlocked({
       storage,
       env,
     });
+    const stored = storedScript(env, page.origin);
+    const seedScript = stored && await call('Page.addScriptToEvaluateOnNewDocument', { source: stored });
     let faultScript, faultHeader = '';
     const { frameTree } = await call('Page.getFrameTree');
     cdp.listeners.push(msg => {
@@ -476,8 +492,18 @@ async function openWebUnlocked({
       faultScript = (await call('Page.addScriptToEvaluateOnNewDocument', { source })).identifier;
     };
     await installFaults(facts.failFetch);
+    // `prefer display-mode`'s substitute (LLP 1039 D7), set in each new document before the page's scripts run, as
+    // CDP's emulated media are in place at boot: a reload keeps it, and a new session starts without it.
+    let displayScript;
+    const carryDisplayMode = async value => {
+      if (displayScript) await call('Page.removeScriptToEvaluateOnNewDocument', { identifier: displayScript });
+      displayScript = value == null ? undefined : (await call('Page.addScriptToEvaluateOnNewDocument', {
+        source: `if (window === window.top && location.origin === ${JSON.stringify(page.origin)}) globalThis.__exactDisplayMode = ${JSON.stringify(value)};`,
+      })).identifier;
+    };
     // Display preferences are the agent's from launch, never the machine's (LLP 1069.007 D2); `prefer` changes them.
     const emulated = { ...LAUNCH_MEDIA };
+    let safeArea;
     await call('Emulation.setEmulatedMedia', {
       features: Object.entries(emulated).map(([name, value]) => ({ name, value })),
     });
@@ -491,6 +517,10 @@ async function openWebUnlocked({
       if (Date.now() - t > 30000) throw new Error('the page never booted; ' + hostLines.join('\n'));
       await sleep(15);
       boot = await evaluate("document.getElementById('exact-root')?.dataset.bootMs ?? null").catch(() => null);
+    }
+    if (seedScript) {
+      await call('Page.removeScriptToEvaluateOnNewDocument', { identifier: seedScript.identifier });
+      if (await evaluate('!!globalThis.__exactSeedStored')) throw new Error('stored: the web build did not load the initial persisted state');
     }
     await evaluate('exact.ready'); // First pixel precedes deferred module readiness.
     if (plan && !js) {
@@ -571,6 +601,11 @@ async function openWebUnlocked({
        * never the last session's `prefer` (LLP 1069.007 D2; agent-prefer.mjs). */
       async reset({ keep = false, failFetch, epoch, session = false } = {}) {
         if (session) {
+          if (safeArea !== undefined) {
+            await call('Emulation.setSafeAreaInsetsOverride', { insets: {} });
+            safeArea = undefined;
+          }
+          await carryDisplayMode(null);
           for (const name of Object.keys(emulated)) delete emulated[name];
           Object.assign(emulated, LAUNCH_MEDIA);
           await call('Emulation.setEmulatedMedia', {
@@ -624,9 +659,24 @@ async function openWebUnlocked({
         if (r.scrolled) await frame();
         return r;
       },
-      prefer: (media, page, fold, mode) =>
-        // the browser's emulation through CDP, the glue's substitute where it offers none (agent-prefer.mjs)
-        preferWeb({ media, page, fold, mode, emulated, call, evaluate, frame, ask, scale }),
+      // the browser's emulation through CDP, the glue's substitute where it offers none (agent-prefer.mjs)
+      async prefer(media, page, fold, mode) {
+        if (media['display-mode'] != null) await carryDisplayMode(media['display-mode']);
+        const { 'safe-area': edges, ...otherPage } = page;
+        if (edges !== undefined) {
+          const [top, right, bottom, left] = edges.split(' ').map(Number);
+          try {
+            await call('Emulation.setSafeAreaInsetsOverride', { insets: { top, right, bottom, left } });
+          } catch (error) {
+            throw new Error(`prefer safe-area: this browser could not set the insets: ${error.message}`);
+          }
+          safeArea = edges;
+          await frame();
+        }
+        const reply = await preferWeb({ media, page: otherPage, fold, mode, emulated, call, evaluate, frame, ask, scale });
+        if (safeArea !== undefined) reply.page = { ...reply.page, 'safe-area': safeArea };
+        return reply;
+      },
       // A click with modifiers named holds them as a keyboard does (`heldForClick`; Charlie, 2026-10-07).
       input(id, kind, opts) {
         return heldForClick(call, kind, opts, () => this.deliverInput(id, kind, opts));

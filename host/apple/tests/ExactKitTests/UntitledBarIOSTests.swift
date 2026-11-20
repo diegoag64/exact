@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// Issue #364 over `host/apple/tests/fixtures/untitled-bar.contract`: a
 /// route's first `header` holding a button and no heading is UIKit's bar

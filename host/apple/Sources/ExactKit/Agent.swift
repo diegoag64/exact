@@ -172,7 +172,20 @@ public final class Agent {
                     handle(line, completed: { completed.signal() })
                 }
                 CFRunLoopWakeUp(CFRunLoopGetMain())
-                completed.wait()
+                // An asynchronous screenshot or frame capture can take seconds while the UI
+                // stays responsive. Probe the same run-loop modes that deliver the request.
+                while completed.wait(timeout: .now() + 5) == .timedOut {
+                    let pulse = DispatchSemaphore(value: 0)
+                    CFRunLoopPerformBlock(CFRunLoopGetMain(), CFRunLoopMode.commonModes.rawValue) { pulse.signal() }
+                    CFRunLoopWakeUp(CFRunLoopGetMain())
+                    if pulse.wait(timeout: .now() + 2) == .timedOut {
+                        if completed.wait(timeout: .now()) == .timedOut {
+                            fputs("exact agent: the app’s main thread did not service a run-loop callback for 2 s while this request was pending\n", stderr)
+                            completed.wait()
+                        }
+                        break
+                    }
+                }
             }
         }
         DispatchQueue.main.async { exitAfterLanding() }
@@ -972,7 +985,7 @@ public final class Agent {
         let hatches = session.natives
         if settle { waitForReplies(until: deadline, orAfter: true) }
         // Settle ends motion: every leaf held mid-fling is made (LLP 1068 §5.1).
-        if settle { presenter.leaves.settle() }
+        if settle { presenter.leaves?.settle() }
         waitForImages()
         var target = req["to"] as? Double
         if settle { target = max(from, self.settle() ?? from, pendingCount() > 0 ? hatches.hatchNextAfter ?? from : from) }

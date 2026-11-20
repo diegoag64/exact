@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 @testable import ExactGroupedLists
 
 /// LLP 1116.005 D3 over `scripts/fixtures/tab-edge.contract`: each route

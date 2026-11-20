@@ -14,7 +14,7 @@ import UIKit
 // `scrollsToTop` is iOS's alone; the search below is the bar's rule on tvOS too.
 #if os(iOS)
 extension Presenter {
-    func syncScrollsToTop() {
+    package func syncScrollsToTop() {
         #if EXACT_INSPECT
         let chosen = Inspect.on ? nil : scrollsToTopTarget() // (inspect mode: a status-bar tap scrolls nothing)
         #else
@@ -73,7 +73,7 @@ extension Presenter {
     /// The shallowest shown scroller under `node` (itself included) that
     /// scrolls vertically, in tree order at each depth; a screen's content
     /// scroller is near its top, so the search stops eight levels down.
-    static func firstVerticalScroller(under node: NodeView) -> NodeView? {
+    package static func firstVerticalScroller(under node: NodeView) -> NodeView? {
         var level: [NodeView] = [node], depth = 0
         while !level.isEmpty, depth < 8 {
             depth += 1

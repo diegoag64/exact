@@ -54,7 +54,7 @@ import { webIconLinks, webThemeColors } from '../../scripts/app-icons.mjs';
 import { appManifestDigest, appSources, buildFileCards, copyStaticTreeIfPresent, listAssets, hostingNotes, planRouteTable, publicFileCards, replaceBuild, webEnvelope, moduleCards, MODULE_FILES } from './serve.mjs';
 import { foreignBeside } from './generations.mjs';
 import { writeLinkFiles } from './association.mjs';
-import { cargoInputPaths, compilerPaths, rustShapeInputs } from '../../scripts/cargo-dep-info.mjs';
+import { cargoInputPaths, compilerPaths, rustBindingInputs } from '../../scripts/cargo-dep-info.mjs';
 import { captureWebProducts, contractReadReceipt } from '../../scripts/web-build.mjs';
 
 const SDK_ROOT = fileURLToPath(new URL('../..', import.meta.url));
@@ -80,7 +80,7 @@ function webMetadata(workspace) {
 export function webSourceRoots(app, js, render = 'rust') {
   // Preparation writes a clean game's workspace before even the shared tools' Cargo query.
   const prepared = app.manifest.game && app.prepare ? app.prepare() : null;
-  const roots = new Set([resolve(SDK_ROOT, 'scripts')]), files = new Set();
+  const roots = new Set([resolve(SDK_ROOT, 'scripts')]), files = new Set(), excluded = new Set();
   const workspaces = [];
   const closure = (metadata, names) => {
     const packages = new Map(metadata.packages.map(pkg => [pkg.id, pkg]));
@@ -99,7 +99,7 @@ export function webSourceRoots(app, js, render = 'rust') {
       for (const dep of nodes.get(id)?.deps ?? []) if (dep.dep_kinds.some(kind => kind.kind !== 'dev')) pending.push(dep.pkg);
     }
     for (const name of ['Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', '.cargo/config.toml', '.cargo/config']) files.add(resolve(metadata.workspace_root, name));
-    workspaces.push({ metadata, packages: local });
+    workspaces.push({ metadata, packages: local, rootNames: new Set(names) });
   };
   // The compiler and the leaves from a tool set: its record of Cargo's answer, and Cargo is not asked (LLP 1174 D5).
   const set = js ? compilerSet() : null, recorded = set && setMetadata(set);
@@ -131,9 +131,11 @@ export function webSourceRoots(app, js, render = 'rust') {
     // A generated app's GPU crates resolve in a workspace of their own (LLP 1153.003 D5.1).
     const own = gpu.length && app.gpuWorkspace && app.gpuWorkspace !== app.workspace ? app.gpuWorkspace : null;
     if (own) closure(webMetadata(own), gpu); else names.push(...gpu);
-    const at = (!js || render === 'rust') && ['linux', 'web'].find(dir => existsSync(resolve(app.dir, dir, 'src/bin', `${app.name ?? app.crate('web').replace(/-web$/, '')}-render.rs`)));
+    const renderBin = app.name ? `${app.name}-render` : `${app.crate('web').replace(/-web$/, '')}-render`;
+    const at = (!js || render === 'rust') && ['linux', 'web'].find(dir => existsSync(resolve(app.dir, dir, 'src/bin', `${renderBin}.rs`)));
     if (at) names.push(app.crate(at));
   }
+  const renderBin = app.crate ? (app.name ? `${app.name}-render` : `${app.crate('web').replace(/-web$/, '')}-render`) : null;
   if (names.length) {
     closure(prepared ?? webMetadata(app.workspace), names);
   }
@@ -154,7 +156,31 @@ export function webSourceRoots(app, js, render = 'rust') {
   // (A source build finds the same in the target directory's dep-info, the Contract compiler's and the filesystem
   // helper's included.)
   if (recorded) for (const product of Object.values(set.manifest.products)) for (const [file] of product.inputs) add(resolve(SDK_ROOT, file), true);
-  const targetsOf = workspaces.flatMap(({ packages }) => packages.flatMap(pkg => pkg.targets ?? []));
+  // Only targets the web build actually compiles contribute dep-info: library, proc-macro and build-script
+  // targets of the closure, the shared web tool bins, and the app's render bin. Dev-only bins, tests, examples
+  // and benches built by other commands stay out of both dep-info and package walks (expo/exact#812).
+  const builtKind = new Set(['lib', 'rlib', 'dylib', 'cdylib', 'staticlib', 'proc-macro', 'custom-build']);
+  const isBuiltTarget = (pkg, target, rootNames) => {
+    const kinds = target.kind ?? [];
+    if (kinds.some(k => builtKind.has(k))) return true;
+    if (!kinds.includes('bin') || target['required-features']?.length) return false;
+    if (renderBin && target.name === renderBin) return true;
+    return rootNames.has(pkg.name) && WEB_CRATES.includes(pkg.name);
+  };
+  const targetsOf = [];
+  for (const { packages, rootNames } of workspaces) {
+    for (const pkg of packages) {
+      const pkgDir = dirname(pkg.manifest_path);
+      for (const target of pkg.targets ?? []) {
+        if (isBuiltTarget(pkg, target, rootNames)) targetsOf.push(target);
+        else if (target.src_path) {
+          const src = resolve(target.src_path);
+          const dir = dirname(src);
+          excluded.add(basename(src) === 'main.rs' && dir !== pkgDir && dir !== resolve(pkgDir, 'src') && within(pkgDir, dir) ? dir : src);
+        }
+      }
+    }
+  }
   const sources = new Set(targetsOf.map(target => resolve(target.src_path)));
   // rustc names a target's dep-info after its crate (`<crate>-<hash>.d`, `lib<crate>.d`, `<crate>.d`), so the
   // rest of a large target directory is never read.
@@ -183,7 +209,7 @@ export function webSourceRoots(app, js, render = 'rust') {
           const pkg = packages.find(pkg => pkg.name === name);
           if (pkg) {
             const stdout = readFileSync(path, 'utf8');
-            for (const input of [...cargoInputPaths(stdout, dirname(pkg.manifest_path)), ...rustShapeInputs(stdout)]) add(input, true);
+            for (const input of [...cargoInputPaths(stdout, dirname(pkg.manifest_path)), ...rustBindingInputs(stdout)]) add(input, true);
           }
         }
       } else if (entry.name.endsWith('.json') && basename(dir) === 'kept') {
@@ -197,7 +223,17 @@ export function webSourceRoots(app, js, render = 'rust') {
   };
   for (const target of targets) scan(target);
   const packageGpu = resolve(app.dir, '.exact/package-gpu'), source = path => !under(packageGpu, path);
-  return [...[...roots].filter(source), ...[...files].filter(source).map(file => ({ file }))];
+  return [...[...roots].filter(source), ...[...files].filter(source).map(file => ({ file })), ...[...excluded].filter(source).map(exclude => ({ exclude }))];
+}
+
+/** Cargo targets omitted from a web build prune directory scans and recursive watches. */
+export function partitionWebRoots(roots) {
+  const active = [], excluded = [];
+  for (const root of roots) {
+    if (root.exclude) excluded.push(resolve(root.exclude));
+    else active.push(root);
+  }
+  return { active, skipTarget: path => excluded.some(dir => within(dir, path)) };
 }
 
 /** A receipt's `sources` (serve.mjs `appSources`): the app's files as the build ends, or null when one came or went
@@ -509,7 +545,7 @@ if (bakeOnly) planBytes = readFileSync(resolve(buildEnv.EXACT_BAKE_OUTPUT, 'web-
 else {
 wasm = readFileSync(out);
 const unbooted = () => { throw new Error('app logic ran while extracting baked bytes'); };
-const { instance } = await WebAssembly.instantiate(wasm, { exact_grants: grantOrigins(() => instance.exports.memory), exact_js: { call: unbooted }, exact_rust: { load: unbooted, call: unbooted, read: unbooted, drop: unbooted }, exact_data: { random: unbooted, agent_seed: unbooted }, exact_clock: { now: unbooted }, exact_geometry: { range: unbooted, read: unbooted, point: unbooted, points: unbooted, shown: unbooted } });
+const { instance } = await WebAssembly.instantiate(wasm, { exact_grants: grantOrigins(() => instance.exports.memory), exact_js: { call: unbooted }, exact_rust: { load: unbooted, call: unbooted, read: unbooted, drop: unbooted }, exact_data: { random: unbooted, agent_seed: unbooted }, exact_clock: { now: unbooted }, exact_geometry: { scroll_metrics: unbooted, range: unbooted, read: unbooted, point: unbooted, points: unbooted, shown: unbooted } });
 exports = instance.exports;
 if (typeof exports.exact_plan !== 'function' || typeof exports.exact_out !== 'function' || !(exports.memory instanceof WebAssembly.Memory)) {
   throw new Error('the web wasm does not export exact_plan, exact_out, and memory');

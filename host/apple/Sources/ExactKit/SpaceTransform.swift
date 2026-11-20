@@ -203,9 +203,9 @@ extension NodeView {
 #endif
 
 #if os(iOS) || os(tvOS)
-typealias SpaceView = UIView
+package typealias SpaceView = UIView
 #else
-typealias SpaceView = NSView
+package typealias SpaceView = NSView
 #endif
 
 extension NodeView {
@@ -248,36 +248,79 @@ extension NodeView {
     }
 
     /// Layout supplies the untransformed overflow; the presenter adds boxes
-    /// carried outside it by transforms, stopping at each clipping boundary.
-    func documentOverflow(in document: SpaceView) -> CGRect {
+    /// carried outside it by transforms, stopping at each clipping boundary
+    /// and carrying any one-axis `clip` down its subtree on the clipped axis.
+    package func documentOverflow(in document: SpaceView) -> CGRect {
+        struct AxisClip {
+            var x: (CGFloat, CGFloat)?
+            var y: (CGFloat, CGFloat)?
+            func apply(_ r: CGRect) -> CGRect? {
+                let loX = x.map { max(r.minX, $0.0) } ?? r.minX
+                let hiX = x.map { min(r.maxX, $0.1) } ?? r.maxX
+                let loY = y.map { max(r.minY, $0.0) } ?? r.minY
+                let hiY = y.map { min(r.maxY, $0.1) } ?? r.maxY
+                guard hiX > loX, hiY > loY else { return nil }
+                return CGRect(x: loX, y: loY, width: hiX - loX, height: hiY - loY)
+            }
+            func intersecting(x range: (CGFloat, CGFloat)) -> AxisClip? {
+                let next = x.map { (max($0.0, range.0), min($0.1, range.1)) } ?? range
+                guard next.1 > next.0 else { return nil }
+                return AxisClip(x: next, y: y)
+            }
+            func intersecting(y range: (CGFloat, CGFloat)) -> AxisClip? {
+                let next = y.map { (max($0.0, range.0), min($0.1, range.1)) } ?? range
+                guard next.1 > next.0 else { return nil }
+                return AxisClip(x: x, y: next)
+            }
+        }
         var reach = drawnRect(CGRect(origin: .zero, size: content), in: document)
         // Each box goes with whether it or a box above it carries drawn
         // points. Below none, the platform's conversion is `drawnRect`, and
         // this pass, which runs at every batch, walks each box's ancestors
         // once rather than twice per corner.
         #if os(iOS) || os(tvOS)
-        var below = [(self, placedAncestor != nil)]
+        var below: [(NodeView, Bool, AxisClip?)] = [(self, placedAncestor != nil, nil)]
         #else
-        var below = [(self, placedAncestor != nil || drawnOffFrame)]
+        var below: [(NodeView, Bool, AxisClip?)] = [(self, placedAncestor != nil || drawnOffFrame, nil)]
         #endif
-        while let (child, carried) = below.popLast() {
+        while let (child, carried, clip) = below.popLast() {
             guard child.style["display"]?.string != "none", child.props["semanticTag"] != "dialog",
                   child.props["popover"] == nil else { continue }
             if child.bounds.width > 0, child.bounds.height > 0 {
-                let box = carried ? child.drawnRect(child.bounds, in: document) : child.convertedRect(child.bounds, to: document)
-                if box.origin.x.isFinite, box.origin.y.isFinite, box.width.isFinite, box.height.isFinite {
+                let raw = carried ? child.drawnRect(child.bounds, in: document) : child.convertedRect(child.bounds, to: document)
+                if raw.origin.x.isFinite, raw.origin.y.isFinite, raw.width.isFinite, raw.height.isFinite,
+                   let box = clip == nil ? raw : clip!.apply(raw) {
                     reach = reach.union(box)
                 }
             }
             #if canImport(UIKit)
             let scrolls = child.scrollView != nil
-            if !scrolls, !child.overflowClips, let flat = presenter?.flats.documentOverflow(of: child, in: document) { reach = reach.union(flat) }
             #else
             let scrolls = child.scroll != nil
             #endif
-            if !scrolls, !child.overflowClips {
-                below.append(contentsOf: child.childNodes.map { ($0, carried || $0.carriesDrawnPoints) })
+            guard !scrolls else { continue }
+            let childClip: AxisClip?
+            if !child.overflowClips {
+                childClip = clip
+            } else if child.clipsOneAxis {
+                let pad = carried ? child.drawnRect(child.overflowPaddingBox, in: document) : child.convertedRect(child.overflowPaddingBox, to: document)
+                guard pad.origin.x.isFinite, pad.origin.y.isFinite, pad.width.isFinite, pad.height.isFinite else { continue }
+                let base = clip ?? AxisClip()
+                let clipped = child.style["overflow_x"]?.string == "clip"
+                    ? base.intersecting(x: (pad.minX, pad.maxX))
+                    : base.intersecting(y: (pad.minY, pad.maxY))
+                guard let clipped else { continue }
+                childClip = clipped
+            } else {
+                continue
             }
+            #if canImport(UIKit)
+            if let flat = presenter?.flats.documentOverflow(of: child, in: document),
+               let box = childClip == nil ? flat : childClip!.apply(flat) {
+                reach = reach.union(box)
+            }
+            #endif
+            below.append(contentsOf: child.childNodes.map { ($0, carried || $0.carriesDrawnPoints, childClip) })
         }
         return reach
     }

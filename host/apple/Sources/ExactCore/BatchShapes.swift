@@ -63,7 +63,7 @@ extension BatchReader {
                 offset = start
                 var op = BatchOp(op: .collections)
                 try object { r, key in
-                    if key == "items" { op.collections = try r.collectionSnapshots() }
+                    if key == "items" { op.collections = try r.linkedCollectionSnapshots() }
                     else if key == "id" { if !(try r.null()) { op.nodeID = try r.id() } }
                     else { try r.skip() }
                 }

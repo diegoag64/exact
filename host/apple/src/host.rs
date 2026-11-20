@@ -44,6 +44,7 @@ mod colors;
 mod commit;
 #[path = "content_region/host.rs"]
 mod content_region_host;
+pub use content_region_host::LinkedRegions;
 #[cfg(test)]
 #[path = "control_text_tests.rs"]
 mod control_text_tests;
@@ -89,6 +90,8 @@ mod forma;
 mod persistence;
 #[path = "presence.rs"]
 mod presence;
+#[path = "region_seam.rs"]
+pub mod region_seam;
 #[path = "renew.rs"]
 mod renew;
 #[path = "route_overflow.rs"]
@@ -98,7 +101,7 @@ mod route_parts;
 #[cfg(test)]
 #[path = "transform_drag_tests.rs"]
 mod transform_drag_tests;
-pub use covers::Restyle;
+pub use covers::{OwnerReports, Restyle};
 use exact_plan::EventKind;
 use exact_runner::{Carried, DataSource, Event, Outcome, RequestOut, Runner, RunnerError, Timed};
 pub use height::{HeightOwnerChange, HeightOwnerDisposition, HeightOwnerError};
@@ -112,10 +115,16 @@ mod activation_tests;
 #[path = "box_motion_tests.rs"]
 mod box_motion_tests;
 #[cfg(test)]
+#[path = "canvas_link_tests.rs"]
+mod canvas_link_tests;
+#[cfg(test)]
 #[path = "filter_motion_tests.rs"]
 mod filter_motion_tests;
 #[path = "layout.rs"]
 mod layout;
+#[cfg(test)]
+#[path = "turn_motion_tests.rs"]
+mod turn_motion_tests;
 use layout::{content_size, published_content_box};
 #[path = "resize.rs"]
 mod resize;
@@ -196,6 +205,11 @@ pub(crate) struct Mirror {
     /// host that gives the popover its own is sent the used size again.
     implied: bool,
 }
+
+/// What a source's `captureCanvas` is answered with where canvases are not
+/// linked: the plan has none to capture.
+pub(crate) const UNLINKED_SURFACES: &str =
+    "Unlinked(\"surfaces\"): this binary links no canvas, which a capture reads; a plan with a canvas links them";
 
 /// One runner, one presenter.
 pub struct Host<D: DataSource> {
@@ -282,7 +296,10 @@ pub struct Host<D: DataSource> {
     group: Option<arrange_group::GroupArrange>,
     presence: presence::Presence,
     flights: flights::Flights,
-    content_region: Option<crate::content_region::RegionState>,
+    /// The content region, which only [`LinkedRegions`] makes.
+    content_region: Option<Box<dyn std::any::Any>>,
+    /// The content-region seam (LLP 1047.001 §9.8).
+    regions: &'static dyn region_seam::ContentRegions<D>,
     height_projection: Vec<(NodeKey, f32)>,
     height_sampling: Vec<(NodeKey, f32)>,
     height_presented: Vec<exact_kernel::PresentedHeight>,
@@ -317,7 +334,7 @@ pub struct Host<D: DataSource> {
     preload_wake: exact_runner::PreloadWake,
     doc_watch: Option<crate::doc_watch::DocWatch>,
     /// A turn's family work after its commits, in its written order.
-    turn: crate::link::TurnLinks<D>,
+    pub(crate) turn: crate::link::TurnLinks<D>,
     /// Deadline at the last successful finish with no pending resize notifications;
     /// only a receipt-free collection report can reuse its settled passes.
     finished_deadline: Option<Option<f64>>,
@@ -544,18 +561,29 @@ impl<D: DataSource> Host<D> {
         }
         // A display presents its pictures: `presented` waits for the first's.
         let was = exact_runner::page::set_awaits_present(start_on_frame);
-        let runner = Runner::boot_with_delivery_linked(
-            links.runner,
-            links.modules,
-            plan,
-            data,
-            kernel,
-            carried,
-            snapshot,
-            facts,
-            viewport,
-            launch,
-        );
+        let platform = if cfg!(target_os = "macos") {
+            exact_runner::page::Platform::Macos
+        } else if cfg!(target_os = "tvos") {
+            exact_runner::page::Platform::Tvos
+        } else if cfg!(target_os = "watchos") {
+            exact_runner::page::Platform::Watchos
+        } else {
+            exact_runner::page::Platform::Ios
+        };
+        let runner = platform.boot(|| {
+            Runner::boot_with_delivery_linked(
+                links.runner,
+                links.modules,
+                plan,
+                data,
+                kernel,
+                carried,
+                snapshot,
+                facts,
+                viewport,
+                launch,
+            )
+        });
         exact_runner::page::set_awaits_present(was);
         let mut runner = runner.map_err(HostError::Runner)?;
         runner.read_only_store(crate::watch_sync::read_only_names());
@@ -574,18 +602,10 @@ impl<D: DataSource> Host<D> {
         if let Some(action) = region.and_then(|r| r.activate) {
             runner.act(action, Vec::new()).map_err(HostError::Runner)?;
         }
-        let mut content_region = region
-            .map(|r| crate::content_region::RegionState::new(runner.kernel_mut(), r))
-            .transpose()
+        let content_region = links
+            .regions
+            .boot(runner.kernel_mut(), region, native)
             .map_err(HostError::Layout)?;
-        if let Some(limits) = native {
-            content_region
-                .as_mut()
-                .ok_or_else(|| HostError::Layout("native registration missing".into()))?
-                .native = Some(
-                crate::content_region::NativeProjection::new(limits).map_err(HostError::Layout)?,
-            );
-        }
         // Install the candidate catalog before first text measurement.
         prepare(&mut runner)?;
         let font_hook =
@@ -664,6 +684,7 @@ impl<D: DataSource> Host<D> {
             presence: presence::Presence::default(),
             flights: flights::Flights::default(),
             content_region,
+            regions: links.regions,
             height_projection: Vec::new(),
             height_sampling: Vec::new(),
             height_presented: Vec::new(),
@@ -750,21 +771,27 @@ impl<D: DataSource> Host<D> {
             (motion.boot)(&mut host, &sync);
         }
         host.boot_paint(&order);
-        host.reconcile_height_handles(&mut batch, true);
+        if let Some(drag) = host.turn.drag {
+            (drag.reconcile_heights)(&mut host, &mut batch, true);
+        }
         host.layout(&mut batch).map_err(HostError::Layout)?;
-        host.canvas_limits();
-        host.canvas_turn(&mut batch);
+        if let Some(canvas) = host.turn.canvas {
+            (canvas.limits)(&mut host);
+            (canvas.turn)(&mut host, &mut batch);
+        }
         // A failed first layout is a refused boot, not a partially committed
         // host. In particular, no candidate secret writes escape before this
         // point on a dev reload.
-        host.emit_transform_drags(&mut batch);
+        if let Some(drag) = host.turn.drag {
+            (drag.emit_transforms)(&mut host, &mut batch);
+        }
         host.present(&mut batch, true);
         let (mut batch, _) = host.resize_rounds(batch, None);
         host.state_onto(&mut batch);
         let batch = host.write(batch, None);
         Ok((host, batch))
     }
-    /// [`crate::link::MotionLowering`]'s boot: what Core Animation can play of
+    /// [`crate::link::TurnMotion`]'s boot: what Core Animation can play of
     /// the motion the engine's first sync started, and the rest resampled.
     pub(crate) fn lower_motion(&mut self, sync: &MotionSync) {
         let runner = &self.runner;
@@ -973,6 +1000,25 @@ impl<D: DataSource> Host<D> {
             .unwrap_or_default()
     }
 
+    /// Surface work for the presenter (`refusal`: the host refused it). With
+    /// canvases unlinked a plan has none, so a source's `captureCanvas` is
+    /// refused by the link's name (LLP 1047.001 D5) and other work goes to
+    /// the presenter.
+    pub fn surface_work(
+        &mut self,
+        presenter: &mut crate::batch::Batch,
+        r: &RequestOut,
+        refusal: Option<&str>,
+    ) {
+        if let Some(canvas) = self.turn.canvas {
+            return (canvas.surface_work)(self, presenter, r, refusal);
+        }
+        if let Some(exact_runner::SurfaceRequest::Canvas { .. }) = r.request.surface.as_deref() {
+            return self.refuse_request(r.ticket, UNLINKED_SURFACES, r.request.is_ordered());
+        }
+        presenter.surface_work(r, refusal);
+    }
+
     /// The requests the runner handed out since the last take (LLP 1016 D2):
     /// the bridge gives them to the executor; nothing reaches the presenter.
     pub fn take_requests(&mut self) -> Vec<RequestOut> {
@@ -1148,7 +1194,9 @@ impl<D: DataSource> Host<D> {
         if !self.engine.starts_on_frame() {
             self.now_ms = a.now_ms.max(self.now_ms);
         }
-        self.runner.canvas_frame();
+        if let Some(canvas) = self.turn.canvas {
+            (canvas.frame)(self);
+        }
         let error = a.error.map(|e| format!("{e:?}"));
         self.in_inert_entry(|host| host.commit(&a.receipts, error))
     }

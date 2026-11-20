@@ -17,6 +17,7 @@ final class GallerySplit: UISplitViewController, UISplitViewControllerDelegate {
         setViewController(UINavigationController(rootViewController: sidebar), for: .primary)
         setViewController(stacks[contents.selected], for: .secondary)
         sidebar.choose = { [weak self] index in self?.choose(index) }
+        sidebar.laidOut = { [weak self] in self?.updateSidebarBarHeight() }
         contents.onSelect = { [weak self] index in
             guard let self else { return }
             selectedFromSidebar = true
@@ -27,6 +28,41 @@ final class GallerySplit: UISplitViewController, UISplitViewControllerDelegate {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// The sidebar's navigation bar height with its title inline while the split is expanded, else 0: the least
+    /// height of the page's range bar, so the two columns' headers end level once both are scrolled. It holds
+    /// whether or not the sidebar shows, so hiding the sidebar, showing it or dragging it in moves nothing, but for
+    /// two cases: it is measured only while the sidebar is in a window, so it is 0 until a sidebar hidden since
+    /// launch first shows, and a size change while the sidebar is hidden takes effect when it next shows.
+    private(set) var sidebarBarHeight: CGFloat = 0
+    /// Called on the main thread when `sidebarBarHeight` changes
+    var sidebarBarHeightChanged: (() -> Void)?
+    /// The sidebar's inline bar height, and the bar width and vertical size class it was measured at
+    private var inlineBarHeight: CGFloat = 0
+    private var measuredAt: [CGFloat]?
+
+    /// Sets `sidebarBarHeight`, and says so when it changes
+    private func updateSidebarBarHeight() {
+        if !isCollapsed, let navigation = sidebar.navigationController {
+            let bar = navigation.navigationBar
+            // Measure only in a window, where the bar has the height it shows (laid out apart from one it reports
+            // UIKit's bare 44 points), and again only where its width or the vertical size class changed: measuring
+            // sets the sidebar item's mode twice. The text size does not change the inline bar's height (the Duo,
+            // iOS 27.1).
+            let at = [bar.bounds.width, CGFloat(traitCollection.verticalSizeClass.rawValue)]
+            if bar.window != nil, bar.bounds.width > 0, at != measuredAt {
+                // Note the key first, so a layout the measuring starts does not measure again. A bar showing another
+                // item is not measured and nothing is laid out, so forget the key and measure at the next layout.
+                measuredAt = at
+                if let measured = sidebar.measureInlineBarHeight() { inlineBarHeight = measured } else { measuredAt = nil }
+            }
+        }
+        let height = isCollapsed ? 0 : inlineBarHeight
+        if height != sidebarBarHeight {
+            sidebarBarHeight = height
+            sidebarBarHeightChanged?()
+        }
+    }
 
     private func choose(_ index: Int) {
         selectedFromSidebar = true
@@ -43,12 +79,18 @@ final class GallerySplit: UISplitViewController, UISplitViewControllerDelegate {
                              topColumnForCollapsingToProposedTopColumn proposedTopColumn: UISplitViewController.Column) -> UISplitViewController.Column {
         selectedFromSidebar ? .secondary : .primary
     }
+
+    // Update when the split collapses or expands, which need not lay out the sidebar
+    func splitViewControllerDidCollapse(_ svc: UISplitViewController) { updateSidebarBarHeight() }
+    func splitViewControllerDidExpand(_ svc: UISplitViewController) { updateSidebarBarHeight() }
 }
 
 final class GallerySidebar: UITableViewController {
     private let contents: ExactTabContents
     private let groups = [("Text", [0, 1]), ("Color & images", [2, 3, 4, 5]), ("UI & media", [6, 7, 8])]
     var choose: ((Int) -> Void)?
+    /// Called after each layout of the sidebar
+    var laidOut: (() -> Void)?
 
     init(_ contents: ExactTabContents) {
         self.contents = contents
@@ -58,6 +100,26 @@ final class GallerySidebar: UITableViewController {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    /// The navigation bar's height with the title inline, whichever title it shows now: what the bar says it
+    /// fits while this item asks for no large title, the item's mode set back at once without animation. Nil
+    /// while the bar shows another item.
+    func measureInlineBarHeight() -> CGFloat? {
+        guard let bar = navigationController?.navigationBar, bar.topItem === navigationItem else { return nil }
+        let mode = navigationItem.largeTitleDisplayMode
+        var height: CGFloat = 0
+        UIView.performWithoutAnimation {
+            navigationItem.largeTitleDisplayMode = .never
+            height = bar.sizeThatFits(CGSize(width: bar.bounds.width, height: 0)).height
+            navigationItem.largeTitleDisplayMode = mode
+        }
+        return height
+    }
+
+    override func viewDidLayoutSubviews() {
+        super.viewDidLayoutSubviews()
+        laidOut?()
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()

@@ -21,15 +21,23 @@ use std::fmt::Write as _;
 /// A grammar: the value, or why CSS refuses the text.
 type Grammar<T> = fn(&str) -> Result<T, ParseError>;
 
-/// The two grammars a link registers.
+/// A check of a value the grammar made or the wire carried.
+type Check = fn(&Animations) -> Result<(), AnimationError>;
+
+/// The two grammars a link registers, and the checks a style row's value
+/// takes (`validate`, `validate_ending` for an exit).
 struct Grammars {
     animations: Grammar<Animations>,
     keyframes: Grammar<Keyframes>,
+    validate: Check,
+    validate_ending: Check,
 }
 
 const GRAMMARS: Grammars = Grammars {
     animations: Animations::grammar,
     keyframes: Keyframes::grammar,
+    validate: Animations::validate,
+    validate_ending: Animations::validate_ending,
 };
 
 /// The grammars, once linked ([`link`]). This crate's own tests parse
@@ -64,11 +72,38 @@ fn parse_linked<T>(text: &str, pick: fn(&Grammars) -> Grammar<T>) -> Result<T, P
     pick(&GRAMMARS)(text)
 }
 
+/// `animations` by the check `pick` names, once linked: an empty row needs
+/// none, and any other reaches only an artifact that links the grammar.
+fn check_linked(
+    animations: &Animations,
+    pick: fn(&Grammars) -> Check,
+) -> Result<(), AnimationError> {
+    if animations.0.is_empty() {
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    return LINKED
+        .get()
+        .map_or(Err(AnimationError::Unlinked), |g| pick(g)(animations));
+    #[cfg(test)]
+    pick(&GRAMMARS)(animations)
+}
+
 impl Animations {
     /// Parse the shorthand. Names stay unresolved (no keyframes) until
     /// [`Animations::resolve`]. Once linked ([`link`]).
     pub fn parse(text: &str) -> Result<Animations, ParseError> {
         parse_linked(text, |g| g.animations)
+    }
+
+    /// [`Animations::validate`], once linked: what a style row's value takes.
+    pub fn validate_linked(&self) -> Result<(), AnimationError> {
+        check_linked(self, |g| g.validate)
+    }
+
+    /// [`Animations::validate_ending`], once linked: an exit row's check.
+    pub fn validate_ending_linked(&self) -> Result<(), AnimationError> {
+        check_linked(self, |g| g.validate_ending)
     }
 
     fn grammar(text: &str) -> Result<Animations, ParseError> {

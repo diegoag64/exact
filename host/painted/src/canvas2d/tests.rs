@@ -336,3 +336,61 @@ fn a_redraw_copies_the_bitmap_only_while_a_painter_holds_the_last_one() {
     assert_eq!(at(&now, 2, 0), [255, 0, 0, 255]);
     assert_eq!(at(&now, 1, 0), [255, 0, 0, 255]);
 }
+
+#[test]
+fn whole_pixel_clear_and_blit_preserve_edge_cases() {
+    // Positive clearRect clears whole pixels; negative width/height fall back and
+    // clear the same 3x3 region without panicking.
+    for (x, y, w, h) in [(3., 2., 3., 3.), (6., 2., -3., 3.), (3., 5., 3., -3.)] {
+        let p = replay(10, 10, 1.0, |c| {
+            c.set_fill_style_str("#ff0000");
+            c.fill_rect(0., 0., 10., 10.);
+            c.clear_rect(x, y, w, h);
+        });
+        for py in 0..10 {
+            for px in 0..10 {
+                let inside = (3..6).contains(&px) && (2..5).contains(&py);
+                let want = if inside {
+                    [0, 0, 0, 0]
+                } else {
+                    [255, 0, 0, 255]
+                };
+                assert_eq!(at(&p, px, py), want, "({x},{y},{w},{h}) at ({px},{py})");
+            }
+        }
+    }
+    // Whole-pixel opaque blit copies exact pixels; fractional source crop with
+    // integer translation falls back so half-covered edges stay anti-aliased.
+    let whole = replay(10, 10, 1.0, |c| {
+        c.set_image_smoothing_enabled(false);
+        c.draw_image_with_image_handle_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
+            "tile", 1., 1., 2., 2., 3., 4., 2., 2.,
+        )
+        .unwrap();
+    });
+    for py in 0..10 {
+        for px in 0..10 {
+            let inside = (3..5).contains(&px) && (4..6).contains(&py);
+            assert_eq!(
+                at(&whole, px, py),
+                if inside {
+                    [0, 0, 255, 255]
+                } else {
+                    [0, 0, 0, 0]
+                }
+            );
+        }
+    }
+    let frac = replay(10, 10, 1.0, |c| {
+        c.set_image_smoothing_enabled(false);
+        c.draw_image_with_image_handle_and_sw_and_sh_and_dx_and_dy_and_dw_and_dh(
+            "tile", 0.5, 0., 2., 2., 2.5, 2., 2., 2.,
+        )
+        .unwrap();
+    });
+    // Left half-covered column at x=2 and right half-covered column at x=4 must be
+    // partial alpha rather than solid 255.
+    assert!(at(&frac, 2, 2)[3] > 0 && at(&frac, 2, 2)[3] < 255);
+    assert_eq!(at(&frac, 3, 2), [0, 0, 255, 255]);
+    assert!(at(&frac, 4, 2)[3] > 0 && at(&frac, 4, 2)[3] < 255);
+}

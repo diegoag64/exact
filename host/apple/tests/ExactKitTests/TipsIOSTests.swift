@@ -4,6 +4,7 @@ import TipKit
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// LLP 1035.006.000 over `scripts/fixtures/tips.contract`: a tip is TipKit's
 /// popover, over the bar item UIKit draws for a header's button and over a

@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 extension NavigationBarIOSTests {
     func testCachedNativeBarMenuRejectsNewActivePropertiesWithoutReprojection() throws {

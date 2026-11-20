@@ -119,9 +119,7 @@ pub(crate) struct PainterBoot {
 
 impl PainterBoot {
     #[cfg(windows)]
-    pub(super) fn prepare_direct(
-        self,
-    ) -> Option<Result<exact_ink::device::d3d11::Preparing, String>> {
+    fn direct_d3d11(self) -> Option<bool> {
         if self.choice != PainterChoice::Ink
             || !std::ptr::fn_addr_eq(
                 self.open,
@@ -131,7 +129,14 @@ impl PainterBoot {
             return None;
         }
         let device = std::env::var("EXACT_INK_DEVICE").ok();
-        let force_warp = exact_ink::device::direct_d3d11(device.as_deref())?;
+        exact_ink::device::direct_d3d11(device.as_deref())
+    }
+
+    #[cfg(windows)]
+    pub(super) fn prepare_direct(
+        self,
+    ) -> Option<Result<exact_ink::device::d3d11::Preparing, String>> {
+        let force_warp = self.direct_d3d11()?;
         Some(exact_ink::device::d3d11::Preparing::start(force_warp).map_err(|e| e.to_string()))
     }
 
@@ -495,7 +500,7 @@ impl<D: DataSource> Presenter<D> {
         })
     }
 
-    /// Install the device prepared before app boot, before any frame is drawn.
+    /// Install the prepared device or keep the CPU painter while it starts.
     /// @ref LLP 1149 S2.4.
     #[cfg(windows)]
     pub(crate) fn install_prepared_painter(
@@ -516,6 +521,48 @@ impl<D: DataSource> Presenter<D> {
         self.choice = PainterChoice::Ink;
         self.repaint();
         Ok(())
+    }
+
+    /// Release the hidden window's device. The next visible frame reopens the configured painter.
+    #[cfg(windows)]
+    pub fn suspend_window_painter(&mut self, choice: PainterChoice) {
+        self.surfaces.detach_painter_window();
+        if self.deferred_painter.is_none() {
+            self.brush.replace_backend(Box::new(Raster::new()));
+            self.painter = cpu_info();
+            self.choice = PainterChoice::Cpu;
+            self.deferred_painter = Some(PainterBoot::selected(choice));
+        }
+    }
+
+    /// Open the deferred painter before the carrier attaches and draws with it.
+    #[cfg(any(windows, test))]
+    pub(crate) fn redraw_window<T>(
+        &mut self,
+        present: impl FnOnce(&mut Self, bool) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let opened = self.open_deferred_painter()?;
+        present(self, opened)
+    }
+
+    #[cfg(any(windows, test))]
+    fn open_deferred_painter(&mut self) -> Result<bool, String> {
+        let Some(painter) = self.deferred_painter.take() else {
+            return Ok(false);
+        };
+        #[cfg(windows)]
+        if let Some(force_warp) = painter.direct_d3d11() {
+            let preparing = exact_ink::device::d3d11::Startup::start_for_first_present(force_warp)
+                .map_err(|e| e.to_string())?;
+            self.install_prepared_painter(preparing)?;
+            return Ok(true);
+        }
+        let (backend, info) = painter.open()?;
+        self.brush.replace_backend(backend);
+        self.painter = info;
+        self.choice = painter.choice;
+        self.repaint();
+        Ok(true)
     }
 
     /// Boot the app under a viewport (points) at a device scale, with its
@@ -757,6 +804,41 @@ mod tests {
         .encode()
     }
 
+    fn fixture_config(plan: Vec<u8>) -> crate::app::Config {
+        crate::app::Config {
+            preferences: None,
+            output_rotation: Default::default(),
+            #[cfg(target_os = "macos")]
+            painted_boot: None,
+            content_region: None,
+            launch: "/".into(),
+            plan: plan.into(),
+            fallback_plan: None,
+            assets: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/caltrain")),
+            scale: 1.,
+            size: (8., 8.),
+            agent: false,
+            smoke: false,
+            shot: None,
+            dev_plan: None,
+            dev_url: None,
+            dev_said: None,
+            dev_identity: None,
+            card: String::new(),
+            vnc: None,
+            compat: "{}".into(),
+            explicit: true,
+            entry: None,
+            selected_assets: None,
+            selected_dir: None,
+            module: Ok(None),
+            updates: None,
+            hatches: None,
+            packages: Vec::new(),
+            clock_started: None,
+        }
+    }
+
     fn boot(
         plan: &[u8],
         open: fn(PainterChoice) -> OpenedPainter,
@@ -785,8 +867,60 @@ mod tests {
         assert!(error.is_none(), "{error:?}");
         assert_eq!(presenter.painter.name, "carrier-cpu");
         assert_eq!(presenter.compat, "{}");
-        assert_eq!(&presenter.frame().data()[..4], &[0x22, 0x44, 0x66, 255]);
         assert_eq!(OPENED.with(Cell::get), 1);
+        let frame = presenter.display_frame().expect("first frame");
+        assert_eq!(&frame.pixels.data()[..4], &[0x22, 0x44, 0x66, 255]);
+        assert!(presenter.display_complete(&frame));
+        assert!(presenter.first_pixel_told());
+    }
+
+    #[test]
+    fn window_launch_opens_its_painter_once_before_first_present() {
+        for (login, measured, starts_hidden) in [
+            (Some(true), false, true),
+            (None, false, false),
+            (Some(true), true, false),
+        ] {
+            OPENED.with(|n| n.set(0));
+            let mut preparations = 0;
+            let (hidden, _) = crate::app::prepare_window_painter(login, measured, || {
+                preparations += 1;
+                Ok::<_, String>(None::<()>)
+            })
+            .unwrap();
+            assert_eq!(hidden, starts_hidden);
+            assert_eq!(preparations, usize::from(!starts_hidden));
+            let mut config = fixture_config(plan());
+            let painter = PainterBoot {
+                choice: PainterChoice::Gpu,
+                open: counted,
+            };
+            let (mut presenter, error) =
+                crate::app::boot_window_with_painter::<()>(&mut config, (8., 8.), hidden, painter)
+                    .expect("window boots");
+            assert!(error.is_none(), "{error:?}");
+            if hidden {
+                presenter.first_pixel_unshown();
+                assert!(presenter.first_pixel_told());
+                assert_eq!(presenter.painter.name, "cpu");
+            }
+            assert_eq!(OPENED.with(Cell::get), usize::from(!starts_hidden));
+
+            for first in [true, false] {
+                presenter
+                    .redraw_window(|p, opened| {
+                        assert_eq!(opened, starts_hidden && first);
+                        assert_eq!(OPENED.with(Cell::get), 1);
+                        let frame = p.display_frame().expect("visible frame");
+                        assert_eq!((frame.pixels.width(), frame.pixels.height()), (8, 8));
+                        assert_eq!(&frame.pixels.data()[..4], &[0x22, 0x44, 0x66, 255]);
+                        assert!(p.display_complete(&frame));
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(presenter.first_pixel_told());
+            }
+        }
     }
 
     #[test]
@@ -869,38 +1003,10 @@ mod tests {
             (b"invalid plan".to_vec(), false, None),
         ] {
             OPENED.with(|n| n.set(0));
-            let mut config = crate::app::Config {
-                preferences: None,
-                output_rotation: Default::default(),
-                #[cfg(target_os = "macos")]
-                painted_boot: None,
-                content_region: None,
-                launch: "/".into(),
-                plan: selected.into(),
-                fallback_plan: Some(plan()),
-                assets: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../../apps/caltrain")),
-                scale: 1.,
-                size: (8., 8.),
-                agent: false,
-                smoke: false,
-                shot: None,
-                dev_plan: None,
-                dev_url: development.then(|| "http://127.0.0.1:1/".into()),
-                dev_said: None,
-                dev_identity: development.then(|| "A".into()),
-                card: String::new(),
-                vnc: None,
-                compat: "{}".into(),
-                explicit: true,
-                entry: None,
-                selected_assets: None,
-                selected_dir: None,
-                module: Ok(None),
-                updates: None,
-                hatches: None,
-                packages: Vec::new(),
-                clock_started: None,
-            };
+            let mut config = fixture_config(selected);
+            config.fallback_plan = Some(plan());
+            config.dev_url = development.then(|| "http://127.0.0.1:1/".into());
+            config.dev_identity = development.then(|| "A".into());
             let (mut presenter, error) = crate::app::boot_presenter_with_painter::<()>(
                 &mut config,
                 (8., 8.),

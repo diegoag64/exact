@@ -12,7 +12,7 @@ extension NodeView {
 
 /// Stable projection inputs survive row fills; a batch that can change them
 /// discards the cache before and after it applies.
-final class ListRowDependencies {
+package final class ListRowDependencies {
     let back: String?
     let scrolls: Set<String>
     let invoked: Set<String>

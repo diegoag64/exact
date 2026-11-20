@@ -112,6 +112,8 @@ extension ControlHost {
             assign(bar, \.frame, CGRect(x: box.minX, y: box.midY - height / 2, width: box.width, height: height))
             // UIKit draws the progress in the bar's tint and dims it; a share of it is the progress's colour
             assign(bar, \.progressTintColor, owner.accentShare)
+            // Authored background-color colours the bar's track rather than painting the outer box (expo/exact#836).
+            assign(bar, \.trackTintColor, owner.uiColor("background_color"))
             assign(bar, \.isHidden, owner.cssVisibilityHidden)
             assign(bar, \.accessibilityIdentifier, owner.props["testId"])
             assign(bar, \.accessibilityLabel, owner.props["accessibilityLabel"])

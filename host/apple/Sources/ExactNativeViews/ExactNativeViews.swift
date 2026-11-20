@@ -9,12 +9,18 @@
 // the core reaches it only through `NativeModuleLink`.
 @_exported import ExactFormaBinding
 import ExactKit
+import ExactHeavyLeaves
 
 public enum ExactNativeViews {
     /// Set `NativeModuleLink`'s slots, before any session is made.
     public static func install() {
+        ExactHeavyLeaves.install()
         ExactFormaBinding.install()
         NativeModuleLink.make = { NativeViews() }
         NativeModuleLink.makeElements = { ElementHatches($0) }
+        // Speech, calls and capture claim the audio session.
+        #if os(iOS) || os(tvOS)
+        MediaLink.claimsAudioSession()
+        #endif
     }
 }

@@ -54,6 +54,8 @@ extension Runtime {
             return (batch.ops.first { $0.op == .hold }.flatMap { NativeHold($0.payload) }, batch)
         }
     }
+    /// `change` at `view` with no field selection, for a family outside the core.
+    package func valueChange(_ view: UInt32, _ value: String, now: Double) -> Batch { change(view, value, now: now) }
     /// A `change`; a text field's carries its selection as the edit left
     /// it (kind 41, x2apps codeedit #2), else the value alone (kind 1).
     func change(_ view: UInt32, _ value: String, selection: FieldSelection? = nil, now: Double) -> Batch {
@@ -178,6 +180,23 @@ extension Runtime {
                 for word in [view ?? 0, kind] + (insets ?? [0, 0, 0, 0]).map({ Float($0).bitPattern }) {
                     withUnsafeBytes(of: word.littleEndian) { bytes.append(contentsOf: $0) }
                 }
+            }
+            return read(exact_host_covers(rt, write(bytes)))
+        }
+    }
+    /// Content owners' updates (LLP 1123 D2), each the owner by its root's view and its
+    /// update in the kernel's encoding (`OwnerUpdateIOS.encode`), and targets native code
+    /// registered (D9, `ExactNativeTarget.encode`), under one layout, checked whole:
+    /// `exact_host_covers` kinds 21 and 22, each record's length after its kind.
+    func ownerReports(updates: [(UInt32, Data)] = [], registrations: [Data] = []) -> Batch {
+        return on(layout: true) {
+            var bytes = Data()
+            let records = updates.map { ($0.0, UInt32(21), $0.1) } + registrations.map { (UInt32(0), UInt32(22), $0) }
+            for (view, kind, record) in records {
+                for word in [view, kind, UInt32(record.count)] {
+                    withUnsafeBytes(of: word.littleEndian) { bytes.append(contentsOf: $0) }
+                }
+                bytes.append(record)
             }
             return read(exact_host_covers(rt, write(bytes)))
         }

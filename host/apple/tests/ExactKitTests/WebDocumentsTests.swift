@@ -3,6 +3,7 @@ import PDFKit
 import WebKit
 import CoreGraphics
 @testable import ExactKit
+@testable import ExactWebViews
 #if os(macOS)
 import AppKit
 #endif

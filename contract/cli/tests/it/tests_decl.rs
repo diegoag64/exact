@@ -379,8 +379,7 @@ fn a_test_pinches_holds_a_key_and_indexes_state() {
 #[test]
 fn a_test_wheels_back_toward_the_start() {
     // Excord on macOS: a drag selects text there, so its scroll is the agent's wheel.
-    let src =
-        "test \"scroll\"\n  tap \"transcript\" wheel 0 -2500\n  tap \"strip\" wheel -4.5 30\n";
+    let src = "test \"scroll\"\n  tap \"transcript\" wheel 0 -2500\n  tap \"strip\" wheel -4.5 30\n  scroll \"save\"\n";
     let tests = contract::tests(src).unwrap();
     let t = &tests[0];
     assert!(matches!(
@@ -398,10 +397,12 @@ fn a_test_wheels_back_toward_the_start() {
         ),
         "{json}"
     );
-    assert!(
-        json.contains("\"form\":\"wheel\",\"wheel\":[-4.5,30]"),
-        "{json}"
-    );
+    for step in [
+        r#""form":"wheel","wheel":[-4.5,30]"#,
+        r#"{"op":"scroll","target":"save","line":4}"#,
+    ] {
+        assert!(json.contains(step), "{json}");
+    }
     // Both deltas are required, and nothing follows them.
     let e = contract::tests("test \"t\"\n  tap \"a\" wheel 0\n").unwrap_err();
     assert_eq!(e.id, "syntax-expected-step");
@@ -846,26 +847,26 @@ fn a_test_asserts_which_node_has_the_focus() {
 
 #[test]
 fn a_test_bounds_a_nodes_laid_out_width_or_height() {
-    let src = "test \"t\"\n  expect layout \"status-mark\" height <= 24\n  expect layout \"status-mark\" width >= 12.5\n  expect layout \"rule\" height == 1\n";
+    let src = "test \"t\"\n  expect layout \"status-mark\" height <= 24\n  expect layout \"status-mark\" width >= 12.5\n  expect layout \"rule\" height == 1\n  expect layout \"icon\" centerY == layout \"label\" centerY within 0.5\n  expect layout \"off\" left <= -10\n";
     let tests = contract::tests(src).unwrap();
-    assert!(matches!(
-        &tests[0].steps[0],
-        Step::ExpectLayout { target, dimension, comparison: StateComparison::AtMost, value, .. }
-            if target == "status-mark" && dimension == "height" && *value == 24.0
-    ));
     let json = contract::tests_json(&tests);
     for step in [
         "{\"op\":\"expect-layout\",\"target\":\"status-mark\",\"dimension\":\"height\",\"comparison\":\"at-most\",\"value\":24,\"line\":2}",
         "{\"op\":\"expect-layout\",\"target\":\"status-mark\",\"dimension\":\"width\",\"comparison\":\"at-least\",\"value\":12.5,\"line\":3}",
         "{\"op\":\"expect-layout\",\"target\":\"rule\",\"dimension\":\"height\",\"comparison\":\"equal\",\"value\":1,\"line\":4}",
+        "{\"op\":\"expect-layout\",\"target\":\"icon\",\"dimension\":\"centerY\",\"comparison\":\"equal\",\"value\":{\"target\":\"label\",\"dimension\":\"centerY\"},\"tolerance\":0.5,\"line\":5}",
     ] {
         assert!(json.contains(step), "{step}\n{json}");
     }
     for (rest, says) in [
-        ("\"mark\" x <= 24", "reads `width` or `height`, not `x`"),
+        ("\"mark\" depth <= 24", "needs a size"),
         ("\"mark\" height < 24", "takes `==`, `<=` or `>=`"),
         ("\"mark\" height <= 24px", "in points, written bare"),
         ("\"mark\" height <= -1", "a size of 0 or more"),
+        (
+            "\"mark\" right == layout \"label\" right within -1",
+            "tolerance must be nonnegative",
+        ),
         ("mark height <= 24", "a testId"),
     ] {
         let e = contract::tests(&format!("test \"t\"\n  expect layout {rest}\n")).unwrap_err();

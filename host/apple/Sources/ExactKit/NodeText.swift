@@ -27,7 +27,7 @@ extension NodeView {
 
     /// The node boxes among `views` that a reader of the committed tree
     /// finds. `reader`, a box in a held subtree, finds its own subtree.
-    static func committed(_ views: [PlatformView], reader: NodeView? = nil) -> [NodeView] {
+    package static func committed(_ views: [PlatformView], reader: NodeView? = nil) -> [NodeView] {
         let insideHeld = reader?.held == true
         return views.compactMap { ($0 as? NodeView).flatMap { $0.held && !insideHeld ? nil : $0 } }
     }
@@ -92,7 +92,7 @@ extension NodeView {
     }
     var paragraphOwner: NodeView { self }
 
-    func paragraphLayout() -> Paragraph? {
+    package func paragraphLayout() -> Paragraph? {
         #if os(macOS)
         if readerParagraph != nil || presenter?.session?.regions.owns(self) == true { return nil }
         #endif
@@ -153,7 +153,7 @@ extension NodeView {
     /// The props a paragraph's spec reads (`paragraphSpec`): setting one
     /// invalidates what was laid out from the old value, whoever asked first.
     static let paragraphProps: Set<String> = ["text", "markup", "atoms", "atomFaces", "atomStyles", "href", "fitScale"]
-    func paragraphSpec() -> Spec {
+    package func paragraphSpec() -> Spec {
         if let spec = cachedTextSpec { return spec }
         #if os(macOS)
         // In a table's selected row that AppKit draws emphasized, a role's ink is the selected item's (TableInkMac.swift).
@@ -267,7 +267,7 @@ extension NodeView {
                                   color: ink,
                                   language: presenter?.documentLanguage ?? "", flow: !flowShapes.isEmpty) { runs in
             guard props["markup"] == "markdown", let text else { return runs }
-            return text.atomIcons(runs, node: self)
+            return MarkdownLink.installed?.atomIcons(text, runs, node: self) ?? runs
         }
         spec.gatherShadows()
         cachedTextSpec = spec
@@ -275,8 +275,8 @@ extension NodeView {
     }
 
     /// A shaped-text offset in the node's source text, and back (LLP 1053 G5).
-    func sourceOffset(_ shaped: Int) -> Int { paragraphSpec().source.source(shaped) }
-    func shapedOffset(_ source: Int) -> Int { paragraphSpec().source.collapsed(source) }
+    package func sourceOffset(_ shaped: Int) -> Int { paragraphSpec().source.source(shaped) }
+    package func shapedOffset(_ source: Int) -> Int { paragraphSpec().source.collapsed(source) }
 }
 
 extension PlatformView {

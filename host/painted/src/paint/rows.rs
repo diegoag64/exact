@@ -135,6 +135,7 @@ impl RowPin {
 /// A row being recorded.
 #[derive(Default)]
 struct Capture {
+    clip: Option<Rect4>,
     refused: bool,
     /// What its boxes' filters paint, in the walk's coordinates (`box_filter.rs`).
     reach: Option<Rect4>,
@@ -164,8 +165,8 @@ pub(super) struct Rows {
     /// Rows drawings took by reference, and rows they walked again.
     #[cfg(test)]
     pub(super) referred: (usize, usize),
-    /// Viewport width, scale and appearance the kept rows were drawn at.
-    world: Option<(u32, u32, bool)>,
+    /// Viewport width, scale, appearance and whether desktop bars draw.
+    world: Option<(u32, u32, bool, bool)>,
     /// The last paint's focused node and whether its ring was suppressed.
     focus: Option<(NodeKey, bool)>,
     /// `EXACT_ROWS=0` turns rows off, for comparison.
@@ -363,7 +364,12 @@ impl Painter {
             && self.placements.is_empty()
             && self.lift.arrange.is_none()
             && self.flatten.is_none();
-        let world = (self.viewport.0.to_bits(), self.scale.to_bits(), self.dark);
+        let world = (
+            self.viewport.0.to_bits(),
+            self.scale.to_bits(),
+            self.dark,
+            self.scrollbars.enabled,
+        );
         if self.rows.world != Some(world) {
             self.rows.world = Some(world);
             let all: Vec<u32> = self.rows.kept.drain().map(|(_, r)| r.id).collect();
@@ -558,7 +564,13 @@ impl Painter {
         };
         // A kept row's slot is painted again outside the node's walk.
         let _accent = super::accent_scope(node);
-        if let Some(dst) = object_fit(img.natural(), node.style.object_fit, content) {
+        if let Some(dst) = object_fit(
+            img.natural(),
+            object_fit_of(node),
+            &node.style.object_position,
+            content,
+            &walk.scene.kernel.env_of(node.id),
+        ) {
             let shown = (walk.scene.presented)(node.id);
             let tint = image_tint(node, &shown, self.dark);
             self.backend.image(
@@ -630,6 +642,11 @@ impl Painter {
         if let Some(c) = &mut self.rows.recording {
             c.refused = true;
         }
+    }
+
+    /// Include the recording row's outer clip in a clip in the page's space.
+    pub(super) fn row_clip(&self, clip: Option<Rect4>) -> Option<Rect4> {
+        within(clip, self.rows.recording.as_ref().and_then(|c| c.clip))
     }
 
     /// What a box's filter paints in a recording row, past the box.
@@ -789,7 +806,10 @@ impl Painter {
             (offset, origin)
         };
         self.backend.row_begin(self.rows.next, content, previous);
-        self.rows.recording = Some(Capture::default());
+        self.rows.recording = Some(Capture {
+            clip: clip_rect,
+            ..Capture::default()
+        });
         let page = self.kept.to_page;
         if local {
             self.kept.to_page = page.pre_translate(origin.0, origin.1);

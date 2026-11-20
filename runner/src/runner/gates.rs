@@ -78,7 +78,8 @@ impl<D: DataSource> Runner<D> {
     /// it was (an `every` keeps its phase, a spent `after` stays spent).
     pub(super) fn gate_step(&mut self) -> Result<(), RunnerError> {
         // A sequence's gate, key and arguments (LLP 1125 D2).
-        self.sequence_step()?;
+        let audio = self.seams.audio;
+        audio.sequence_step(self)?;
         let mut seen = Vec::new();
         for (i, row) in self.plan.timers.iter().enumerate() {
             if row.owner.is_some() || (!row.gated && !row.keyed) {
@@ -277,9 +278,9 @@ impl<D: DataSource> Runner<D> {
             self.work_due(),
             self.work_owed().then_some(self.now_ms),
             // A sequence's fill, count-in's end, end and answer (LLP 1125 D3).
-            Some(self.transport.wake_due()),
-            Some(self.transport.ended_due()),
-            Some(self.transport.answer_due.min(self.midi.answer_due)),
+            Some(self.audio_due()[0]),
+            Some(self.audio_due()[1]),
+            Some(self.audio_due()[2]),
         ]
     }
 

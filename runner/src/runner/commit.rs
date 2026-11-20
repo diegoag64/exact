@@ -143,7 +143,8 @@ impl<D: DataSource> Runner<D> {
                 self.persist_slots();
                 self.journal_refused();
                 self.log_store_writes(c.store.writes);
-                self.transport_stood();
+                let audio = self.seams.audio;
+                audio.transport_stood(self);
                 self.samples_stood();
                 self.invocations_let_go();
             }
@@ -241,7 +242,8 @@ impl<D: DataSource> Runner<D> {
         }
         self.refused_unsent.clear();
         // What a refused commit's gate step read is let go (LLP 1125 D2).
-        self.transport.pending = None;
+        let audio = self.seams.audio;
+        audio.let_go(self);
         self.hear_forgotten();
         // Every commit ends so: what the source set aside is kept or let go.
         self.keep_sent(refused);
@@ -808,7 +810,8 @@ impl<D: DataSource> Runner<D> {
             for line in commands {
                 self.log(line);
             }
-            self.apply_sounds(first_command);
+            let audio = self.seams.audio;
+            audio.apply_sounds(self, first_command);
             self.run_module_effects(effects);
         }
         result
@@ -829,6 +832,29 @@ impl<D: DataSource> Runner<D> {
     ) -> RunnerError {
         let why = crate::conform::mismatch(&self.plan, value, ty);
         RunnerError::Shape { resource, why }
+    }
+
+    /// Resource `i`'s answer now. Outside its shape it fails the resource
+    /// with `shape`, as a TypeScript source's answer does: the commit that
+    /// asked stands, and the resource keeps what it showed, whose shape was
+    /// checked when it was taken. A runner-owned source's answer outside its
+    /// shape is the runner's own fault and refuses the commit.
+    pub(super) fn shaped_answer(&self, i: usize, value: Value) -> Result<Answer, RunnerError> {
+        let Err(refusal) = self.check_shape(i, &value) else {
+            return Ok(Answer::Now(value));
+        };
+        if exact_plan::runner_owned_source(self.plan.str(self.resource_row(i).source)) {
+            return Err(refusal);
+        }
+        let crate::failure::Failure {
+            code,
+            message,
+            reason,
+        } = crate::failure::Failure::of(&refusal);
+        Err(RunnerError::Data {
+            resource: self.plan.str(self.resource_row(i).name).to_string(),
+            error: DataError::Failed(code, message, reason),
+        })
     }
 
     pub(super) fn poison(&mut self) {
@@ -886,6 +912,7 @@ impl<D: DataSource> Runner<D> {
         // also changed are then asked fresh. The cost is a fetch a preload
         // could have answered, never an old answer (LLP 1162.000 D1).
         self.launch.clear();
+        self.overrun.launch = false;
         for p in &mut self.pending {
             p.launch = false;
         }
@@ -986,7 +1013,14 @@ impl<D: DataSource> Runner<D> {
         let launch = matches!(target, Target::Resource(i) if self.launch.contains(&i));
         let refresh = forced && !launch;
         for request in requests {
-            self.append_request(target, source.clone(), args.clone(), request, refresh);
+            self.append_request(
+                target,
+                source.clone(),
+                args.clone(),
+                request,
+                refresh,
+                launch,
+            );
         }
         let origin = self.pending[first].origin;
         for p in &mut self.pending[first..] {
@@ -1002,7 +1036,9 @@ impl<D: DataSource> Runner<D> {
             && request.surface.is_none()
     }
 
-    /// `refresh`: the executor bypasses what it holds for the request.
+    /// `refresh`: the executor bypasses what it holds for the request;
+    /// `launch`: the launch's own ask, which a re-ask after a turn over its
+    /// budget keeps (`hold_overrun_reply`).
     pub(super) fn append_request(
         &mut self,
         target: Target,
@@ -1010,6 +1046,7 @@ impl<D: DataSource> Runner<D> {
         args: Vec<Value>,
         request: Request,
         refresh: bool,
+        launch: bool,
     ) {
         let keepable = Self::keepable(target, &request);
         let ticket = self.next_ticket;
@@ -1072,7 +1109,7 @@ impl<D: DataSource> Runner<D> {
             long_poll: request.stream && request.long_poll.is_some(),
             replied: false,
             reask_at: None,
-            launch: false,
+            launch,
             reasks: 0,
         });
         self.note_child(ticket, &request);

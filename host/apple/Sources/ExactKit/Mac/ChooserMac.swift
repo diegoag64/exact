@@ -57,7 +57,7 @@ extension MenuHost {
         init(_ owner: Confirmation, _ index: Int) { self.owner = owner; self.index = index }
     }
 
-    func isConfirmation(_ pop: NodeView) -> Bool {
+    package func isConfirmation(_ pop: NodeView) -> Bool {
         pop.props["popover"] != nil && pop.props["accessibilityRole"] == "alertdialog"
     }
     /// A chooser shows as a popover

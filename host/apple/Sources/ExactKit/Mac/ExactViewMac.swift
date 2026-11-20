@@ -249,7 +249,7 @@ public final class ExactView: NSView {
     /// Boot at the first real size (an embedder's view), else resize; the
     /// insets follow. Owed while a restart holds the runtime, the last-told
     /// size untouched: ResetGate replays it after the batch.
-    private func fit() {
+    package func fit() {
         if session.runtime.holds("resize(width:height:)") { return }
         if Owner.shared.isServingMain {
             if !fitPending {
@@ -272,7 +272,7 @@ public final class ExactView: NSView {
         session.rasters?.fit(size: size, scale: scale)
         if scale != lastDisplayScale {
             lastDisplayScale = scale
-            session.apply(session.runtime.canvasDisplay(scale: scale, memory: ProcessInfo.processInfo.physicalMemory))
+            if let surfaces = SurfacesLink.installed { session.apply(surfaces.display(session.runtime, scale: scale)) }
             session.rasters?.displayChanged()
             session.controlTextChanged() // text line boxes round to the page's device pixels (LLP 1008 §3)
             session.tellDisplayScale() // a hairline is one device pixel of the page (LLP 1115.000 D10.3)
@@ -470,7 +470,7 @@ public final class ExactView: NSView {
         // `light-dark()` pair puts no op on the wire when the scheme turns.
         session.presenter.toolbar.sync()
         // The app's `setScheme` arrives here, as the system's does; iOS's, through `tellPreferences` (LLP 1122 D4).
-        session.app.scheduleStatus()
+        session.app.buildFactsMoved()
     }
 }
 

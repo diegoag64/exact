@@ -3,6 +3,7 @@ import ObjectiveC
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// What `setRightBarButtonItems(_:animated:)` was asked, in order: UIKit
 /// shows no animation of the bar's items in its layers to test for.

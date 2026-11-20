@@ -67,7 +67,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     /// them (`textAccessibilityChildren`).
     var inlineKeyViews: [UInt32: InlineKeyView] = [:]
     var inlineAccessibility: (key: String?, elements: [NSAccessibilityElement])?
-    var inlinePressed: UInt32?
+    var inlinePressed: (id: UInt32, down: NSPoint)?
     /// An SVG element a click in this `svg` went down on (LLP 1055.000 D17).
     var svgPressed: UInt32?
     /// Its button went down as a Control-click's context click (X85).
@@ -116,7 +116,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
             if shadowStand != nil { followShadowStand() }
         }
     }
-    var clipPath: CGPath?, clipRule = CGPathFillRule.winding
+    package var clipPath: CGPath?, clipRule = CGPathFillRule.winding
     package var handlers: Set<String> = [] { didSet { video?.update(); if handlers.contains("hover") != oldValue.contains("hover") || handlers.contains("pointermove") != oldValue.contains("pointermove") { syncHoverTracking() }; if handlers.intersection(FileDrag.events) != oldValue.intersection(FileDrag.events) { syncDropTypes() }; syncDisabledLook() } } // the media events the player reports; a hover handler's tracking area; a drop handler's dragged types; a disabled pressable's look
     var translatePx = CGPoint.zero, translatePercent = CGPoint.zero // `translate`: its lengths, and its percentages of the box (chess diary #4)
     var layoutOffset = CGPoint.zero, layoutResize = CGSize.zero // layout*: the box layout moved it from, and its surface's size from the laid-out one (LLP 1063)
@@ -154,7 +154,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     var kernelContentBox: NSRect?
     /// The padding layout resolved and sent with `kernelContentBox`: top,
     /// right, bottom, left (`nil` on a native button's unsaid side).
-    var kernelPadding: [CGFloat?]?
+    package var kernelPadding: [CGFloat?]?
     var fieldInCell = false // a grouped form's field, which is borderless (NativeFieldsMac.swift)
     var boxFill: CALayer?
     /// `drawsPaint`, kept: AppKit asks `wantsUpdateLayer` of every view as it
@@ -170,7 +170,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     package var imageLayer: CALayer?
     /// While it flies as a shared element (LLP 1013.000 D4): where its image is drawn.
     package var flightLook: FlightLook?
-    var materialView: NSView?
+    package var materialView: NSView?
     /// The backdrop blur's σ and mirrored box as last set (`Backdrop.swift`).
     var backdropDrawn: BackdropDrawn?
     /// `glassGroup`'s view and a grouped glass's isolation (`GlassGroup.swift`).
@@ -181,8 +181,8 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     /// Natural extent from the kernel, before the CSS client-size minimum.
     package var content = CGSize.zero
     /// The platform view returned by the dlopened iframe arm (@ref LLP 1020 D3).
-    var video: (any VideoPlaying)?
-    package internal(set) var web: NSView? { didSet { if web !== oldValue { placeWeb() } } }
+    package var video: (any VideoPlaying)?
+    package var web: NSView? { didSet { if web !== oldValue { placeWeb() } } }
     /// A canvas node's Metal layer (LLP 1009).
     package var metal: MetalView?
     package var canvasInput: CanvasInput?
@@ -223,7 +223,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     var symbolClip: NSView?
     var image: NSImage?
     package var raster: (any ImageLease)? { didSet { layerPaintCache = nil } }
-    var imageSource: String?
+    package var imageSource: String?
     package var loadGeneration = 0
     package var pressed = false { didSet { if pressed != oldValue { pressChanged() } } }
     var keyboardPressed = false
@@ -231,7 +231,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     var pressPaint = PressPaint() // LLP 1061 D7: the author's pressed paint
     var presentedAlpha: CGFloat = 1, disabledShown = false // the opacity presented, and whether the disabled look halves it (PressLookMac.swift)
     // @ref LLP 1038 D6 — projection does not overwrite authored inert.
-    var routeInert = false { didSet { presenter?.mouseChain.bubbledPress?.validate() } }
+    package var routeInert = false { didSet { presenter?.mouseChain.bubbledPress?.validate() } }
     /// What `setAccessibilityHidden` last wrote (`Accessibility.swift`).
     var accessibilityHiddenWritten = false
     var webArea: DialogWebArea? // served above it while it is a dialog drawn in the page (`dialogWebArea`)
@@ -275,7 +275,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     package var canvases: Canvases? { presenter?.session?.canvases }
 
     /// A native button's command is its own too (a confirmation's close row, LLP 1069.011.000 D9).
-    var pressable: Bool { handlers.contains("press") || defaultLink != nil || presenter?.invocation(of: self) != nil }
+    package var pressable: Bool { handlers.contains("press") || defaultLink != nil || presenter?.invocation(of: self) != nil }
     /// Whether the focus here matches `:focus-visible`, so its ring shows (`FocusMac.swift`).
     var focusVisible = false { didSet { if focusVisible != oldValue { noteFocusRingMaskChanged(); lookState(focus: focusVisible) } } }
     /// A focused field whose ring Exact draws (LLP 1104 D6; `showFieldFocus`).
@@ -296,7 +296,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
             return
         }
         let held = KeyCodes.held(event.modifierFlags)
-        if reorderKey(name) || presenter?.controls.roleKey(self, name, held: held) == true || presenter?.controls.radioKey(self, name, held: held) == true { return }
+        if presenter?.reorders.key(self, name) == true || presenter?.controls.roleKey(self, name, held: held) == true || presenter?.controls.radioKey(self, name, held: held) == true { return }
         let presses = name == " " || name == "Enter" && pressesOnReturn
         if isButton, !pressable, presses {
             activateNative()
@@ -458,7 +458,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     /// URL as is; a relative path under the asset root (`EXACT_ASSETS`, else
     /// the current directory) and never outside it; anything else (`file:`,
     /// `..` escaping the root) does not load.
-    static func resolveSource(_ source: String, app: ExactApp?) -> URL? {
+    package static func resolveSource(_ source: String, app: ExactApp?) -> URL? {
         if let u = URL(string: source), let scheme = u.scheme {
             return scheme == "http" || scheme == "https" ? u : nil
         }
@@ -539,7 +539,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
             addSubview(f)
             field = f
         }
-        if kind != "iframe" { presenter.leaves.embed(self) } // a video's player, a module's box (LLP 1068 §5.1); a web view waits for the props (`embedFrame`)
+        if kind == "video" || kind == "native" { presenter.leaves?.embed(self) } // a video's player, a module's box (LLP 1068 §5.1); a web view waits for the props (`embedFrame`)
     }
     required init?(coder: NSCoder) { nil }
     package override var isFlipped: Bool { true }
@@ -656,7 +656,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
     /// Something under a canvas repainted outside a batch (LLP 1014 D4 b, c):
     /// the canvas captures again on this run-loop turn — unless the draw is
     /// the capture's own, or follows a batch that already captured.
-    func repaintThrough() {
+    package func repaintThrough() {
         guard !Capture.capturing, !Capture.redrawingBackingStore, let c = canvasAbove, !c.paintedThisTurn else { return }
         c.needsCapture = true
         canvases?.scheduleCapture()
@@ -925,7 +925,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         return f
     }
 
-    func applyPlaceholder(_ f: NSTextField) {
+    package func applyPlaceholder(_ f: NSTextField) {
         if pageField != nil { return syncBarField() }
         let text = props["placeholder"] ?? ""
         let font = f.font ?? NSFont.systemFont(ofSize: NSFont.systemFontSize)
@@ -1315,7 +1315,7 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
         if layerBoxEligible && (hasBoxPaint || kind == "image") { needsDisplay = true }
     }
 
-    func fitScroll() {
+    package func fitScroll() {
         guard let scroll, let document = scroll.documentView else { return }
         let visible = scroll.contentView.bounds.size, origin = scroll.kernelDocumentOrigin, o = grid?.origin ?? .zero, s = presenter?.gridScale ?? 1
         let size = CGSize(width: max(PixelGrid.length(content.width, from: o, vertical: false, scale: s) - origin.x, visible.width), height: max(PixelGrid.length(content.height, from: o, vertical: true, scale: s) - origin.y, visible.height)) // ending where its last edge is drawn (`PixelGridMac.swift`)
@@ -1421,9 +1421,9 @@ package final class NodeView: NSView, NSTextViewDelegate, NSTextFieldDelegate {
             // natural size, `scale-down` the smaller of none and contain;
             // an unknown value is the initial `fill`.
             let fit = style["object_fit"]?.string ?? "fill"
-            let content = contentBox()
+            let content = flightLook?.contentClip ?? contentBox()
             guard let ctx = NSGraphicsContext.current?.cgContext else { return }
-            let rect = flightLook?.image ?? RasterGeometry.rect(natural: bitmap.naturalSize, content: content, fit: fit)
+            let rect = flightLook?.image ?? RasterGeometry.rect(natural: bitmap.naturalSize, content: content, fit: fit, position: style["object_position"]?.array)
             ctx.saveGState()
             path.addClip()
             clipToContentEdge(ctx, content)

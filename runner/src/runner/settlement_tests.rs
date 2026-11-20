@@ -100,7 +100,7 @@ fn resource_inspection_restores_generations_when_a_later_resource_refuses() {
     r.measure(true, false);
     let before = r.resources[0].inspection;
     let generation = r.resources[0].state.as_ref().unwrap().inspection_generation;
-    r.data().bad_guard = true;
+    r.data().guard_refuse = Some(refused());
     r.data().value = records(2);
     assert!(r.act("change", vec![Value::Number(1.)]).is_err());
     assert_eq!(r.resources[0].inspection.request, before.request);
@@ -472,14 +472,14 @@ fn unchanged_25k_resource_reuse_never_enters_shape_validation() {
     assert_eq!(r.data().queries, 2);
 }
 
+/// An answer at once outside its shape fails the resource with `shape`, as a
+/// TypeScript source's does: the action stands and the last answer shows.
 #[test]
-fn fresh_malformed_tail_refuses_and_rolls_back_without_losing_checked_state() {
+fn fresh_malformed_tail_fails_the_resource_and_keeps_checked_state() {
     let mut r = boot(
         plan(TypeKind::Number, None, false, false),
         Data::new(records(25_000)),
     );
-    let before = r.carry();
-    let tree = r.kernel().export(None).unwrap();
     let Value::List(items) = &mut r.data().value else {
         panic!()
     };
@@ -487,20 +487,20 @@ fn fresh_malformed_tail_refuses_and_rolls_back_without_losing_checked_state() {
     tail[24_999] = Value::record(vec![Value::str("invalid tail")]);
     *items = Items::from(tail);
     checks();
-    assert!(matches!(
-        r.act("change", vec![Value::Number(1.)]),
-        Err(RunnerError::Shape { .. })
-    ));
-    assert_eq!(checks(), 1);
-    assert_eq!(r.carry(), before);
-    assert_eq!(r.kernel().export(None).unwrap(), tree);
-    assert!(!r.is_poisoned());
-    tick(&mut r);
-    assert_eq!(checks(), 0, "the previous checked state survived refusal");
-    r.data().value = records(2);
     r.act("change", vec![Value::Number(1.)]).unwrap();
     assert_eq!(checks(), 1);
+    assert_eq!(r.slot("revision"), Some(&Value::Number(1.)));
+    assert_eq!(r.resource("rows"), Some(&records(25_000)));
+    let why = r.resources[0].failed_why.as_ref().expect("failed");
+    assert_eq!(why.code, crate::failure::FailureCode::Shape);
+    assert!(why.message.contains("`rows` answered outside its shape"));
+    tick(&mut r);
+    assert_eq!(checks(), 0, "the kept answer is not checked again");
+    r.data().value = records(2);
+    r.act("change", vec![Value::Number(2.)]).unwrap();
+    assert_eq!(checks(), 1);
     assert_eq!(r.resource("rows"), Some(&records(2)));
+    assert!(r.failed_resources().is_empty());
 }
 
 #[test]
@@ -723,7 +723,7 @@ fn async_downstream_refusal_restores_previous_resource_before_retry() {
     let tree = r.kernel().export(None).unwrap();
     r.data().value = records(2);
     r.data().write_on_parse = true;
-    r.data().bad_guard = true;
+    r.data().guard_refuse = Some(refused());
     assert!(r
         .fulfill(ticket, Outcome::Storage(vec![]))
         .unwrap()
@@ -733,7 +733,7 @@ fn async_downstream_refusal_restores_previous_resource_before_retry() {
     assert_eq!(r.kernel().export(None).unwrap(), tree);
     assert!(!r.is_poisoned());
     assert!(!r.has_pending(), "the refused reply is let go");
-    r.data().bad_guard = false;
+    r.data().guard_refuse = None;
     r.act("refresh", vec![]).unwrap();
     let again = r.take_requests().remove(0).ticket;
     assert!(r
@@ -774,11 +774,11 @@ fn a_refused_pass_does_not_mark_a_resource_as_reading_the_store() {
     );
     assert!(!r.resource_reads_store("rows"));
     r.data().read_store = true;
-    r.data().bad_guard = true;
+    r.data().guard_refuse = Some(refused());
     r.data().value = records(2);
     assert!(matches!(
         r.act("change", vec![Value::Number(1.)]),
-        Err(RunnerError::Shape { .. })
+        Err(RunnerError::Data { .. })
     ));
     assert!(
         !r.resource_reads_store("rows"),
@@ -881,6 +881,11 @@ fn sources_that_keep_what_is_kept_settle() {
     );
     assert_eq!(writes[0].name, "token");
     assert_eq!(writes[0].value.as_deref(), Some(&b"guarded"[..]));
+}
+
+/// A source's own refusal of its call, which refuses the commit that asked.
+fn refused() -> DataError {
+    DataError::BadArguments("`guard` refuses this call".into())
 }
 
 fn overrun() -> DataError {
@@ -1116,14 +1121,14 @@ fn a_refused_reask_is_not_left_pending_forever() {
     let t0 = r.now_ms();
     r.data().refuse = None;
     r.data().value = records(3);
-    r.data().bad_guard = true;
+    r.data().guard_refuse = Some(refused());
     assert!(
         r.advance(t0 + 250.).is_err(),
         "the re-ask's commit is refused"
     );
     assert!(r.resources[0].pending, "still waiting, as an ask in flight");
     assert!(r.timer_due_ms().is_some(), "and due again");
-    r.data().bad_guard = false;
+    r.data().guard_refuse = None;
     r.advance(t0 + 60_000.).unwrap();
     assert_eq!(r.resource("rows").cloned(), Some(records(3)));
     assert!(!r.resources[0].pending);
@@ -1216,7 +1221,7 @@ fn a_spent_streak_of_refused_reasks_hands_the_host_its_failure() {
     let t0 = r.now_ms();
     r.data().refuse = None;
     r.data().value = records(3);
-    r.data().bad_guard = true;
+    r.data().guard_refuse = Some(refused());
     assert!(r.advance(t0 + 250.).is_err());
     let receipts = r.advance(t0 + 5_000.).expect("the failing commit stands");
     assert_eq!(receipts.len(), 1);
@@ -1337,7 +1342,7 @@ fn a_spent_streaks_failure_keeps_its_asks_provenance() {
     let t0 = r.now_ms();
     r.data().refuse = None;
     r.data().value = records(3);
-    r.data().bad_guard = true;
+    r.data().guard_refuse = Some(refused());
     r.data().watch_later = true;
     assert!(r.advance(t0 + 250.).is_err());
     r.advance(t0 + 5_000.).unwrap();

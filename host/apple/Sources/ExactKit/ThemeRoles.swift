@@ -60,7 +60,7 @@ package enum ThemeRoles {
     /// `view`, a surface a presenter presents outside its root (a sheet's),
     /// resolves by the table of the presenter at `root` (none: the one
     /// applying now).
-    static func adopt(_ view: PlatformView, from root: PlatformView?) {
+    package static func adopt(_ view: PlatformView, from root: PlatformView?) {
         guard let table = root.map(table(of:)) ?? applying else { return }
         own(view, table)
     }

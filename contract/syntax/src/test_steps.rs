@@ -25,6 +25,20 @@ pub enum StateOperand {
     State(String),
 }
 
+/// The right side of a comparison in viewport points.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayoutOperand {
+    /// A viewport coordinate or length.
+    Points(f64),
+    /// A measurement on another node.
+    BoxMeasure {
+        /// The other node's testId.
+        target: String,
+        /// The coordinate or size to measure.
+        dimension: String,
+    },
+}
+
 /// `test "name"` with steps: the agent API's own operations (LLP 1012) and
 /// `expect` lines that read their replies — compiled to a script the agent
 /// driver runs against the real hosts; never a second evaluator (LLP 1017 P7).
@@ -58,6 +72,13 @@ steps! {
 /// One step of a `test`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Step {
+    /// Bring a mounted node into view without pressing it.
+    Scroll {
+        /// The target's testId.
+        target: String,
+        /// Where.
+        span: Span,
+    },
     /// `tap "testId"`, or one of the driver's other forms of it
     /// (`modifiers "Shift"` for a press with keys held).
     Tap {
@@ -224,6 +245,15 @@ pub enum Step {
         /// Where.
         span: Span,
     },
+    /// A persisted state in the test's initial store (LLP 1116 D5).
+    Stored {
+        /// The state name, including names used by earlier builds.
+        name: String,
+        /// The value as JSON text.
+        value: String,
+        /// Where.
+        span: Span,
+    },
     /// `seed 7`: the session's `exactTime().seed`, `--seed`.
     Seed {
         /// A whole number from 0 through 2^32 − 1.
@@ -304,6 +334,13 @@ pub enum Step {
         /// Where.
         span: Span,
     },
+    /// `background <ms>` moves the app to the background and back through iOS.
+    Background {
+        /// Elapsed wall time with the app away.
+        ms: u32,
+        /// Where.
+        span: Span,
+    },
     /// `resize 800x600`: the window (a desktop's, the browser's), mid-test,
     /// as the driver's `resize` (reader: repagination on resize).
     Resize {
@@ -318,6 +355,30 @@ pub enum Step {
     Screenshot {
         /// The file.
         path: String,
+        /// Where.
+        span: Span,
+    },
+    /// Compare a painted pixel at an offset from a node's top-left corner.
+    ExpectSample {
+        /// The node's testId.
+        target: String,
+        /// Viewport points from the left.
+        x: f64,
+        /// Viewport points from the top.
+        y: f64,
+        /// The expected sRGB hex color.
+        color: String,
+        /// Maximum difference in each 8-bit channel.
+        tolerance: u8,
+        /// Where.
+        span: Span,
+    },
+    /// Compare a node's visible border box with a reference PNG.
+    ExpectScreenshot {
+        /// The node's testId.
+        target: String,
+        /// PNG relative to the authored test.
+        reference: String,
         /// Where.
         span: Span,
     },
@@ -355,18 +416,18 @@ pub enum Step {
         /// Where.
         span: Span,
     },
-    /// `expect layout "testId" width|height ==|<=|>= n`: the node's laid-out size, the
-    /// width or height of the box the agent's `layout <target>` reports (LLP 1012:
-    /// viewport points, two decimals, presentation transforms folded in).
+    /// A comparison between measurements of presented boxes in viewport points (LLP 1012).
     ExpectLayout {
         /// The node, by `testId`.
         target: String,
-        /// `width` or `height`.
+        /// The measurement to read from the box.
         dimension: String,
         /// `Equal`, `AtLeast` or `AtMost`.
         comparison: StateComparison,
-        /// The size, in points.
-        value: f64,
+        /// The expected measurement.
+        value: LayoutOperand,
+        /// The allowed difference, in viewport points.
+        tolerance: Option<f64>,
         /// Where.
         span: Span,
     },

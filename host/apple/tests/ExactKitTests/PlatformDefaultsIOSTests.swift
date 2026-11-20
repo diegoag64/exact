@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 @testable import ExactControls
 
 /// LLP 1115 wave 1 on UIKit: what the author leaves unsaid is the

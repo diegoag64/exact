@@ -256,7 +256,7 @@ final class MouseChain {
     /// Rule 4's rank on one node, the tie-break after depth.
     var ranked: [MouseRecognizer] {
         guard let p = presenter else { return [] }
-        return [p.mouseDrags.reorder, p.mouseDrags.transform, p.mouseDrags.height, p.mouseLayoutPan, p.mouseSwipe]
+        return [p.reorders.mouse, p.mouseDrags.transform, p.mouseDrags.height, p.mouseLayoutPan, p.mouseSwipe]
     }
     /// Arms every recognizer once per event (forwarding reaches the
     /// ancestors' overrides with the same event). The `press` arms too, as on
@@ -615,7 +615,7 @@ extension Presenter {
     var pointerHolds: Bool { pointerHeld != nil || !pointerPath.isEmpty }
     /// A window point from the viewport's top-left, the page scroll applied:
     /// DOM's `clientX`/`clientY`, `frame()`'s space (LLP 1094 D11).
-    func client(_ windowPoint: NSPoint) -> NSPoint {
+    package func client(_ windowPoint: NSPoint) -> NSPoint {
         let clip = viewport.contentView, p = clip.convert(windowPoint, from: nil)
         return NSPoint(x: p.x - clip.bounds.minX, y: p.y - clip.bounds.minY)
     }
@@ -733,7 +733,7 @@ extension Presenter {
         pointerCursor(over: leaf, at: point, region: region)
         return leaf
     }
-    func trackPointer(_ event: NSEvent) {
+    package func trackPointer(_ event: NSEvent) {
         guard trackedPointerEvent !== event else { return }
         // A move in a popover's or a sheet's own window is that window's
         // (`BlockView.pointerTracking`); the page's hover is left as it is.

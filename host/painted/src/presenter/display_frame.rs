@@ -337,6 +337,7 @@ impl<D: DataSource> Presenter<D> {
                 self.ranges.shown.set(picture.session);
                 self.publish_ranges();
                 self.display.acknowledged = Some(picture.witness);
+                self.scrollbars_shown();
                 self.retire_acknowledged_pointer();
                 self.retire_pointer();
                 self.acknowledge_collection_scroll(model_scroll);

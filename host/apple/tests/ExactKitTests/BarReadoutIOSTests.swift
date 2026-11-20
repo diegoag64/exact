@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// A header's readout (`role="status"`, LLP 1075.003 §9.15) over hand-built
 /// routes: what counts as one, what its face holds, and what its bar item's

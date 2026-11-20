@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 import ExactGroupedLists
 
 /// LLP 1115.000 D11.1 over `scripts/fixtures/pushed-title.contract`: a pushed

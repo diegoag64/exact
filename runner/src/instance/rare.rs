@@ -40,7 +40,7 @@ pub(in crate::instance) trait ListState: std::fmt::Debug {
     fn site(&self, view: ViewId, path: &mut Vec<InstanceStep>) -> Option<(NodesId, u32)>;
     /// Its view's children as a document written without a kernel holds them.
     fn document_children<'a>(&'a self, plan: &Plan) -> Result<Vec<ListChild<'a>>, InstanceError>;
-    /// Count its mounted rows as retired (the perf counter's walk).
+    /// Retire its mounted rows with the rest of the subtree.
     fn retire(&self, u: &mut Update<'_>);
 }
 

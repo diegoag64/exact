@@ -35,7 +35,7 @@ import { copyGpuCache } from './gpu-cache.mjs';
 import { absent, analyze, planRules, rootOf, tokens as pageTokens, written } from './page-style.mjs';
 import { writers } from './writers.mjs';
 import { namesStream } from './stream-names.mjs';
-import { bundleHostModule, localImports, stageHostGlue } from './glue.mjs';
+import { bundleHostModule, localImports, stageHostGlue, writeFalse } from './glue.mjs';
 import { gateAgent } from './agent-gate.mjs';
 import { contentName, contentNames } from './content-names.mjs';
 import { buildEditor, buildFlow, buildMarkdown, buildModule, buildMotion, moduleSourceDirs, undeclaredRustData, fresh, leafTaken, moduleGrants, webCompiler, inspectHooked, withInspectHooks, withoutDev, withRuntimeStamp, sizeWarning } from './module.mjs';
@@ -349,6 +349,10 @@ export { canonical, locationOf };`],
 if (!devReload) writeFileSync(resolve(gen, 'modes.js'), withoutDev(readFileSync(resolve(here, 'modes.js'), 'utf8')));
 // Inspect mode's hooks in the runtime are the dev loop's build's alone (module.mjs `withInspectHooks`).
 if (devReload) for (const f of inspectHooked) writeFileSync(resolve(gen, f), withInspectHooks(f, readFileSync(resolve(here, f), 'utf8')));
+if (!hasGpuArtifacts) {
+  const tree = resolve(gen, 'tree.js');
+  writeFileSync(tree, writeFalse(readFileSync(tree, 'utf8'), 'host/web-js/tree.js', ['GPU_PLACEMENT']));
+}
 // The arms sheet's host stamp (lower.js, LLP 1071.001 part B): a digest of the runtime array above as copied (the mode
 // and inspect transforms included), lower.js's own unstamped source among it; not the files copied after this.
 { const lower = readFileSync(resolve(here, 'lower.js'), 'utf8'); writeFileSync(resolve(gen, 'lower.js'), withRuntimeStamp(lower, runtime.map(f => ({ path: f, text: f === 'lower.js' ? lower : readFileSync(resolve(gen, f), 'utf8') })))); }
@@ -537,7 +541,8 @@ let moduleStorage = false, rustGrants = '', rustGrantSet = normalizeGrants('Rust
 if (rustLinked) {
   mkdirSync(resolve(out, 'rust/wasm'), { recursive: true });
   const from = opt('--data') ?? (opt('--plan') && dirname(resolve(opt('--plan'))));
-  const built = from && existsSync(resolve(from, 'rust/wasm/app.module.wasm')) ? resolve(from, 'rust/wasm/app.module.wasm') : buildModule(app, resolve(gen, 'rust-module'), canvas2d, appDir);
+  const built = from && existsSync(resolve(from, 'rust/wasm/app.module.wasm')) ? resolve(from, 'rust/wasm/app.module.wasm')
+    : buildModule(app, resolve(gen, 'rust-module'), canvas2d, appDir, { dev: devReload });
   cpSync(built, resolve(out, 'rust/wasm/app.module.wasm'));
   if (devReload) devLogic.push(['rust', createHash('sha256').update(readFileSync(resolve(out, 'rust/wasm/app.module.wasm'))).digest('hex')]);
   // The module's crates outside the app's directory (a path dependency) are inputs the dev loop watches, as the
@@ -677,9 +682,10 @@ writeFileSync(resolve(gen, 'main.js'), [
   "const page = typeof document === 'object' && document.querySelector('style[data-exact-page]');",
   "const sheet = page && new Promise(r => { const l = Object.assign(document.createElement('link'), { rel: 'stylesheet', href: './__EXACT_SHEET__' }); l.onload = () => { page.remove(); r(); }; l.onerror = r; page.before(l); });",
   // A waiting page's answers past 1 KB are named, not held (LLP 1048.007 D10): the capture script fetched them as it
-  // imported this; the first render waits for them. Ones no longer kept are none, and the boot builds afresh.
+  // imported this; the first render waits for them. Ones no longer kept are none: an empty checkpoint at the page's
+  // own location, since a page made per request is served where it was made.
   "const named = typeof document === 'object' && document.querySelector('script[type=\"application/vnd.exact.checkpoint\"][data-src]');",
-  "const answers = named && (globalThis.exact?.answers ?? fetch(named.dataset.src).then(r => r.ok ? r.text() : null, () => null)).then(t => { named.textContent = t ?? '{\"time\":0,\"answers\":[]}'; });",
+  "const answers = named && (globalThis.exact?.answers ?? fetch(named.dataset.src).then(r => r.ok ? r.text() : null, () => null)).then(t => { named.textContent = t ?? JSON.stringify({ location: location.pathname, time: 0, answers: [] }); });",
   // Under the driver a TypeScript source draws the launch seed's stream (LLP 1069.005 D2b), from its first answer:
   // the first render waits for the stream's module, which no other page loads before it needs storage.
   ...(ts && !production ? ["const seeded = agentMode() && !globalThis.__exactRender && import('./storage-environment.js').then(env => { const seed = env.agentSeed(); if (seed !== null) answering.entropy = Object.assign(env.agentStream(seed, 'typescript'), { seed }); });"] : ['const seeded = null;']),
@@ -718,7 +724,7 @@ writeFileSync(resolve(gen, 'main.js'), [
   `for (const name of __EXACT_DEFERRED_CHUNKS__) document.head.append(Object.assign(document.createElement('link'), { rel: 'modulepreload', fetchPriority: 'low', href: new URL(name, ${args.includes('--inline') ? 'document.baseURI' : 'import.meta.url'}).href }));`,
 ].join('\n'));
 for (const f of ['agent.js', 'check.js', 'perf.js', 'seam.js', 'rust-data.js', 'canvas-capture.js', 'list.js', 'list-text.js', 'facts.js', 'fetches.js', 'modules.js', 'declared-values.js', 'permissions.js', 'sheets.js', 'samples.js', 'wakes.js', 'reach.js', 'devices.js', 'members.js', 'arrival.js', 'calls.js', 'update.js', 'spans.js', 'views.js', 'pictures.js', 'markdown.js', 'symbols.js', 'motion.js', 'drag-target.js', 'transform.js', 'svg-transform.js', 'dataset.js', 'format.js', 'format-locale.js', 'hatches.js', 'arrange.js', 'reorder.js', 'flow.js', 'native.js', 'shared.js', 'store-reader.js', 'iframes.js', 'list-items.js', 'button-fill.js']) cpSync(resolve(here, f), resolve(gen, f));
-writeFileSync(resolve(gen, 'modules.js'), localImports(readFileSync(resolve(here, 'modules.js'), 'utf8')));
+for (const file of ['modules.js', 'symbols.js']) writeFileSync(resolve(gen, file), localImports(readFileSync(resolve(here, file), 'utf8')));
 const mountSource = readFileSync(resolve(here, 'mount.js'), 'utf8');
 const checkpointFaultImport = "import { checkpointFaults } from '../web/faults.js';";
 if (!mountSource.includes(checkpointFaultImport)) throw new Error('mount.js no longer imports checkpointFaults');
@@ -894,7 +900,8 @@ writeFileSync(resolve(gen, 'main-server.js'), [
   ...(declared ? ['  prepareSources();'] : []),
   '};',
   // Enumeration asks only its source, through the resource executor, with no app boot (LLP 1048.000 D2).
-  // Its answer is the route's locations, each value a path segment as `path(…)` makes it.
+  // Its answer is each value with its location, the value a path segment as `path(…)` makes it, or why the route's
+  // pattern can't hold it.
   'globalThis.__pages = async (pattern, source, args, deadline) => {',
   '  const end = performance.now() + deadline;',
   '  await prepare();',
@@ -910,7 +917,7 @@ writeFileSync(resolve(gen, 'main-server.js'), [
   '    await new Promise(resolve => setTimeout(resolve, 1));',
   '  }',
   '  if (r.failed) throw new Error(r.error);',
-  "  return r.value.map(value => pattern.split('/').map(s => s[0] === ':' ? segmentOf(value) : s).join('/'));",
+  "  return r.value.map(value => { try { return { value, location: pattern.split('/').map(s => s[0] === ':' ? segmentOf(value) : s).join('/') }; } catch (error) { return { value, error: error?.message ?? String(error) }; } });",
   '};',
   'globalThis.__start = async () => {',
   '  t0 = performance.now();',

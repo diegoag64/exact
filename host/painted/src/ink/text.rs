@@ -13,7 +13,14 @@ impl Ink {
         let transform = self
             .device_transform(ts)
             .pre_scale(1. / self.scale, 1. / self.scale);
-        for run in text.physical_glyph_runs(paragraph, palette, origin, self.scale) {
+        // A retained row may replay at another scroll position. Blur and the
+        // DirectWrite audit also have ink outside the Swash placement bounds.
+        let clip = (self.rows.capture.is_empty()
+            && self.groups.is_empty()
+            && self.text_sigma == 0.
+            && self.glyphs.swash_placements())
+        .then(|| (transform, self.encoder.clip_bounds().rect()));
+        for run in text.physical_glyph_runs(paragraph, palette, origin, self.scale, clip) {
             if run.paint.color[3] == 0 {
                 continue;
             }
@@ -63,5 +70,60 @@ impl Ink {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn clipped_gpu_text_matches_replaying_the_complete_row() {
+    let mut ink = match Ink::new() {
+        Ok(ink) => ink,
+        Err(e) => {
+            assert_ne!(std::env::var("EXACT_REQUIRED").as_deref(), Ok("1"), "{e}");
+            eprintln!("no Ink device: {e}");
+            return;
+        }
+    };
+    let mut engine = crate::text::fixtures::engine();
+    let spec = crate::paint::text_spec(&Default::default(), &"abc אבג é W ".repeat(800));
+    let p = engine.paragraph(&spec, None);
+    let palette = [RunPaint {
+        color: [0x30, 0x60, 0x90, 255],
+        source: 1,
+    }];
+    for x in [0., -p.width * 0.5, 200. - p.width] {
+        let origin = (x + 0.25, 5.);
+        let draw = |ink: &mut Ink, engine: &mut TextEngine, record| {
+            ink.begin(200., 40., 1.25);
+            if record {
+                ink.record_row(1, (0., 0.));
+            }
+            ink.glyph_runs(engine, &p, &palette, origin, Transform::identity())
+                .unwrap();
+            if record {
+                let row = ink.keep_row();
+                ink.draw_row(row, (0., 0.)).unwrap();
+            }
+            ink.finish().unwrap()
+        };
+        let selected: usize = engine
+            .physical_glyph_runs(
+                &p,
+                &palette,
+                origin,
+                1.25,
+                Some((Transform::identity(), [0., 0., 250., 50.])),
+            )
+            .iter()
+            .map(|r| r.glyphs.len())
+            .sum();
+        assert!((1..=384).contains(&selected), "{selected} glyphs at {x}");
+        let expected = draw(&mut ink, &mut engine, true);
+        let actual = draw(&mut ink, &mut engine, false);
+        assert!(
+            actual.pixels().iter().any(|p| p.red() < 200),
+            "no text at {x}"
+        );
+        assert!(actual.data() == expected.data(), "pixels differ at {x}");
     }
 }

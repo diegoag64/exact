@@ -180,6 +180,10 @@ impl Painter {
                 declarations
             })
             .collect();
+        let runs = paragraph.runs();
+        if run_ranges.is_empty() && runs.iter().all(|run| run.mark & (UNDERLINE | STRIKE) == 0) {
+            return Decorations(Vec::new());
+        }
         let underlines = flags.iter().flatten().any(|(line, _)| {
             matches!(
                 line,
@@ -192,7 +196,6 @@ impl Painter {
         }
         // A Markdown piece's lines are its span's, as an element's are: the
         // runs on either side of it with the same lines and link.
-        let runs = paragraph.runs();
         let lines_of = |i: usize| {
             (
                 runs[i].mark & (UNDERLINE | STRIKE),

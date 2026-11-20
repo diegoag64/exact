@@ -2,6 +2,9 @@
 use super::*;
 use std::ops::Range;
 
+#[cfg(any(target_os = "android", test))]
+pub(crate) mod selection;
+
 struct InlineRun {
     runs: Range<usize>,
     metrics: (f32, f32),
@@ -11,6 +14,8 @@ struct InlineRun {
 pub(super) struct Captured {
     paragraph: Rc<Paragraph>,
     runs: HashMap<ViewId, InlineRun>,
+    #[cfg(any(target_os = "android", test))]
+    selection: Option<selection::Source>,
 }
 
 impl Captured {
@@ -48,10 +53,18 @@ impl Captured {
                 at = parent;
             }
         }
-        (!runs.is_empty()).then(|| {
+        #[cfg(any(target_os = "android", test))]
+        let selection =
+            selection::Source::capture(kernel, owner, paragraph, palette, runs.keys().copied());
+        let keep = !runs.is_empty();
+        #[cfg(any(target_os = "android", test))]
+        let keep = keep || selection.is_some();
+        keep.then(|| {
             Rc::new(Self {
                 paragraph: paragraph.clone(),
                 runs,
+                #[cfg(any(target_os = "android", test))]
+                selection,
             })
         })
     }
@@ -117,6 +130,20 @@ impl PaintedInline {
     /// The paragraph's scroll coordinates, before its affine or projective mapping.
     pub(crate) fn local_frame(&self, view: ViewId) -> Option<Rect4> {
         self.bounds(view, Transform::identity())
+    }
+
+    pub(crate) fn local_baseline(&self, view: ViewId) -> Option<(f32, f32)> {
+        let run = self.captured.runs.get(&view)?;
+        let p = &self.captured.paragraph;
+        let (line, rect) = p
+            .inline_rects(run.runs.clone(), run.metrics, run.reach)
+            .into_iter()
+            .find(|(_, rect)| rect.2 > 0.)?;
+        let (_, origin) = self
+            .placements
+            .iter()
+            .find(|(lines, _)| lines.contains(&line))?;
+        Some((origin.0 + rect.0, origin.1 + p.baselines()[line]))
     }
 
     fn bounds(&self, view: ViewId, transform: Transform) -> Option<Rect4> {

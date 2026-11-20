@@ -4,7 +4,7 @@
 /// navigation stack, a popover, a tab list — and a reader's rows are none of
 /// those. A scrolling list applies a batch many times a second, so the passes
 /// were a fifth of its long frames (LLP 1044 F4). They visit what this names.
-struct ChromeIndex {
+package struct ChromeIndex {
     static let keys = ["navigationBack", "inert", "popover", "popovertarget",
                        "contextTarget", "contextPopover", "href", "toolbarPlacement", "accessibilityKeyShortcuts", "menuPlacement",
                        "commandfor", "swipeContent", "id", "accessibilityLive", "autofocus", "listStyle",
@@ -25,7 +25,7 @@ struct ChromeIndex {
     /// The views carrying each `id` value, and the values whose carriers
     /// changed since `takeChangedNames` — what resolves a name without
     /// reading every named view.
-    private(set) var named: [String: Set<UInt32>] = [:]
+    private(set) package var named: [String: Set<UInt32>] = [:]
     private var nameOf: [UInt32: String] = [:]
     private var changedNames = Set<String>()
     mutating func takeChangedNames() -> Set<String> {
@@ -71,7 +71,7 @@ struct ChromeIndex {
         // Only the member sets change; dictionary keys and indices stay fixed.
         for index in byKey.indices where byKey.values[index].contains(id) { byKey.values[index].remove(id) }
     }
-    func ids(_ key: String) -> Set<UInt32> { byKey[key] ?? [] }
+    package func ids(_ key: String) -> Set<UInt32> { byKey[key] ?? [] }
     /// Whether anything that can hide a view or make it inert is mounted:
     /// only the passes over these ever set either.
     var hidesOrInerts: Bool {

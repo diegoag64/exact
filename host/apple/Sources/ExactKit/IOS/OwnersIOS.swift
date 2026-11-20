@@ -76,16 +76,16 @@ extension Presenter {
     /// except that a presented route, a dialog's sheet and a lifted popover
     /// bubble to their authored parent outside the presentation. The agent
     /// and accessibility activation take the same steps as a real touch.
-    func listenerParent(of view: UIView) -> UIView? {
+    package func listenerParent(of view: UIView) -> UIView? {
         if let node = view as? NodeView, let parent = dialogs.authoredParent(of: node) { return parent }
         if let parent = menus.logicalParent(of: view) { return parent }
         if let node = view as? NodeView, navigation.routeSurfaces[node.id]?.node === node, modals.mounts(node) {
             return eventParent(of: node)
         }
-        return view.superview
+        return navigation.lifted?.parent(of: view) ?? view.superview
     }
 
-    func authored(_ view: UIView, inside ancestor: UIView) -> Bool {
+    package func authored(_ view: UIView, inside ancestor: UIView) -> Bool {
         sequence(first: view, next: listenerParent).contains { $0 === ancestor }
     }
 
@@ -98,7 +98,8 @@ extension Presenter {
         var at: UIView? = start, crossed = false
         while let cur = at, cur !== target {
             let up = listenerParent(of: cur)
-            crossed = crossed || up !== cur.superview
+            // A node lifted over the tab container stays inside its parent's box on the page
+            crossed = crossed || (up !== cur.superview && up !== navigation.lifted?.parent(of: cur))
             at = up
         }
         return at != nil && crossed ? start : target
@@ -189,6 +190,9 @@ package struct TopLayerBox {
     let frame: TopLayerFrame?
     let modal: UIViewController?
     var backdrop: (bounds: CGRect, excluding: CGRect?)? = nil
+    package init(view: UIView, frame: TopLayerFrame?, modal: UIViewController?, backdrop: (bounds: CGRect, excluding: CGRect?)? = nil) {
+        (self.view, self.frame, self.modal, self.backdrop) = (view, frame, modal, backdrop)
+    }
 }
 
 /// Each route's root laid out in its controller's view (LLP 1123 D2): the
@@ -199,7 +203,7 @@ package struct TopLayerBox {
 /// any other by a placement, its block in the routes' owner's local
 /// coordinates, sent with the block when either changes, so that it keeps
 /// its place among its siblings.
-final class OwnerBlocks {
+package final class OwnerBlocks {
     private unowned let presenter: Presenter
     /// What the runtime was last told, by route: its block, and its
     /// placement unless it is presented.
@@ -242,7 +246,7 @@ final class OwnerBlocks {
 
     /// A native route keeps its controller's bounds and avoids only its own keyboard.
     /// Authored chrome keeps the document's allocation.
-    func block(in view: UIView) -> CGRect {
+    package func block(in view: UIView) -> CGRect {
         var block = view.bounds
         if ExactEnv.authoredChrome, let document = presenter.navigation.container, view.isDescendant(of: document) {
             let end = view.convert(CGPoint(x: 0, y: document.bounds.height), from: document).y
@@ -298,7 +302,7 @@ final class OwnerBlocks {
     /// applied, as `fit` does, and for a slice in flight (`whenIdle`), and
     /// samples what to tell when it tells it, so a report that waited tells
     /// what is current, and the ones behind it what changed since: none.
-    func publish() {
+    package func publish() {
         guard viewChanges == 0, !resetting, !presenter.resetting else { return } // (a sheet a reset dismisses is the old tree's: never told the runtime replacing it)
         presenter.nativeGeometry.changed()
         if presenter.applying {
@@ -450,7 +454,7 @@ extension Presenter {
 
     /// A rectangle in the viewport's coordinates, less its scrolling: where
     /// a person sees it in the viewport, as the runner reads a top-layer box.
-    func viewportPoints(_ rect: CGRect) -> CGRect {
+    package func viewportPoints(_ rect: CGRect) -> CGRect {
         rect.offsetBy(dx: -viewport.pageOrigin.x, dy: -viewport.pageOrigin.y)
     }
 }

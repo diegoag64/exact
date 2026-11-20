@@ -615,6 +615,13 @@ impl<D: DataSource> Presenter<D> {
         if !x.is_finite() || !y.is_finite() {
             return Some(json!({"error":"control needs finite points","malformed":true}));
         }
+        let mut wait_ms = None;
+        if phase == Some("hold") {
+            match crate::agent::contact::duration(q) {
+                Ok(ms) => wait_ms = self.live_time().map(|_| ms),
+                Err(error) => return Some(json!({"error":error,"malformed":true})),
+            }
+        }
         let phases = match phase {
             None => &["down", "up"][..],
             Some("hold") if x == sx && y == sy => &[],
@@ -641,7 +648,11 @@ impl<D: DataSource> Presenter<D> {
             Some("down" | "move" | "hold") => Some((id, x, y)),
             _ => None,
         };
-        Some(json!({"tapped":id,"phase":phase,"at":[x,y],"delivery":"recognized"}))
+        let mut reply = json!({"tapped":id,"phase":phase,"at":[x,y],"delivery":"recognized"});
+        if let Some(ms) = wait_ms {
+            reply["waitMs"] = ms.into();
+        }
+        Some(reply)
     }
 }
 
@@ -968,7 +979,12 @@ impl<D: DataSource> Presenter<D> {
             self.brush.ringless = ringless;
         }
         if moves {
-            if let Some(e) = self.set_focus_ring(focus, now_ms, false) {
+            let painted_field = focus.is_some_and(|id| {
+                self.host.kernel().node(id).is_some_and(|n| {
+                    n.node_type == NodeType::TextInput && !crate::fields::hosts(&n)
+                })
+            });
+            if let Some(e) = self.set_focus_press(focus, now_ms, !painted_field) {
                 eprintln!("exact: {e}");
             }
             self.queue_collections();

@@ -11,6 +11,7 @@ import { faultRequest as rawFaultRequest, preferGroups } from './agent-prefer.mj
 import { open } from './agent.mjs';
 import { duringOp } from './agent-drag.mjs';
 import { equalJson } from '../host/web-js/declared-values.js';
+import { compareBox, samplePoints } from './agent-compare.mjs';
 import { perfDelta } from './agent-inspect.mjs';
 import { driveStore, faultSpecOf, launchFacts } from './agent-launch.mjs';
 import { macSandboxed } from './agent-build.mjs';
@@ -94,19 +95,58 @@ export function focusedExpectation(nodes, target) {
   return { message: `expected "${target}" focused, ${was}` };
 }
 
-/** `expect layout <target> width|height ==|<=|>= <points>`: null when the size holds, else `{ message }`. The
- * size is the box `layout <target>` reports, `node.space.viewport` (LLP 1012: viewport points, presentation transforms
- * folded in), at the reply's two decimals. A node the shipped app does not show fails as `expect text` has it; a host
- * with no box for the node says why (`space.unavailable`: an iOS swipe action not revealed). */
+/** Read presented boxes in viewport points. Both sides of a comparison use the same tree snapshot. */
 export async function layoutExpectation(s, nodes, st) {
-  const n = targetNode(nodes, st.target), said = `${st.dimension} of "${st.target}"`;
-  if (!n) return { message: `${said} is absent (no view carries that testId${unopenedHint(nodes)})` };
-  if (n.unshown) return { message: `testId "${st.target}" is in the tree, but ${n.unshown}`, unshown: true };
-  const space = (await s.layout(n.id)).node?.space, box = space?.viewport;
-  if (!box) return { message: `${said} is unknown: ${space?.unavailable ?? 'the host reports no box for it'}` };
-  const r2 = (v) => Math.round(v * 100) / 100, w = r2(box.w), h = r2(box.h), got = st.dimension === 'width' ? w : h;
-  if (stateHolds(got, st)) return null;
-  return { message: `${said} is ${got}, expected ${{ equal: '', 'at-least': '>= ', 'at-most': '<= ' }[st.comparison]}${st.value} (its box is ${w}×${h})` };
+  const round = v => Math.round(v * 100) / 100;
+  async function measure({ target, dimension }) {
+    const n = targetNode(nodes, target), said = `${dimension} of "${target}"`;
+    if (!n) return { message: `${said} is absent (no view carries that testId${unopenedHint(nodes)})` };
+    if (n.unshown) return { message: `testId "${target}" is in the tree, but ${n.unshown}`, unshown: true };
+    const space = (await s.layout(n.id)).node?.space;
+    if (!space?.viewport) return { message: `${said} is unknown: ${space?.unavailable ?? 'the host reports no box for it'}` };
+    const { x, y, w, h } = space.viewport;
+    if (dimension === 'baseline' && !Number.isFinite(space.baseline))
+      return { message: `${said} is unknown: the host reports no text baseline for it` };
+    const values = { baseline: space.baseline, width: w, height: h, x, left: x, y, top: y, right: x + w, bottom: y + h, centerX: x + w / 2, centerY: y + h / 2 };
+    return { value: round(values[dimension]), said, size: `${round(w)}×${round(h)}` };
+  }
+  const lhs = await measure(st);
+  if (lhs.message) return lhs;
+  const rhs = typeof st.value === 'number' ? { value: st.value } : await measure(st.value);
+  if (rhs.message) return rhs;
+  const delta = lhs.value - rhs.value;
+  const tolerance = st.tolerance ? st.tolerance + Number.EPSILON * Math.max(1, Math.abs(lhs.value), Math.abs(rhs.value)) : 0;
+  const holds = { equal: Math.abs(delta) <= tolerance, 'at-least': delta >= -tolerance, 'at-most': delta <= tolerance };
+  if (holds[st.comparison]) return null;
+  const sign = { equal: '', 'at-least': '>= ', 'at-most': '<= ' }[st.comparison];
+  const expected = rhs.said ? `${rhs.said} (${rhs.value})` : rhs.value;
+  const within = st.tolerance === undefined ? '' : ` within ${st.tolerance} pt`;
+  return { message: `${lhs.said} is ${lhs.value}, expected ${sign}${expected}${within} (its box is ${lhs.size})` };
+}
+
+async function paintExpectation(s, st, file) {
+  const nodes = (await s.tree()).nodes, node = targetNode(nodes, st.target);
+  if (!node) return `no view carries testId "${st.target}"${unopenedHint(nodes)}`;
+  if (node.unshown) return `testId "${st.target}" is in the tree, but ${node.unshown}`;
+  const space = (await s.layout(node.id)).node?.space, box = space?.viewport;
+  if (!box) return space?.unavailable ?? `the host reports no viewport box for "${st.target}"`;
+  if (st.op === 'expect-screenshot') return compareBox(s, box, resolve(dirname(file), st.reference));
+  if (!(st.x >= 0 && st.x < box.w && st.y >= 0 && st.y < box.h))
+    return `sample (${st.x}, ${st.y}) is outside "${st.target}" (${box.w}×${box.h})`;
+  const sampled = await samplePoints(s, [[box.x + st.x, box.y + st.y]], true);
+  if (sampled.error) return sampled.error;
+  const rgba = sampled.values?.[0];
+  if (!['extended-linear-srgb', 'srgb'].includes(sampled.space) || rgba?.length !== 4 || !rgba.every(Number.isFinite))
+    return `the host returned no sRGB pixel for "${st.target}"`;
+  const bytes = rgba.map((v, i) => {
+    if (i < 3 && sampled.space === 'extended-linear-srgb') v = v <= 0.0031308 ? 12.92 * v : 1.055 * v ** (1 / 2.4) - 0.055;
+    return Math.round(Math.max(0, Math.min(1, v)) * 255);
+  });
+  const expected = st.color.slice(1).match(/../g).map(c => parseInt(c, 16));
+  if (expected.length === 3) expected.push(255);
+  if (bytes.every((v, i) => Math.abs(v - expected[i]) <= st.tolerance)) return null;
+  const actual = '#' + bytes.map(b => b.toString(16).padStart(2, '0')).join('');
+  return `"${st.target}" at (${st.x}, ${st.y}) is ${actual}, expected ${st.color} within ${st.tolerance} per channel`;
 }
 
 /** A press on a disabled control does nothing, and each host said so its own way (the web's silently, a native one in the words of the view
@@ -756,7 +796,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
     // A test's launch lines lead its steps and override the drive's flags (habits F7).
     // The drive's `--fail-fetch` is every test's, with its own leading `fail fetch` lines added (LLP 1103 D3).
     const facts = { size, seed, locale, formatLocale, timeZone, epoch, failFetch };
-    const lines = [], preferences = [];
+    const lines = [], preferences = [], stored = [];
     const media = {}, permissions = {}; // the latest of each, which a `reload` applies again
     let beforeData = false, leading = 0, reset = null, opensAt = null; // `at`'s location, where the app opens (LLP 1153 D5)
     // `fail fetch` lines that lead the steps are armed before the app's first data load (LLP 1103 D3).
@@ -769,6 +809,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
     for (const st of t.steps) {
       if (st.op === 'before-data') beforeData = true;
       else if (st.op === 'fresh') reset = st;
+      else if (st.op === 'stored') stored.push([st.name, st.json]);
       else if (st.op === 'fail-fetch') { early(st); facts.failFetch = [facts.failFetch, st.times == null ? st.prefix : `${st.prefix}\t${st.times}`].filter(Boolean).join('\n'); if (st.times != null) armed.set(st.prefix, st.line); }
       else if (st.op === 'answer-fetch') facts.failFetch = [facts.failFetch, faultSpecOf([{prefix: st.prefix, hits: 0, armed: true, response: st.response}])].filter(Boolean).join('\n');
       else if (st.op === 'size') facts.size = [st.width, st.height];
@@ -778,6 +819,11 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
       else break;
       lines.push(st.line);
       leading++;
+    }
+    if (stored.length) {
+      // A fixture and its reload share the named scratch store, even under a live driver's EXACT_STORE=real.
+      fixture.EXACT_STORE = 'memory';
+      Object.assign(fresh, fixture, { EXACT_AGENT_STORED: JSON.stringify(stored) });
     }
     if (host === 'web' && opensAt && /^https?:\/\//.test(url ?? '')) opensAt = new URL(opensAt, url).href;
     // Replay uses the already-resolved facts, including an authored `epoch now` (LLP 1116.007 D3.4).
@@ -953,7 +999,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
         if (INPUTS.has(st.op)) await settleFired();
         if (st.op === 'type') { typed.add(st.target); touched.add(st.target); } else if (INPUTS.has(st.op) || st.op === 'reload') typed.clear();
         switch (st.op) {
-          case 'size': case 'at': case 'epoch': case 'time-zone': case 'locale': case 'seed': case 'before-data': case 'fresh': break; // the session opened with it
+          case 'size': case 'at': case 'epoch': case 'time-zone': case 'locale': case 'seed': case 'before-data': case 'fresh': case 'stored': break; // the session opened with it
           case 'prefer': if (n >= leading) await prefer(st); break;
           // A driver fault (LLP 1103): a leading one was a launch line; a later one arms (or re-arms) now, a `pass` stops it.
           case 'fail-fetch': {
@@ -981,6 +1027,11 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
             });
             if (r?.error) throw new Error(r.error);
             if (r?.dropped !== true) throw new Error(`drop stream is unavailable on ${host}`);
+            break;
+          }
+          case 'scroll': {
+            const node = await s.find(st.target);
+            await s.reveal(node.id);
             break;
           }
           // The driver's `tap` forms (feed F10): `into` brings a virtualized list's row into view by its key.
@@ -1051,6 +1102,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
             delivered(await s.type(`@${ticket}`, location)); input = st.line; break;
           }
           case 'clipboard': delivered(await s.type(st.target, { clipboard: st.edit, text: st.text })); input = st.line; break;
+          case 'background': await s.background(st.ms); input = null; break;
           case 'clock': await s.clock(st.arg); input = null; loaded = true; if (/^\+?\d/.test(st.arg)) unpolled = null; break;
           // The driver writes through the app's server as another person (LLP 1116.006 D8), not the app: nothing it
           // shows changes until it reads again.
@@ -1072,7 +1124,7 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
             const tree = await s.tree();
             const f = treeExpectation(tree.nodes, st.target, st.present);
             // The first step of a test that waited for data cannot see the boot's loading view (authoring bench).
-            const first = !beforeData && t.steps.slice(0, t.steps.indexOf(st)).every((p) => p.op in LAUNCH || p.op === 'size' || p.op === 'at' || p.op === 'prefer');
+            const first = !beforeData && n === leading;
             if (f?.unshown) failures.push(`${at}: ${f.message}`);
             else if (f) await fail(`${at}: ${f.message}${first && st.present ? ' (the test waited for the app\'s data before its first step; `before data`, a launch line, starts without that wait)' : ''}`);
             break;
@@ -1092,6 +1144,12 @@ export async function runTests({ host, browser, file, plan, app, size, env, webD
           case 'expect-focused': {
             const f = focusedExpectation((await s.tree()).nodes, st.target);
             if (f) await fail(`${at}: ${f.message}`);
+            break;
+          }
+          case 'expect-sample':
+          case 'expect-screenshot': {
+            const message = await paintExpectation(s, st, file);
+            if (message) await fail(`${at}: ${message}`);
             break;
           }
           case 'expect-layout': {

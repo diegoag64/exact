@@ -1,6 +1,7 @@
 //! Editing geometry from the immutable glyphs and CSS line boxes used to paint a field.
-use super::Paragraph;
+use super::{Paragraph, Spec, TextEngine};
 use exact_kernel::{Direction, TextAlign};
+use std::{ops::Range, rc::Rc};
 use unicode_segmentation::UnicodeSegmentation;
 
 type Rect = (f32, f32, f32, f32);
@@ -62,6 +63,78 @@ pub(crate) fn line_left(align: TextAlign, direction: Direction, width: f32, w: f
         _ => 0.,
     };
     share * (width - w)
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum WidthUse<'a> {
+    Measure,
+    Paint,
+    Field(Option<&'a Paragraph>),
+}
+
+impl<'a> WidthUse<'a> {
+    fn field(engine: &TextEngine, spec: &Spec, previous: Option<&'a Paragraph>) -> Self {
+        Self::Field(previous.filter(|p| {
+            Rc::ptr_eq(&engine.catalog, &p.source.catalog)
+                && matches!(spec.runs.as_slice(), [r] if r.inline.is_none() && r.edges.is_empty())
+                && super::cache::same_style(spec, &p.source.spec)
+        }))
+    }
+
+    pub(super) fn previous(self) -> Option<&'a Paragraph> {
+        match self {
+            Self::Field(p) => p,
+            _ => None,
+        }
+    }
+}
+
+impl TextEngine {
+    /// [`TextEngine::paragraph`] for a text that replaces the one `owner`
+    /// (a field's node and which of its texts) showed before: the replaced
+    /// one is not kept ([`super::cache::Cache::superseding`]).
+    pub(crate) fn paragraph_replacing(
+        &mut self,
+        owner: (u32, u8),
+        spec: &Spec,
+        width: Option<f32>,
+        previous: Option<&Paragraph>,
+    ) -> Rc<Paragraph> {
+        let key = self.paragraphs.identity(spec);
+        let p = self.layout_paragraph(width, key, WidthUse::field(self, spec, previous));
+        self.paragraphs.superseding(owner, key);
+        p
+    }
+
+    pub(crate) fn edited_field(
+        &mut self,
+        spec: &Spec,
+        width: Option<f32>,
+        previous: Option<&Paragraph>,
+    ) -> Rc<Paragraph> {
+        let key = self.paragraphs.identity(spec);
+        self.layout_paragraph(width, key, WidthUse::field(self, spec, previous))
+    }
+}
+
+impl Paragraph {
+    /// The editor keeps a final empty line for the caret after a hard break.
+    pub(crate) fn textarea_scroll_max(
+        &self,
+        value: &str,
+        (width, height): (f32, f32),
+    ) -> (f32, f32) {
+        let mut bottom = self.line_bottoms().last().copied().unwrap_or_default();
+        if value.ends_with([
+            '\n', '\r', '\u{1c}', '\u{1d}', '\u{1e}', '\u{85}', '\u{2029}',
+        ]) {
+            bottom += self.source.flow_box(std::iter::empty(), &[]).1;
+        }
+        (
+            (self.width + 1. - width).max(0.),
+            (self.height.max(bottom) - height).max(0.),
+        )
+    }
 }
 
 impl Geometry {
@@ -224,6 +297,30 @@ impl Geometry {
         (x, line.top, 1., line.height)
     }
 
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn selection_edge(&self, offset: u32, trailing: bool) -> (usize, Rect, bool) {
+        let cursor = Cursor {
+            offset,
+            upstream: trailing,
+        };
+        let index = self.line_index(cursor);
+        let Some(line) = self.lines.get(index) else {
+            return (index, self.caret(cursor), false);
+        };
+        let span = line.spans.iter().find(|s| {
+            if trailing {
+                s.end == offset
+            } else {
+                s.start == offset
+            }
+        });
+        if let Some(s) = span {
+            let x = if trailing { s.right } else { s.left };
+            return (index, (x, line.top, 0., line.height), s.right < s.left);
+        }
+        (index, self.caret(cursor), false)
+    }
+
     pub(crate) fn horizontal_bounds(&self) -> (f32, f32) {
         self.lines
             .iter()
@@ -369,17 +466,33 @@ impl Geometry {
         Some(rects)
     }
 
-    pub(crate) fn highlight(&self, start: u32, end: u32) -> Vec<Rect> {
-        self.marks(start, end, |line| (line.top, line.height))
+    pub(crate) fn highlight(&self, start: u32, end: u32, visible: Option<Range<f32>>) -> Vec<Rect> {
+        let lines = visible.map_or(0..self.lines.len(), |clip| {
+            let first = self
+                .lines
+                .partition_point(|l| l.top + l.height < clip.start);
+            let count = self.lines[first..].partition_point(|l| l.top <= clip.end);
+            first..first + count
+        });
+        self.marks(start, end, lines, |line| (line.top, line.height))
     }
 
     pub(crate) fn underlines(&self, start: u32, end: u32, thickness: f32) -> Vec<Rect> {
-        self.marks(start, end, |line| (line.baseline + thickness, thickness))
+        self.marks(start, end, 0..self.lines.len(), |line| {
+            (line.baseline + thickness, thickness)
+        })
     }
 
-    fn marks(&self, start: u32, end: u32, vertical: impl Fn(&Line) -> (f32, f32)) -> Vec<Rect> {
+    fn marks(
+        &self,
+        start: u32,
+        end: u32,
+        lines: Range<usize>,
+        vertical: impl Fn(&Line) -> (f32, f32),
+    ) -> Vec<Rect> {
         let mut rects: Vec<Rect> = Vec::new();
-        for (index, line) in self.lines.iter().enumerate() {
+        for index in lines {
+            let line = &self.lines[index];
             let (top, height) = vertical(line);
             let mut pieces: Vec<_> = line
                 .spans

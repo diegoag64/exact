@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// `scripts/fixtures/sticky-bar.contract`: a route's scroller under a large
 /// title whose first child is `position: sticky; top: 114px`, then cards. CSS

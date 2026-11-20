@@ -36,7 +36,7 @@ package final class Presenter {
     var personScrolls = 0, fragmentArm: (activation: Int, scrolls: Int)?, fragmentSeen = 0 // the person's wheels and live scrolls; the activation a router change asked a fragment's scroll for and their count then, which one since cancels; the last armed (Fragment.swift)
     lazy var focusEvents = FocusEvents(self)
     var inlineOwners: [UInt32: (owner: UInt32, index: Int)] = [:]
-    private(set) var chrome = ChromeIndex()
+    private(set) package var chrome = ChromeIndex()
     /// Views leaving with their exit, by id (LLP 1063, `PresenceMac.swift`).
     package var leaving: [UInt32: Leaving] = [:]
     /// The shared elements in flight (LLP 1013.000, `FlightLink`).
@@ -91,15 +91,16 @@ package final class Presenter {
     var pendingScrolls: Set<UInt32> = []
     /// The batch's suppression triggers for scroll anchoring (`ScrollAnchoring.swift`).
     var anchorChanges = ScrollAnchoring.Changes()
-    package var heightBindings: [UInt32: HeightDragBinding] = [:]
-    package var transformBindings: [UInt32: TransformDragBinding] = [:]
+    /// Transform and height drag handles, which the Drag module keeps.
+    lazy package var drags: DragHandles = DragLink.installed?.handles(self) ?? NoDragHandles()
     lazy package var transformGeometry = TransformGeometryHost(self)
     package var videoVisibility: VideoVisibilityHost?
     lazy package var collections: any ListHosting = ListLink.make?(self) ?? NoLists()
-    lazy var stickies: any StickyHosting = StickyLink.make?(self) ?? NoStickies()
+    package lazy var stickies: any StickyHosting = StickyLink.make?(self) ?? NoStickies()
     let tableGrid = TableGrid()
     /// Heavy leaves held while their rows are far or flying (LLP 1068 §5.1).
-    lazy var leaves = HeavyLeaves(self)
+    /// The heavy leaves' hold, when a product that makes heavy leaves is linked.
+    package lazy var leaves: HeavyLeafHolding? = LeavesLink.make?(self)
     lazy package var selection = TextSelection(self)
     let textRasters = TextRasterizer()
     lazy var mouseSwipe = MouseSwipe(self)
@@ -107,52 +108,48 @@ package final class Presenter {
     /// The mouse drags (LLP 1047.001 D4: the Drag module's, when linked).
     lazy var mouseDrags = DragLink.installed?.mouseDrags(self) ?? .none
     lazy var mouseChain = MouseChain(self)
-    /// The one Arrange contact, until its source settles; a test's calls.
-    package var reorder: ReorderLift?
-    package var reorderCalls: ReorderCalls?
-    /// A grouped session (LLP 1094), until its ghost lands; a test's calls.
-    package var reorderGroup: ReorderGroupHold?
-    var reorderGroupCalls: ReorderGroupCalls?
+    /// Reordering a list's rows: the lists family's (`ReorderLink`).
+    lazy package var reorders: any ReorderHosting = ReorderLink.make?(self) ?? NoReorders()
     private var scrollObserver: NSObjectProtocol?
     private var visibleText: [UInt32: NSRect] = [:]
     private var textViewportIndex: TextViewportIndex?
     /// The native menu arm (LLP 1021 D3).
-    lazy var menus = MenuHost(presenter: self)
-    lazy var dialogs = DialogHost(self)
+    package lazy var menus = MenuHost(presenter: self)
+    package lazy var dialogs = DialogHost(self)
     /// Subtrees shown in a native container's view (LLP 1115.002 D8.2).
-    lazy var blocks = BlockHost(self)
+    package lazy var blocks = BlockHost(self)
     /// Lists whose rows a table holds (LLP 1115.002 D5, stage 3a).
-    lazy var tables = TableHost(self)
-    lazy var alerts = AlertHost(self)
+    package lazy var tables = TableHost(self)
+    package lazy var alerts = AlertHost(self)
     lazy package var navigation: any NavigationHosting = NavigationLink.make?(self) ?? NoNavigation(self)
-    lazy var inputGates = InputGates(self)
+    package lazy var inputGates = InputGates(self)
     lazy var backSwipe: any BackSwiping = NavigationLink.makeBackSwipe?(self) ?? NoBackSwipe()
     /// SVG scenes (LLP 1055 D4), when the app links SVG.
     let svg = SvgLink.make?()
     /// Boxes' CSS animations (LLP 1055 D7).
-    let boxAnimations = BoxAnimations()
+    let boxAnimations: any BoxAnimating = AnimationLink.make?() ?? NoBoxAnimations()
     /// Boxes under CSS `filter`, drawn again after each batch (LLP 1055.000 D14).
     let boxFilters = BoxFilterLink.makeSet?()
     package let canvas2d: Canvas2DCanvases = SurfacesLink.installed?.canvas2D() ?? NoCanvas2D()
-    lazy var segments: any SegmentHosting = ControlLink.makeSegments?(self) ?? NoSegments()
-    lazy var controls = ControlHost(self)
-    lazy var fieldSelections = FieldSelections(self)
+    package lazy var segments: any SegmentHosting = ControlLink.makeSegments?(self) ?? NoSegments()
+    package lazy var controls = ControlHost(self)
+    package lazy var fieldSelections = FieldSelections(self)
     /// The one editor every `input`'s field of this session edits in (`FieldEditor`).
     lazy var fieldEditor = FieldEditor.make()
     /// Nodes marked `hatch="word"` (LLP 1075.003.000).
     package internal(set) lazy var elements: any ElementHatching = NativeModuleLink.makeElements?(self) ?? NoElementHatches()
-    lazy var shortcuts = ShortcutHost(presenter: self)
-    lazy var toolbar = WindowToolbarHost(self)
+    package lazy var shortcuts = ShortcutHost(presenter: self)
+    package lazy var toolbar = WindowToolbarHost(self)
     /// What native presentations cover of boxes (LLP 1115.002 D8.1, CoversMac.swift).
-    lazy var covers = HostCovers(self)
+    package lazy var covers = HostCovers(self)
     lazy var statusItems = StatusItemHost(self)
-    var onCovers: (([(UInt32, HostCover?)]) -> Void)?
+    package var onCovers: (([(UInt32, HostCover?)]) -> Void)?
     /// The border box a person dragged a box's `resize` grip to; nil keeps an axis (ResizeGrip.swift).
     var onResizeBox: ((UInt32, CGFloat?, CGFloat?) -> Void)?
     /// The root tab bar as the window's sidebar (LLP 1115.002 D3).
-    lazy var sidebar: any SidebarHosting = NavigationLink.makeSidebar?(self) ?? NoSidebar(self)
+    package lazy var sidebar: any SidebarHosting = NavigationLink.makeSidebar?(self) ?? NoSidebar(self)
     /// Each navigation root's tabs, as the last batch to say them gave them (`takeRootTabs`).
-    var rootTabs: [UInt32: RootTabs] = [:]
+    package var rootTabs: [UInt32: RootTabs] = [:]
     /// The head's title goes to the window the app attached, through the
     /// toolbar host that already owns its title (LLP 1048.003 D1).
     func headTitle(_ title: String?) { toolbar.headTitle(title) }
@@ -162,7 +159,7 @@ package final class Presenter {
     /// last batch; `onViewportFit` fires when it changes. macOS maps `cover`
     /// to a full-size-content window (the titlebar overlays the viewport;
     /// its height is `safe-area-inset-top`). @ref LLP 1008 §9
-    private(set) var viewportFit: String?
+    private(set) package var viewportFit: String?
     var onViewportFit: (() -> Void)?
     /// The safe-area insets the kernel was given (the titlebar under `viewport-fit=cover`, zero
     /// when the viewport is the content view below it) and its layout regions (LLP 1123 D10,
@@ -401,7 +398,7 @@ package final class Presenter {
         var top: CGFloat, time: TimeInterval, velocity: Double = 0, step: Double = 0
     }
     private var listTravel: [UInt32: ListTravel] = [:]
-    func listVelocity(_ id: UInt32) -> Double {
+    package func listVelocity(_ id: UInt32) -> Double {
         guard !ExactEnv.agentMode, let travel = listTravel[id],
               CACurrentMediaTime() - travel.time < 0.15 else { return 0 }
         return travel.velocity
@@ -474,7 +471,7 @@ package final class Presenter {
         // there is nothing to report, and nothing here reads or writes the
         // scroll view again until AppKit next calls in.
         sampleListTravel()
-        leaves.scrolled()
+        leaves?.scrolled()
         // Only what is already on screen without paint; the rest is pumped.
         textPending = refreshVisibleText(limit: 0) || textPending
         if textPending {
@@ -546,10 +543,10 @@ package final class Presenter {
     /// Everything the pump owes, now. The agent's wheel is synchronous — it
     /// reads the tree right after — and so is anything that must not observe
     /// a half-filled window (LLP 1012: an agent never waits).
-    func settlePump() {
+    package func settlePump() {
         pumpSchedule.cancel()
         // The agent reads the tree right after: every held leaf is made (LLP 1068 §5.1).
-        leaves.settle()
+        leaves?.settle()
         // Match the previous bounded native-feedback depth while keeping
         // background admission out of this synchronous agent boundary.
         for _ in 0..<8 {
@@ -610,10 +607,10 @@ package final class Presenter {
     /// The page's canvas colour as the viewport draws it: the first root's
     /// opaque background, the window background when unset, and clear when
     /// the root's is translucent, which the viewport leaves undrawn.
-    var pageBackground: NSColor { viewport.drawsBackground ? viewport.backgroundColor : .clear }
+    package var pageBackground: NSColor { viewport.drawsBackground ? viewport.backgroundColor : .clear }
     /// What covers the page where a route paints no ground of its own: the
     /// canvas, or the window background behind a translucent one.
-    var opaqueGround: NSColor { viewport.drawsBackground ? viewport.backgroundColor : .windowBackgroundColor }
+    package var opaqueGround: NSColor { viewport.drawsBackground ? viewport.backgroundColor : .windowBackgroundColor }
 
     /// The page's canvas: the first root's background, else the theme's, else
     /// the platform's (LLP 1115 D2).
@@ -668,12 +665,11 @@ package final class Presenter {
         mouseLayoutPan.abandon()
         mouseDrags.height.cancel()
         mouseDrags.transform.cancel()
-        mouseDrags.reorder.cancel()
-        reorder?.abandon()
-        reorderGroup?.abandon()
+        reorders.mouse.cancel()
+        reorders.abandon()
         collections.reset()
         tables.reset()
-        leaves.reset()
+        leaves?.reset()
         autofocusProcessed.removeAll()
         menus.reset()
         dialogs.reset()
@@ -699,9 +695,7 @@ package final class Presenter {
         AriaCarriers.forget(presenter: self)
         scrollers.removeAll()
         pendingScrolls.removeAll()
-        heightBindings.removeAll()
-        transformBindings.removeAll()
-        transformGeometry.reset()
+        drags.reset()
         videoVisibility?.reset()
         selection.structureChanged(); selection.clear() // a selection of the retired tree, unreported
         visibleText.removeAll()
@@ -730,7 +724,7 @@ package final class Presenter {
         viewport.syncElasticity()
         viewport.acceptDocumentFit()
     }
-    var onPress, onClose, onCancel: ((UInt32) -> Void)?
+    package var onPress, onClose, onCancel: ((UInt32) -> Void)?
     var onChange: ((UInt32, String) -> Void)?
     /// Images' intrinsic sizes, several at once under one layout.
     package internal(set) var onIntrinsic: (([(UInt32, CGSize?)]) -> Void)?
@@ -826,7 +820,7 @@ package final class Presenter {
         mouseLayoutPan.retire(id)
         mouseDrags.height.retire(id)
         mouseDrags.transform.retire(id)
-        mouseDrags.reorder.retire(id)
+        reorders.mouse.retire(id)
         session?.canvases.destroy(view: id)
         if forget { svg?.forget(id) }
         boxAnimations.forget(id)
@@ -834,9 +828,7 @@ package final class Presenter {
         if forget { views[id]?.forget() }
         // Out of the map before out of the window: the editing-ended
         // notification removal fires finds no view to send for.
-        heightBindings.removeValue(forKey: id)
-        transformBindings.removeValue(forKey: id)
-        transformGeometry.retire(id)
+        drags.retire(id)
         session?.text.readerParagraphs.removeValue(forKey: id)
         // A view made later may have this one's identifier: its `autofocus` is its own to offer.
         if let view = views[id] { autofocusProcessed.remove(ObjectIdentifier(view)) }
@@ -914,7 +906,7 @@ package final class Presenter {
         edited = id
         if input { onInput?(id, value) }
     }
-    func commitEdit(_ id: UInt32, _ value: String, change: Bool) {
+    package func commitEdit(_ id: UInt32, _ value: String, change: Bool) {
         guard edited == id else { return }
         edited = nil
         var value = value
@@ -941,7 +933,7 @@ package final class Presenter {
     /// host), and never while a batch is being applied — it waits for the
     /// batch to finish, then goes if its view survived it.
     package var applying = false
-    var isApplying: Bool { applying }
+    package var isApplying: Bool { applying }
     /// Each painted popover's region not yet told the kernel, the latest, with the view it is for (`tellRegion`).
     var regionsUntold: [UInt32: (view: ObjectIdentifier?, block: HostBlock?)] = [:]
     /// The dev loop's status pill (DevPill.swift), while one shows.
@@ -1055,7 +1047,7 @@ package final class Presenter {
             onMessage?(id, value)
         }
     }
-    func intrinsic(_ id: UInt32, _ size: CGSize?) { onIntrinsic?([(id, size)]) }
+    package func intrinsic(_ id: UInt32, _ size: CGSize?) { onIntrinsic?([(id, size)]) }
     /// Symbols report after the batch that creates them: all sizes from a turn
     /// reach the runner under one layout, as on iOS, not a layout each.
     private struct QueuedIntrinsic { weak var view: NodeView?; let generation: Int; let size: CGSize? }
@@ -1137,7 +1129,7 @@ package final class Presenter {
                 if let boxFilters, !boxFilters.isEmpty { boxFilters.render() }
                 ImageLink.pixelated?.refresh(in: self)
                 ShadowStand.followAll()
-                leaves.batchApplied(moved: moved)
+                leaves?.batchApplied(moved: moved)
                 flushFragment()
             }
             // Only scheduled: the hit-test is the next display frame's.
@@ -1165,28 +1157,11 @@ package final class Presenter {
             if kind == .destroy, let stage, let up = views[id]?.nodeSuperview, stage.destroyed.contains(up.id) {} else
             if kind == .children { touched(id, children: true) } else if kind != .roots && kind != .create { touched(id, textChanged: kind == .props || kind == .style || kind == .destroy || kind == .fieldContent) }
             switch kind {
-            case .transformDrag:
-                if let binding = TransformDragBinding(op.payload) {
-                    if binding.target == nil {
-                        if transformBindings[binding.id]?.handleKey == binding.handleKey
-                            && transformBindings[binding.id]?.runtime == binding.runtime {
-                            transformBindings.removeValue(forKey: binding.id)
-                            transformGeometry.retire(binding.id)
-                        }
-                    } else { transformBindings[binding.id] = binding }
-                }
+            case .transformDrag, .heightDrag: _ = drags.bind(kind, op.payload)
             case .retireMotion:
                 if let rawRuntime = op.payload["runtime"] as? String, let runtime = UInt64(rawRuntime),
                    let rawToken = op.payload["token"] as? String, let token = UInt64(rawToken) {
                     session?.transformInputHold?.retire(runtime: runtime, token: token)
-                }
-            case .heightDrag:
-                if let binding = HeightDragBinding(op.payload) {
-                    if binding.target == nil {
-                        if heightBindings[binding.id]?.handleKey == binding.handleKey {
-                            heightBindings.removeValue(forKey: binding.id)
-                        }
-                    } else { heightBindings[binding.id] = binding }
                 }
             case .create: register(newView(op))
             case .paragraph:
@@ -1373,7 +1348,7 @@ package final class Presenter {
         views[v.id] = v
         elements.created(v)
         if v.kind == "list" { listViews[v.id] = v }
-        if v.kind == "video" { leaves.created(v) }
+        if v.kind == "video" { leaves?.created(v) }
     }
 
     /// A `children` op. A child in `leaving`, which the batch destroys, stays for its `destroy` (`retire`).

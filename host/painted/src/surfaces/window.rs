@@ -30,6 +30,20 @@ pub(super) struct Layers {
 }
 
 impl Surfaces {
+    pub(crate) fn detach_painter_window(&mut self) {
+        if let Some(abi) = self
+            .window_artifact
+            .take()
+            .and_then(|name| self.abis.get(&name))
+        {
+            unsafe { abi.symbol::<unsafe extern "C" fn()>(b"gpu_window_detach")() };
+        }
+        self.window_layers = None;
+        self.direct_window = None;
+        self.startup_device = None;
+        self.window_owner = None;
+    }
+
     fn window_canvas(&self) -> Option<u32> {
         if self.canvases.len() != 1 {
             return None;
@@ -40,6 +54,10 @@ impl Surfaces {
     }
 }
 
+fn window_pixels<D: DataSource>(p: &Presenter<D>) -> [u32; 2] {
+    [p.viewport().0, p.viewport().1].map(|v| (v * p.brush.scale).round().max(1.) as u32)
+}
+
 impl<D: DataSource> Presenter<D> {
     /// Paint and present a Windows frame. `None` means it was presented on
     /// the GPU; `Some` is the complete CPU frame for the window to upload.
@@ -47,6 +65,17 @@ impl<D: DataSource> Presenter<D> {
         &mut self,
         window: exact_ink::device::d3d11::Window,
     ) -> Result<Option<Arc<Pixmap>>, String> {
+        self.redraw_window(|p, opened| p.present_window_frame(window, opened))
+    }
+
+    fn present_window_frame(
+        &mut self,
+        window: exact_ink::device::d3d11::Window,
+        opened: bool,
+    ) -> Result<Option<Arc<Pixmap>>, String> {
+        if opened {
+            self.attach_painter_window(window.clone(), window_pixels(self))?;
+        }
         let (hwnd, hinstance) = (window.hwnd(), window.hinstance());
         self.surfaces.window_owner = Some(window);
         if let Some(mut direct) = self.surfaces.direct_window.take() {
@@ -466,8 +495,7 @@ impl DirectWindow {
         use exact_ink::device::Device;
         let now = std::time::Instant::now();
         self.poll_due = now + std::time::Duration::from_millis(16);
-        let size =
-            [p.viewport().0, p.viewport().1].map(|v| (v * p.brush.scale).round().max(1.) as u32);
+        let size = window_pixels(p);
         self.window
             .set_background(crate::paint::page_color(p.dark()));
         self.poll_startup(p, size);

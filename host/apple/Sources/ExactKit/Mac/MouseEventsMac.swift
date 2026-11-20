@@ -21,6 +21,12 @@
 import AppKit
 import UniformTypeIdentifiers
 
+extension NSEvent {
+    func withinDragSlop(of down: NSPoint) -> Bool {
+        max(abs(locationInWindow.x - down.x), abs(locationInWindow.y - down.y)) <= Gesture.slop
+    }
+}
+
 extension Presenter {
     /// Invoke the focused node's contextmenu or contextPopover after key handlers.
     func contextMenuKey(_ event: NSEvent, in owner: NSWindow? = nil) -> Bool {
@@ -227,13 +233,13 @@ extension NodeView {
         if pointerdownHeard, takesClickFocus, !keepsFocus, !focusInside(event) { takeClickFocus() }
         if isSurfaceControl { _ = control("down", point: local(event.locationInWindow), timestamp: event.timestamp); return }
         if canvasInput?.pointer(event, phase: "down") == true { return }
-        presenter?.leaves.pressed(self) // a held leaf's box was clicked: made now (LLP 1068 §5.1)
+        presenter?.leaves?.pressed(self) // a held leaf's box was clicked: made now (LLP 1068 §5.1)
         presenter?.collections.pointerDown(id, event: event)
         presenter?.mouseChain.down(self, event: event)
         guard !disabled else { pressed = false; return }
         if let target = presenter?.svg?.target(id, at: local(event.locationInWindow)) { svgPressed = target; return }
         if isParagraph, let run = inlineTarget(at: local(event.locationInWindow), handler: "press") {
-            inlinePressed = run.id
+            inlinePressed = (run.id, event.locationInWindow)
             if !keepsFocus { window?.makeFirstResponder(self); presenter?.selection.begin(self, event: event) }
             return
         }
@@ -281,9 +287,9 @@ extension NodeView {
         guard !inert else { return }
         if isSurfaceControl || ownsSurfaceControl { _ = control("move", point: local(event.locationInWindow), timestamp: event.timestamp); return }
         if canvasInput?.pointer(event, phase: "move") == true { return }
-        inlinePressed = nil
+        if let press = inlinePressed, !event.withinDragSlop(of: press.down) { inlinePressed = nil }
         // A gesture that engages ends the press (the chain clears `pressed`).
-        if presenter?.mouseChain.drag(event) == true { return }
+        if presenter?.mouseChain.drag(event) == true { inlinePressed = nil; return }
         pressFollows(inside: pressInside(event.locationInWindow))
         if selectsText, presenter?.mouseChain.preventedContact != true { presenter?.selection.drag(event) } // a prevented contact selects nothing
         else { (chain?.responder(from: self, event: event) ?? (chain == nil ? nextResponder : nil))?.mouseDragged(with: event) }
@@ -322,7 +328,7 @@ extension NodeView {
             }
             return
         }
-        if let run = inlinePressed {
+        if let run = inlinePressed?.id {
             inlinePressed = nil
             if inlineTarget(at: local(event.locationInWindow), handler: "press")?.id == run {
                 presenter?.pressClick = event

@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// While the scene is in the background UIKit can size the main navigation
 /// container for the iPhone Duo's other display, and nothing lays it out

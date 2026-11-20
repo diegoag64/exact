@@ -205,12 +205,12 @@ pub struct Faults {
 
 impl Faults {
     /// The table a launch names: `EXACT_AGENT_FAIL_FETCH`, in
-    /// [`Faults::parse`]'s lines, read only under the agent
-    /// (`EXACT_AGENT=1`), as its other launch facts are.
+    /// [`Faults::parse`]'s lines, read only in an agent launch.
     pub fn from_env() -> Result<Faults, String> {
-        let agent = std::env::var("EXACT_AGENT").is_ok_and(|v| v == "1");
-        let spec = std::env::var("EXACT_AGENT_FAIL_FETCH").ok();
-        match spec.filter(|_| agent) {
+        match std::env::var("EXACT_AGENT_FAIL_FETCH")
+            .ok()
+            .filter(|_| crate::agent::carried())
+        {
             Some(spec) => Faults::parse(&spec),
             None => Ok(Faults::default()),
         }
@@ -572,9 +572,10 @@ mod tests {
     }
 
     #[test]
-    fn unreadable_launch_fixture_refuses_boot() {
+    fn a_live_drive_loads_launch_faults_before_boot() {
         const CHILD: &str = "EXACT_FAULT_PARSE_CHILD";
-        if std::env::var_os(CHILD).is_some() {
+        const PREFIX: &str = "https://api.test/";
+        if let Ok(fixture) = std::env::var(CHILD) {
             let mut builder = exact_plan::builder::PlanBuilder::new(exact_kernel::SCHEMA_DIGEST, 1);
             builder.node(
                 exact_kernel::NodeType::View as u8,
@@ -592,25 +593,36 @@ mod tests {
                 Default::default(),
                 "/",
             );
-            assert!(result.is_err(), "invalid launch fixtures must refuse boot");
+            if fixture == "invalid" {
+                assert!(result.is_err(), "invalid launch fixtures must refuse boot");
+            } else {
+                assert!(result.unwrap().faults().take("https://api.test/first"));
+            }
             return;
         }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "runner::faults::tests::unreadable_launch_fixture_refuses_boot",
-                "--nocapture",
-            ])
-            .env(CHILD, "1")
-            .env("EXACT_AGENT", "1")
-            .env("EXACT_AGENT_FAIL_FETCH", "https://api.test/\t-\t-\t0\t1\t{")
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stdout)
-        );
+        for mode in ["1", "live"] {
+            for (fixture, spec) in [
+                ("valid", PREFIX),
+                ("invalid", "https://api.test/\t-\t-\t0\t1\t{"),
+            ] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "runner::faults::tests::a_live_drive_loads_launch_faults_before_boot",
+                    ])
+                    .env(CHILD, fixture)
+                    .env("EXACT_AGENT", mode)
+                    .env("EXACT_AGENT_FAIL_FETCH", spec)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{mode} {fixture}: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
     }
 
     #[test]

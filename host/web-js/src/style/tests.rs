@@ -514,6 +514,7 @@ fn a_computed_transition_is_checked_as_an_authors() {
 
 #[test]
 fn bound_spring_transitions_match_the_static_css_writer() {
+    exact_kernel::style::link_all();
     assert_spring_transitions(&TRANSITION_MAP, false);
 }
 
@@ -790,5 +791,38 @@ fn svg_children_emit_basic_clip_css_on_both_web_targets() {
             .unwrap()
             .css;
         assert!(css.contains("clip-path:inset(25%"), "{css}");
+    }
+}
+
+#[test]
+fn llp_1123_rows_write_nothing_on_the_js_target() {
+    // @ref LLP 1123 D17 — not CSS, and not written until the web's owners, as on the web host
+    let prefixes = [
+        "SafeAreaIgnore",
+        "AdditionalSafeArea",
+        "SafeAreaPadding",
+        "SafeAreaBar",
+        "LayoutMargin",
+        "ScrollContentInset",
+        "ScrollVerticalIndicatorInsets",
+        "ScrollHorizontalIndicatorInsets",
+        "ScrollInsetAdjustment",
+        "ScrollIndicatorAdjustment",
+        "ScrollEdgeEffectSoft",
+        "ScrollEdgeEffectHard",
+        "ScrollEdgeEffectHidden",
+        "SafeAreaReach",
+        "SafeAreaExtend",
+    ];
+    let rows: Vec<_> = exact_kernel::StyleId::ALL
+        .iter()
+        .filter(|id| prefixes.iter().any(|p| format!("{id:?}").starts_with(p)))
+        .collect();
+    assert_eq!(rows.len(), 44);
+    for id in rows {
+        assert!(
+            style_writes(*id as u16, false, true).unwrap().is_empty(),
+            "{id:?}"
+        );
     }
 }

@@ -15,8 +15,8 @@
 // such menu and takes none of its chords; EXACT_DEV_MENU=0 or =1, at build
 // or launch, says otherwise for either). Native AppKit above the presenter, so it is
 // alive even when the plan is broken; reload re-fetches a live connection,
-// else restarts from the dev loop's plan when one is named (the watcher's
-// own path, state carried), else from the baked plan, fresh. Host
+// else restarts from the dev loop's plan when a development build names one
+// (the watcher's own path, state carried), else from the baked plan, fresh. Host
 // apparatus for the standalone adapter (LLP 1031 D11): an embedder installs
 // none of this.
 import CExact
@@ -138,8 +138,9 @@ public enum DevMenu {
     /// The session the menu reloads, describes and opens into: the key
     /// window's. Installing the menu follows that window's key notifications.
     nonisolated(unsafe) public static weak var session: ExactSession?
-    /// Where a reload without a connection restarts from: the dev loop's
-    /// plan file (`EXACT_DEV_PLAN`) or `EXACT_PLAN`, else the baked plan.
+    /// Where a development build's reload without a connection restarts
+    /// from: the dev loop's plan file (`EXACT_DEV_PLAN`) or `EXACT_PLAN`,
+    /// else the baked plan.
     nonisolated(unsafe) static var planPath: String?
 
     nonisolated(unsafe) private static var windowKeyObserver: NSObjectProtocol?
@@ -442,10 +443,13 @@ public enum DevMenu {
         // A live URL session re-fetches (and clears a rebuilt stop).
         if ExactApp.shared.connectionStatus != nil { ExactApp.shared.reloadConnection(); return }
         guard let session else { return }
+        // A production build takes no development plan, and reloads the baked one.
+        #if EXACT_INSPECT
         if let path = planPath {
             ExactDevelopmentPlan(path).apply(to: ExactApp.shared, now: true)
             return
         }
+        #endif
         let started = CACurrentMediaTime()
         let batch = session.boot(size: session.presenter.viewportSize)
         // stderr, never stdout: stdout is the agent's reply channel on macOS,
@@ -465,7 +469,7 @@ public enum DevMenu {
             lines.append("plan: baked")
         }
         lines.append("app dir: \(ExactApp.shared.assetRoot.path)")
-        if let failure = WidgetContainer.publicationFailure { lines.append("widget generation: \(failure)") }
+        if let failure = WidgetLink.publication?.publicationFailure { lines.append("widget generation: \(failure)") }
         if let session {
             let size = session.presenter.viewportSize
             lines.append("session: \(session.label) · viewport: \(Int(size.width))×\(Int(size.height)) · \(session.viewCount) views")

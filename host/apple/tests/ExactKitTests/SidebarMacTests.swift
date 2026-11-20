@@ -8,6 +8,7 @@ import AppKit
 import ExactCore
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 final class SidebarMacTests: XCTestCase {
     private var window: NSWindow?

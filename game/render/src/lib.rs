@@ -568,7 +568,7 @@ macro_rules! module {
     ($game:ty, audio_mode $assets:tt) => { $crate::module!($game, audio_mode $assets, (), &[]); };
     ($game:ty, audio_mode $assets:tt, $hooks:ty, $shaders:expr) => {
         #[derive(Default)]
-        struct GameAudio(exact_game_audio::SurfacePlayer, Option<$crate::exact_game::audio::Sounds>);
+        struct GameAudio(::exact_game_audio::SurfacePlayer, Option<$crate::exact_game::audio::Sounds>);
         impl $crate::Executor for GameAudio {
             fn wants_audio(&self) -> bool { true }
             fn clock(&mut self, seekable: bool) { self.0.clock(seekable); }
@@ -577,6 +577,9 @@ macro_rules! module {
             }
             fn sync(&mut self, world: &$crate::exact_game::World, generation: u64, playing: bool, seekable: bool) {
                 self.0.sync(world, generation, playing, seekable);
+            }
+            fn sync_sim<G: $crate::exact_game::Game>(&mut self, sim: &$crate::exact_game::Sim<G>, playing: bool, seekable: bool) {
+                self.0.sync(sim, sim.generation(), playing, seekable);
             }
             fn before_restore(&mut self, world: &$crate::exact_game::World, mode: $crate::exact_gpu::Restore) {
                 self.1 = if mode == $crate::exact_gpu::Restore::Carry { world.try_resource::<$crate::exact_game::audio::Sounds>().map(|s| s.clone()) } else { None };
@@ -621,13 +624,14 @@ macro_rules! module {
             <$game as $crate::exact_game::Game>::NAME,
             <<$game as $crate::exact_game::Game>::Args as $crate::exact_game::Args>::FIELDS,
         );
+        /// The game's tuning table names as a JSON list when `text` is empty, else `text` once it validates as its tables.
         #[cfg(target_arch = "wasm32")]
-        #[wasm_bindgen::prelude::wasm_bindgen]
-        pub fn exact_game_tables(text: &str) -> Result<String, wasm_bindgen::JsValue> {
+        #[::wasm_bindgen::prelude::wasm_bindgen]
+        pub fn exact_game_tables(text: &str) -> Result<String, ::wasm_bindgen::JsValue> {
             if text.is_empty() {
-                return $crate::exact_game::json::to_string(&<$game as $crate::exact_game::Game>::TABLES.iter().map(|t| t.name.to_owned()).collect::<Vec<_>>()).map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()));
+                return $crate::exact_game::json::to_string(&<$game as $crate::exact_game::Game>::TABLES.iter().map(|t| t.name.to_owned()).collect::<Vec<_>>()).map_err(|e| ::wasm_bindgen::JsValue::from_str(&e.to_string()));
             }
-            $crate::exact_game::asset::validate_tables::<$game>(text).map_err(|e| wasm_bindgen::JsValue::from_str(&e.to_string()))?;
+            $crate::exact_game::asset::validate_tables::<$game>(text).map_err(|e| ::wasm_bindgen::JsValue::from_str(&e.to_string()))?;
             Ok(text.into())
         }
     };

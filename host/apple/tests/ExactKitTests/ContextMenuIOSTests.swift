@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// LLP 1021 §5.1 on UIKit: a node naming a popover with `contextPopover` is
 /// a UIContextMenuInteraction. The node lifts as its own targeted preview,

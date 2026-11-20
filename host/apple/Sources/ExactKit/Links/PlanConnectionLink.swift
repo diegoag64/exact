@@ -54,3 +54,23 @@ package enum PlanConnectionLink {
     package static var open: ((ExactApp, String) -> (any PlanConnection)?)?
     #endif
 }
+
+extension ExactApp {
+    /// A fact the build channel reports moved (LLP 1122 D4): its status is
+    /// owed. The channel (BuildChannel.swift) is development's alone (LLP
+    /// 1047.001 D6), so a production build compiles neither it nor its
+    /// report, and here does nothing.
+    func buildFactsMoved() {
+        #if EXACT_INSPECT
+        scheduleStatus()
+        #endif
+    }
+
+    /// A session booted: the build channel's design, pin and report follow
+    /// it; in production, nothing does.
+    func buildSessionBooted(_ session: ExactSession) {
+        #if EXACT_INSPECT
+        liveBooted(session)
+        #endif
+    }
+}

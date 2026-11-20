@@ -34,7 +34,8 @@ impl<D: DataSource> Runner<D> {
                 // About to be frozen: a sequence stops in this commit, once it
                 // stands, and the commit carries its ends to the output (LLP 1125 D4).
                 let result = if page.frozen && !previous.frozen && !r.plan.sequences.is_empty() {
-                    r.transport.suspend = true;
+                    let audio = r.seams.audio;
+                    audio.suspend(r, true);
                     r.commit_again(readers, "page").map(Some)
                 } else {
                     r.recommit(readers, "page")
@@ -42,7 +43,8 @@ impl<D: DataSource> Runner<D> {
                 // The stop is the standing commit's (a recovery commit after
                 // owed reads included); a call that failed as a whole made none.
                 if result.is_err() {
-                    r.transport.suspend = false;
+                    let audio = r.seams.audio;
+                    audio.suspend(r, false);
                 } else if previous.in_background() != page.in_background() {
                     r.samples_visibility(page.in_background());
                     r.tell_foreground();
@@ -156,6 +158,10 @@ impl<D: DataSource> Runner<D> {
         let mut fields = Vec::with_capacity(ty.fields.len as usize);
         for f in ty.fields.iter() {
             let name = self.plan.str(self.plan.field(f).name);
+            if name == "platform" {
+                fields.push(Value::str(self.platform.name()));
+                continue;
+            }
             // `window.name`, the session's for its life (LLP 1030.004 D2).
             if name == "name" {
                 fields.push(Value::str(&self.window_name));

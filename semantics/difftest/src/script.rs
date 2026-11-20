@@ -346,9 +346,11 @@ fn deliver(step: &Step) -> Result<Option<Item>, String> {
         Step::ExpectWakelock { .. } => Item::Observe(step.span()),
         // A control's `disabled` and the focus are read from the host's tree (LLP 1116.010 D3), and a box from its
         // layout, which Lean has no model of.
-        Step::ExpectDisabled { .. } | Step::ExpectFocused { .. } | Step::ExpectLayout { .. } => {
-            Item::Observe(step.span())
-        }
+        Step::ExpectDisabled { .. }
+        | Step::ExpectFocused { .. }
+        | Step::ExpectLayout { .. }
+        | Step::ExpectSample { .. }
+        | Step::ExpectScreenshot { .. } => Item::Observe(step.span()),
         // The media session is the host's (LLP 1098 D12): an assertion on
         // it has no oracle, and a test that only asserts it still runs.
         // Its `tap` form is not a press, so it reaches `other` and the
@@ -395,6 +397,8 @@ fn delivered_kind(kind: &str) -> bool {
             | "ExpectDisabled"
             | "ExpectFocused"
             | "ExpectLayout"
+            | "ExpectSample"
+            | "ExpectScreenshot"
             | "ExpectMediaSession"
             | "ExpectMediaSessionAction"
     )

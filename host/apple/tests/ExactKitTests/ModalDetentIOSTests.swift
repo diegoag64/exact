@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// LLP 1075.003 §9.11: `navigationDetent`'s words as UIKit detents,
 /// `fit-content` resolving to the route's content height within the sheet's

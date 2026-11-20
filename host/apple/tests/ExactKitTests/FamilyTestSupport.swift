@@ -1,7 +1,16 @@
 @testable import ExactKit
+@testable import ExactNavigation
+@testable import ExactDialogs
 @testable import ExactControls
+@testable import ExactPickers
+@testable import ExactWebViews
 @testable import ExactImages
 @testable import ExactCollections
+#if os(macOS)
+@testable import ExactContentRegions
+#else
+@testable import ExactTextSelection
+#endif
 
 // The built-in family implementations behind the core's link slots (LLP 1047.001 D10), for tests that read their internals.
 
@@ -15,6 +24,13 @@ extension Presenter {
     /// The built-in windowed lists (`ListLink.make`'s default).
     var listHost: CollectionHost { collections as! CollectionHost }
 }
+
+#if os(iOS)
+extension Presenter {
+    /// The text selection `ExactTextSelection.install()` puts in `TextSelectionLink.make`.
+    var selectionHost: TextSelectionHost { textSelection as! TextSelectionHost }
+}
+#endif
 
 #if os(iOS) || os(tvOS)
 extension Presenter {
@@ -31,7 +47,7 @@ extension Presenter {
 
 #if os(macOS)
 extension ExactSession {
-    /// The built-in content regions (`ContentRegionLink.make`'s default).
+    /// The region controller `ExactContentRegions.install()` puts in `ContentRegionLink.make`.
     var regionHost: RegionController { regions as! RegionController }
 }
 #endif
@@ -42,7 +58,7 @@ extension ExactSession {
 }
 
 extension ExactSession {
-    /// The built-in pickers (`PickerLink.make`'s default).
+    /// The pickers `ExactPickers.install()` makes.
     var pickerHost: Picker { picker as! Picker }
 }
 
@@ -55,7 +71,7 @@ extension Presenter {
 
 #if os(iOS) || os(tvOS)
 extension Presenter {
-    /// The built-in dialog sheets (`DialogLink.make`'s default).
+    /// The dialog sheets `ExactDialogs` installs.
     var dialogHost: DialogSheets { dialogs as! DialogSheets }
 }
 #endif

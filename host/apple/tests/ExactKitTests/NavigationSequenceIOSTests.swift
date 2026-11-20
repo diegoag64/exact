@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// UIKit's stacks are the state the router follows (LLP 1075.003 §3.7): a
 /// transition started by UIKit or the app, a second step made in the same

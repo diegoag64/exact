@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactHeavyLeaves
 @testable import ExactImages
 @testable import ExactCollections
 @testable import ExactNativeViews

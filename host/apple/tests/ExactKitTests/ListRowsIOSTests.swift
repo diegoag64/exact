@@ -3,6 +3,7 @@ import ExactCore
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 @testable import ExactControls
 @testable import ExactCollections
 

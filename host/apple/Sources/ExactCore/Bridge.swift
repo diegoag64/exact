@@ -177,6 +177,7 @@ package final class Runtime {
     package let completions = RuntimeDoor()
     package var topLayer: (() -> TopLayerGeometry)?
     package var inlineFrame: ((UInt32) -> CGRect?)?
+    package var scrollMetrics: ((UInt32) -> [Double]?)?
     package var rangeFrame: ((UInt32, UInt32, UInt32) -> CGRect?)?
     #if DEBUG
     // Per-runtime observation for differential tests of actual session traffic.
@@ -367,21 +368,6 @@ package final class Runtime {
         return data.count
     }
     /// Boot the plan baked into the library under a viewport; the first batch.
-    /// The display's scale and memory for Canvas 2D (LLP 1056 D4).
-    package func canvasDisplay(scale: CGFloat, memory: UInt64) -> Batch { on(layout: true) { read(exact_canvas_display(rt, Double(scale), Double(memory))) } }
-    /// A Canvas 2D image handle decoded (its size in pixels) or not (LLP 1056 D9).
-    package func canvasImage(_ src: String, width: Int, height: Int, ok: Bool) -> Batch {
-        return on {
-            let n = write(src)
-            return read(exact_canvas_image(rt, n, UInt32(max(0, width)), UInt32(max(0, height)), ok ? 1 : 0))
-        }
-    }
-    /// The presenter let a decoded Canvas 2D image handle go (LLP 1056 D9).
-    package func canvasImageReleased(_ src: String) { on { exact_canvas_image_released(rt, write(src)) } }
-    /// A 2D canvas's replay is behind or caught up (LLP 1056 D5).
-    package func canvasHeld(_ view: UInt32, _ held: Bool) { on { exact_canvas_held(rt, view, held ? 1 : 0) } }
-    /// The Canvas 2D text measurer (LLP 1056 D8), with the measurer's context.
-    package func setCanvasText(_ measure: ExactCanvasTextFn?) { on { exact_set_canvas_text(rt, measure) } }
     package func boot(width: CGFloat, height: CGFloat) -> Batch { islands(on { replaced(read(exact_boot(rt, Float(width), Float(height)))) }) }
     /// Whether the data source's activation evaluates a TypeScript module on
     /// the owner, which the presenter then posts from the first draw's own
@@ -487,14 +473,6 @@ package final class Runtime {
         }
     }
     package func requestActive(_ ticket: UInt64) -> Bool { on(busy: false) { exact_request_active(rt, ticket) != 0 } }
-    /// The replay queue waits here: copying and marking share the runtime owner's
-    /// turn, so unmount cannot retire the job between them. Encoding runs afterward.
-    package func snapshotCanvas(_ ticket: UInt64, copy: () -> Bool) -> Bool {
-        on(busy: false) {
-            guard exact_request_active(rt, ticket) != 0, copy() else { return false }
-            return exact_canvas_snapshotted(rt, ticket) != 0
-        }
-    }
     package func fulfillSurface(_ ticket: UInt64, kind: UInt32, body: Data = Data(), now: Double) -> Batch {
         return on {
             let n = write(body)
@@ -661,12 +639,6 @@ package final class Runtime {
     }
     /// Count each plan site's work for `perf` from now, if not yet (LLP 1079 D1).
     package func measureWork() { on { _ = exact_measure_work(rt) } }
-    /// Canvas draws in a turn of their own (LLP 1072 §8.5).
-    package func canvasDefer(_ deferred: Bool) { on { exact_canvas_defer(rt, deferred ? 1 : 0) } }
-    /// The owed canvas draws on the owner, not waited for (LLP 1072 §8.5).
-    package func canvasDrawAsync(done: @escaping (RuntimeCompletion) -> Void) {
-        post(done: done) { [self] _ in read(exact_canvas_draw(rt)) }
-    }
     /// `calls`, in order, on the owner and not waited for: each batch goes to
     /// `done` there (LLP 1027.007 P1).
     package func later(_ calls: [(Runtime) -> Batch], done: @escaping (RuntimeCompletion) -> Void) {
@@ -735,12 +707,6 @@ package final class Runtime {
             let n = write(name + (json.map { "\0" + $0 } ?? ""))
             return read(exact_surface_record(rt, n))
         }
-    }
-    package func canvasPerformanceRequested(_ name: String) -> Bool {
-        on(busy: false) { exact_canvas_performance_requested(rt, write(name)) != 0 }
-    }
-    package func canvasPerformanceRecord(_ name: String, _ json: String?) -> Batch {
-        on { read(exact_canvas_performance_record(rt, write(name + (json.map { "\0" + $0 } ?? "")))) }
     }
     package func message(_ view: UInt32, _ value: String, now: Double) -> Batch {
         return on {
@@ -1117,13 +1083,6 @@ package final class Runtime {
     package func textReady(index: UInt32, generation: UInt32, revision: UInt64) -> Batch {
         return on(layout: true) {
             read(exact_text_ready(rt, index, generation, revision))
-        }
-    }
-    package func regionRequest(_ id: UInt64, knownSource: UInt64) -> [String: Any]? {
-        return on(busy: nil) {
-            let length = exact_region_request(rt, id, knownSource)
-            let data = Data(bytes: exact_out(rt), count: Int(length))
-            return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         }
     }
 

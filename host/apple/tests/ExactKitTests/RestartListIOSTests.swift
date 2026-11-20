@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// A restart (a dev loop's generation reloading a running app, `presentCommitted`) over a route whose native bar covers
 /// a virtualized list: the presenter's reset clears the old tree's covers, and that report must not reach the runtime

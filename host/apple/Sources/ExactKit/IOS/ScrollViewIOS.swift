@@ -94,11 +94,17 @@ package class ScrollView: UIScrollView {
     /// tab bar's inset reaches a grid after it opened at its newest row
     /// (r25's photos, at launch and as a viewer closes), and kept, the
     /// offset left that row under the bar.
+    /// The kept insets move once Exact's own writes to a controller above settle (LLP 1123 D11), so
+    /// the list compares the insets from before the writes with the settled ones, not a step's.
     package override func adjustedContentInsetDidChange() {
-        let was = keptInset
-        keptInset = adjustedContentInset
         super.adjustedContentInsetDidChange()
         setNeedsLayout()
+        SafeAreaSteps.react(self) { [weak self] in self?.insetsSettled() }
+    }
+
+    private func insetsSettled() {
+        let was = keptInset
+        keptInset = adjustedContentInset
         // the port is a `scroll` event's (`clientHeight`): one that changes without moving
         // the offset gets no `scrollViewDidScroll`, so its event is sent from here.
         (superview as? NodeView)?.queueScrollEvent()
@@ -110,7 +116,10 @@ package class ScrollView: UIScrollView {
         contentOffset = PixelGrid.offset(CGPoint(x: contentOffset.x, y: end(keptInset)), in: self)
     }
     package override var accessibilityElements: [Any]? {
-        get { super.accessibilityElements ?? NodeView.emptyBoxAccessibility(in: self) }
+        get {
+            super.accessibilityElements ?? scrollingNode?.presenter?.navigation.lifted?.accessibilityElements(of: self)
+                ?? NodeView.emptyBoxAccessibility(in: self)
+        }
         set { super.accessibilityElements = newValue }
     }
     package override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
@@ -345,7 +354,7 @@ extension Presenter {
     /// scrollers laid out. No batch's `restoreScrollPositions` need follow when the covers change nothing, and one
     /// that came later would write a position over the reader's scroll made meanwhile by any means, VoiceOver's or
     /// the keyboard's among them.
-    func writeCarriedScrolls() {
+    package func writeCarriedScrolls() {
         let carried = pendingScrolls.filter { views[$0].map { $0.extras?.pendingScrollTransfer == true && $0.hasScrollLayoutBox } ?? false }
         guard !carried.isEmpty else { return }
         for id in carried where views[id]?.groupedOwner == true { views[id]?.scrollView?.layoutIfNeeded() }
@@ -400,12 +409,15 @@ extension NodeView {
 
     /// Whether a scroll newer than a position Exact carries is under way on `sv`: one the scroll view makes itself
     /// (`scrollsItself`), an element reveal, or a list's smooth correction
-    func scrollUnderWay(_ sv: UIScrollView) -> Bool {
+    package func scrollUnderWay(_ sv: UIScrollView) -> Bool {
         sv.scrollsItself || presenter?.elementScrolls.revealing(sv) != nil || presenter?.collections.animating.contains(id) == true
     }
 
-    /// A replacement keeps the logical offset; an authored write takes priority.
-    func retainScrollPosition(from view: UIScrollView) {
+    /// A replacement keeps the logical offset; an authored write takes priority. A position saved while the scroller had
+    /// no port (`hiddenScroll`) is already the reader's, and `applyPendingScroll` restores it into whichever scroll view
+    /// the node has then: nothing is carried over it.
+    package func retainScrollPosition(from view: UIScrollView) {
+        guard hiddenScroll == nil else { return }
         let authored = extras?.pendingScrollTransfer != true && (pendingScrollTop != nil || pendingScrollLeft != nil)
         if pendingScrollTop == nil { pendingScrollTop = Double(view.contentOffset.y + scrollTopInset(view)) }
         if pendingScrollLeft == nil { pendingScrollLeft = Double(view.contentOffset.x) }

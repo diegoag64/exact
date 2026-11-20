@@ -183,6 +183,24 @@ export function viewBox(el) {
   return stretch ? new DOMRect(left, t.y, right - left, t.height) : t;
 }
 
+// An empty inline block's bottom margin edge is its CSS baseline. Put it in
+// the first text run's line box so mixed font sizes and line heights are included.
+export function textBaseline(el) {
+  const text = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  for (let node; (node = text.nextNode());) {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    if (![...range.getClientRects()].some(r => r.width && r.height)) continue;
+    const parent = node.parentElement;
+    if (!parent || /flex|grid/.test(getComputedStyle(parent).display)) return undefined;
+    const marker = document.createElement('span');
+    marker.style.cssText = 'all: initial !important; display: inline-block !important; width: 0 !important; height: 0 !important; overflow: hidden !important; vertical-align: baseline !important';
+    parent.insertBefore(marker, node);
+    try { return Math.round(marker.getBoundingClientRect().bottom * 100) / 100; }
+    finally { marker.remove(); }
+  }
+}
+
 // How far a scroller's offset travels on each axis from one end to the other (LLP 1012 `rx`/`ry`), whether or not the
 // person can scroll it that way: `overflow: hidden` keeps a programmatic range.
 export function scrollRange(el) {

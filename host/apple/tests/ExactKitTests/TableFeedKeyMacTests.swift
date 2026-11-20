@@ -9,6 +9,7 @@
 import AppKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 final class TableFeedKeyMacTests: XCTestCase {
     private var fixture: TableFixture?

@@ -4,6 +4,7 @@ import WebKit
 import XCTest
 @testable import ExactKit
 @testable import ExactNativeViews
+@testable import ExactWebViews
 
 /// LLP 1075.003.000 Stage 1 over the native fixture: a node marked
 /// `hatch="badge"` — a leaf box that would otherwise be drawn flat into its

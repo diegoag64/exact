@@ -230,6 +230,10 @@ pub(crate) fn empty_fresh_tree(app_id: &str) -> Result<(), DataError> {
         }
         _ => {}
     }
+    let kv = ibex2::kv::FileStore::new(tree.join("kv"));
+    exact_data::storage::seed_persisted(|name, value| {
+        ibex2::kv::KvStore::set(&kv, exact_data::storage::PERSISTED_SCOPE, name, value)
+    })?;
     emptied.push(tree);
     Ok(())
 }
@@ -621,7 +625,7 @@ pub fn cold_share(seed: f64) -> Option<(String, exact_runner::time::Launch)> {
     use exact_runner::share_in::{Claims, Pending, ShareTarget};
     let (variable, value) = match std::env::var("EXACT_SHARE") {
         Ok(value) if cfg!(target_os = "android") => ("EXACT_SHARE", value),
-        _ if agent() => (
+        _ if exact_runner::agent::carried() => (
             "EXACT_AGENT_SHARE",
             std::env::var("EXACT_AGENT_SHARE").ok()?,
         ),

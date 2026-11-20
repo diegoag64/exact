@@ -217,6 +217,43 @@ impl Backend for Keeps {
 }
 
 #[test]
+fn desktop_scrollbars_keep_rows_whose_content_fits() {
+    let source = r##"component App
+  view
+    column width=320 height=240 overflow-y="auto"
+      column width=240 height=80 overflow-y="auto" flex-shrink=0 background-color="#ffffff"
+        box height=40 flex-shrink=0
+      box height=450 flex-shrink=0
+"##;
+    let (mut p, error) = Presenter::boot_with_fixture_fonts(
+        &crate::test_plan(source),
+        (),
+        (320., 240.),
+        1.,
+        PathBuf::new(),
+        PainterChoice::Cpu,
+    )
+    .unwrap();
+    assert!(error.is_none(), "{error:?}");
+    let heard = Rc::new(RefCell::new(Heard::default()));
+    p.brush.replace_backend(Box::new(Keeps {
+        heard: heard.clone(),
+        row: 0,
+    }));
+    p.set_scrollbars(false);
+    p.frame();
+    let expected: Vec<_> = heard.borrow().begun.iter().map(|&(id, _)| id).collect();
+    assert_eq!(expected.len(), 2);
+    heard.borrow_mut().begun.clear();
+    heard.borrow_mut().drawn.clear();
+    p.repaint();
+    p.frame();
+    let heard = heard.borrow();
+    assert!(heard.begun.is_empty(), "{:?}", heard.begun);
+    assert_eq!(heard.drawn, expected);
+}
+
+#[test]
 fn a_row_includes_a_removed_branches_paint_bounds() {
     let source = stage::tests::SHRINKING_PANELS
         .replace("EFFECT", "overflow=\"scroll\"")

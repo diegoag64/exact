@@ -24,6 +24,9 @@ import ExactSurfaces
 #if EXACT_LINK_DRAG
 import ExactDrag
 #endif
+#if EXACT_LINK_PICKER
+import ExactPickers
+#endif
 #if EXACT_LINK_MEDIA_PICKER
 import ExactMediaPicker
 #endif
@@ -75,6 +78,51 @@ import ExactWakeCarriers
 #if EXACT_LINK_GRADIENTS
 import ExactGradients
 #endif
+#if EXACT_LINK_TRACES
+import ExactTraces
+#endif
+#if EXACT_LINK_WAKE_LOCK
+import ExactWakeLock
+#endif
+#if EXACT_LINK_CONTENT_REGIONS
+import ExactContentRegions
+#endif
+#if EXACT_LINK_VIDEO
+import ExactVideo
+#endif
+#if EXACT_LINK_WEB_VIEWS
+import ExactWebViews
+#endif
+#if EXACT_LINK_SOUND
+import ExactSound
+#endif
+#if EXACT_LINK_MIDI
+import ExactMIDI
+#endif
+#if EXACT_LINK_ANIMATIONS
+import ExactAnimations
+#endif
+#if EXACT_LINK_NAVIGATION
+import ExactNavigation
+#endif
+#if EXACT_LINK_TEXT_SELECTION
+import ExactTextSelection
+#endif
+#if EXACT_LINK_WIDGETS
+import ExactWidgetPublication
+#endif
+#if EXACT_LINK_TOOLS
+import ExactToolDoor
+#endif
+#if EXACT_LINK_CONTENT_INDEX
+import ExactIndexMirror
+#endif
+#if EXACT_LINK_DIALOGS
+import ExactDialogs
+#endif
+#if EXACT_LINK_SHARE
+import ExactSharing
+#endif
 public enum ExactComposition {
     public static let app: ExactApp = {
         AgentLink.install()
@@ -108,6 +156,9 @@ public enum ExactComposition {
         #endif
         #if EXACT_LINK_DRAG
         ExactDrag.install()
+        #endif
+        #if EXACT_LINK_PICKER
+        ExactPickers.install()
         #endif
         #if EXACT_LINK_MEDIA_PICKER
         ExactMediaPicker.install()
@@ -159,6 +210,51 @@ public enum ExactComposition {
         #endif
         #if EXACT_LINK_GRADIENTS
         ExactGradients.install()
+        #endif
+        #if EXACT_LINK_TRACES
+        ExactTraces.install()
+        #endif
+        #if EXACT_LINK_WAKE_LOCK
+        ExactWakeLock.install()
+        #endif
+        #if EXACT_LINK_CONTENT_REGIONS
+        ExactContentRegions.install()
+        #endif
+        #if EXACT_LINK_VIDEO
+        ExactVideo.install()
+        #endif
+        #if EXACT_LINK_WEB_VIEWS
+        ExactWebViews.install()
+        #endif
+        #if EXACT_LINK_SOUND
+        ExactSound.install()
+        #endif
+        #if EXACT_LINK_MIDI
+        ExactMIDI.install()
+        #endif
+        #if EXACT_LINK_ANIMATIONS
+        ExactAnimations.install()
+        #endif
+        #if EXACT_LINK_NAVIGATION
+        ExactNavigation.install()
+        #endif
+        #if EXACT_LINK_TEXT_SELECTION
+        ExactTextSelection.install()
+        #endif
+        #if EXACT_LINK_WIDGETS
+        ExactWidgetPublication.install()
+        #endif
+        #if EXACT_LINK_TOOLS
+        ExactToolDoor.install()
+        #endif
+        #if EXACT_LINK_CONTENT_INDEX
+        ExactIndexMirror.install()
+        #endif
+        #if EXACT_LINK_DIALOGS
+        ExactDialogs.install()
+        #endif
+        #if EXACT_LINK_SHARE
+        ExactSharing.install()
         #endif
     }
 }

@@ -3,6 +3,7 @@ import UIKit
 import CExact
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 final class CoverBootIOSTests: XCTestCase {
     func testTheCoverRootUsesTheWholeViewInItsFirstSettlement() throws {

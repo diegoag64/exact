@@ -3,6 +3,7 @@ import UIKit
 import XCTest
 import ExactGroupedLists
 @testable import ExactKit
+@testable import ExactNavigation
 
 final class ProgressContextsIOSTests: XCTestCase {
     private var session: ExactSession?

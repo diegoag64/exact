@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 @testable import ExactCollections
 
 /// LLP 1070.000 §2.5 under UIKit: an input counts against the request under

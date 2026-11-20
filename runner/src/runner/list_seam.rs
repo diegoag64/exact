@@ -257,8 +257,7 @@ impl<D: DataSource> Runner<D> {
             return None;
         }
         let mut ids = Ids::default();
-        let mut u = Update::new(self.env(&[], &[]), &self.sites, &mut ids);
-        u.fonts = Some(self.fonts.clone());
+        let mut u = self.instance_update(&mut ids);
         let tree = self.tree.as_ref()?;
         self.seams
             .lists
@@ -288,8 +287,7 @@ impl<D: DataSource> Runner<D> {
             return Vec::new();
         }
         let mut ids = Ids::default();
-        let mut u = Update::new(self.env(&[], &[]), &self.sites, &mut ids);
-        u.fonts = Some(self.fonts.clone());
+        let mut u = self.instance_update(&mut ids);
         match &self.tree {
             Some(tree) => self.seams.lists.collection_snap_areas(
                 tree,
@@ -325,8 +323,7 @@ impl<D: DataSource> Runner<D> {
             return None;
         }
         let mut ids = Ids::default();
-        let mut u = Update::new(self.env(&[], &[]), &self.sites, &mut ids);
-        u.fonts = Some(self.fonts.clone());
+        let mut u = self.instance_update(&mut ids);
         let tree = self.tree.as_ref()?;
         self.seams.lists.collection_snap_stop(
             tree,
@@ -355,8 +352,7 @@ impl<D: DataSource> Runner<D> {
             return Err(RunnerError::Poisoned);
         }
         let mut ids = Ids::default();
-        let mut u = Update::new(self.env(&[], &[]), &self.sites, &mut ids);
-        u.fonts = Some(self.fonts.clone());
+        let mut u = self.instance_update(&mut ids);
         let tree = self.tree.as_ref().expect("booted");
         Ok(self
             .seams
@@ -482,8 +478,7 @@ impl<D: DataSource> Runner<D> {
             let cell_margins = |view| super::render::cell_margins(&self.kernel, view);
             let scroll_margin = |view| super::render::scroll_margin(&self.kernel, view);
             let scroll_padding = |view| super::render::scroll_padding(&self.kernel, view);
-            let mut update = Update::new(self.env(&[], &[]), &self.sites, &mut ids);
-            update.fonts = Some(self.fonts.clone());
+            let mut update = self.instance_update(&mut ids);
             update.reuse = self.reuse;
             update.scroll_padding = Some(&scroll_padding);
             update.scroll_margin = Some(&scroll_margin);
@@ -583,8 +578,7 @@ impl<D: DataSource> Runner<D> {
         let mut tree = self.tree.take().expect("booted");
         let mut ids = std::mem::take(&mut self.ids);
         let shown = {
-            let mut update = Update::new(self.env(&[], &[]), &self.sites, &mut ids);
-            update.fonts = Some(self.fonts.clone());
+            let mut update = self.instance_update(&mut ids);
             (self.seams.lists).show_collection(&mut tree, &mut update, view, offset);
             update.shown
         };

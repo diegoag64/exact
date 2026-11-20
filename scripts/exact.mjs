@@ -56,7 +56,7 @@ import { builtContract, contractTool, launch, toolEnv } from './tools.mjs';
 export { grantAdvice, grantLines } from './grant-advice.mjs';
 const { cargoEnvironment, appleExecutableName, HERMES_INSTALLER, hermesBundle, hermesTarget, pathFrom, readManifest, resolveApp, WEB_TOOLCHAIN, webToolchainEnv } = await import('./app.mjs');
 const { applyPattern, createApp, createGame, patternList, rustApp, UNCACHED_CRATES, wireSnapback } = await import('../game/new.mjs');
-const { gameDefaults, sdkFetch } = await import('../game/app/shells.mjs');
+const { gameDefaults, prepareContractGame, sdkFetch } = await import('../game/app/shells.mjs');
 const { HOST_SDKS, HOST_SWIFT, appleSdkName, developerDir, xcodeRefusal } = await import('../host/apple/devices.mjs');
 const { appleArtifacts, assertAppleIdentity } = await import('../host/apple/build.mjs');
 const { closeFilesystemReader } = await import('./filesystem.mjs');
@@ -67,6 +67,7 @@ const { chromium } = await import('./agent-launch.mjs');
 const { androidLockCommand, usesHermes, crateManifest, androidSdk, androidSdkPackages, androidSdkFix, androidJavaEnv, androidJavaFix, androidJavaRisk, androidToolchainEnv } = await import('./agent-android.mjs');
 const { hermesAndroidBundle } = await import('./hermes-android.mjs');
 const { guardFlags, helpText } = await import('./help.mjs');
+const { contractHelpRequested, lockApp } = await import('./app-cli.mjs');
 const { backendOrigin, literalBackendOrigin } = await import('../js/bake/src/typescript.mjs');
 // Snapback's client (snapback4/) is optional: a checkout without it builds every app that does not mount it.
 const snapbackDevice = existsSync(new URL('../snapback4/web/device-build.mjs', import.meta.url)) ? await import('../snapback4/web/device-build.mjs') : null;
@@ -658,7 +659,7 @@ export async function contract(args, env = process.env) {
   // (`--stdin`), whose types no file holds, neither refreshes them nor type-checks app.ts.
   const input = args[0] === 'build' && !args.includes('--stdin') ? args.slice(1).find((arg, i, rest) => !arg.startsWith('-') && rest[i - 1] !== '-o') : null;
   const cargo = compilerCargo('run', env), tool = await contractTool({ cmd: 'cargo', pre: [...cargo.args, '--'], env: cargo.env }, { env, json, file: input ?? '' });
-  if (!tool) return 1;
+  if (!tool || !prepareContractGame(args)) return 1;
   const result = spawnSync(tool.cmd, [...tool.pre, ...args], {stdio: ['inherit', json ? 'pipe' : 'inherit', 'inherit'], env: tool.env, encoding: 'utf8', maxBuffer: 1 << 26});
   if (result.error) throw new Error(`${tool.cmd}: ${result.error.message}${tool.cmd === 'cargo' ? ' (install rustup from https://rustup.rs)' : ''}`);
   // Cargo's own failures exit 101; one that is not rustup's refuses `+<pin>` before the compiler runs.
@@ -801,7 +802,7 @@ async function newApp(path, {update = false, without = null, with: platforms = [
   // app-cli's note on the GPU module; the app stands either way, so a failure says what to run.
   if (rust) {
     try {
-      const said = (await (await import('./app-cli.mjs')).lockApp(resolve(path))).split('\n');
+      const said = (await lockApp(resolve(path))).split('\n');
       console.log([said[0], ...said.slice(1).filter(line => line.startsWith('The GPU module'))].join('\n'));
     } catch (error) {
       console.log(`\nThe app is made, but its Cargo.lock could not be resolved: ${error.message}\nRun bun exact.mjs lock in it once Cargo can fetch.`);
@@ -1284,7 +1285,7 @@ const TOPICS = {
   deploy: 'Recipe: porting an app, a release build, splitting the work',
   accessibility: 'Native views: accessibility', strings: 'Recipe: app.json, assets and modules',
   list: 'Recipe: list rows: search, swipe, filter and long-press', midi: 'MIDI: `exactMIDI`, `sendMIDI`, `midimessage`',
-  'sign-in provider': 'Sign-in providers (`@exact/oauth`)',
+  'sign-in provider': 'Sign-in providers (`@exact/oauth`)', transition: 'Recipe: motion', storage: 'Recipe: files, SQLite and grants',
 };
 
 const STOP = new Set(['a', 'an', 'and', 'by', 'for', 'in', 'it', 'its', 'of', 'on', 'or', 'the', 'to', 'you']);
@@ -1393,8 +1394,7 @@ async function main(argv) {
     return setup({check:flags.includes('--check'), platform, device:flags.includes('--device')});
   }
   if (verb === 'list') return list();
-  // The compiler parses its own flags; its help is printed here, so asking compiles nothing (LLP 1116 D4).
-  if (verb === 'contract') return process.exit(argv.includes('--help') || argv.includes('-h') ? (console.log(helpText('contract')), 0) : await contract(argv.slice(1)));
+  if (verb === 'contract') return process.exit(contractHelpRequested(argv.slice(1)) ? (console.log(helpText('contract')), 0) : await contract(argv.slice(1)));
   // An app's design on its own (LLP 1121 D2): the compiler's `forma` verbs.
   if (verb === 'forma' && (argv.includes('--help') || argv.includes('-h'))) return console.log(helpText('forma'));
   // The design server's wire and its scripted client (LLP 1121 D13): development only.

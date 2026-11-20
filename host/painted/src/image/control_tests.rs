@@ -592,6 +592,30 @@ fn resize_buckets_and_invalid_source_cancel_without_discarding_accepted_pixels()
 }
 
 #[test]
+fn an_inline_image_loads_at_the_data_url_limit_and_keeps_its_pixels_above_it() {
+    use base64::Engine;
+    let png = base64::engine::general_purpose::STANDARD.encode(encoded(2, 3, [42, 80, 90, 255]));
+    let mut url = format!("data:image/png;base64,{png}");
+    url.extend(std::iter::repeat_n(
+        ' ',
+        exact_raster::MAX_DATA_URL_BYTES - url.len(),
+    ));
+
+    let mut k = kernel(1);
+    source(&mut k, 1, &url);
+    let mut images = Images::with_assets(Assets::embedded(PathBuf::new()));
+    images.sync(&k, &k.roots());
+    images.wait(SETTLED);
+    let bitmap = images.bitmaps[&1].clone();
+    assert_eq!(bitmap.natural(), (2, 3));
+    url.push(' ');
+    source(&mut k, 1, &url);
+    images.sync(&k, &k.roots());
+    assert_eq!(images.views[&1].refusal, Some(Refusal::DecodeFailed));
+    assert!(Arc::ptr_eq(&bitmap, &images.bitmaps[&1]));
+}
+
+#[test]
 fn pinned_old_allocation_causes_downsize_and_real_visible_progress() {
     let bytes = encoded(2048, 2048, [71, 80, 90, 255]);
     let mut images = Images::with_assets(Assets::selected(
@@ -914,6 +938,38 @@ fn a_covering_box_holds_the_part_it_shows() {
     );
     let stats = images.stats();
     assert_eq!(stats.resident_bytes, (104 * 200 + 204 * 200) * 4);
+}
+
+#[test]
+fn a_shared_covering_image_keeps_pixels_outside_its_own_box() {
+    let mut k = kernel(2);
+    for id in [1, 2] {
+        boxed(&mut k, id, 100., 100., exact_kernel::ObjectFit::Cover);
+    }
+    let name = |k: &mut Kernel, id| {
+        k.apply(
+            0,
+            k.epoch() + 1,
+            &[Op::SetProp {
+                id,
+                prop: PropId::SharedElement,
+                value: "picture".into(),
+            }],
+        )
+        .unwrap();
+    };
+    name(&mut k, 1);
+    let mut images = Images::with_assets(photo_assets());
+    images.sync(&k, &k.roots());
+    images.wait(SETTLED);
+    let destination = (0., 0., 200., 100.);
+    assert_eq!(images.bitmaps[&1].placed(destination), destination);
+    assert!(!images.bitmaps[&2].crop().whole());
+
+    name(&mut k, 2);
+    images.sync(&k, &k.roots());
+    images.wait(SETTLED);
+    assert_eq!(images.bitmaps[&2].placed(destination), destination);
 }
 
 /// A picture that is contained is decoded whole, and a box that would clip

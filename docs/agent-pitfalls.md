@@ -479,11 +479,18 @@ This list holds what the [agent guide](contract-for-agents.md)'s rules don't mak
   record the simulator (`xcrun simctl io booted recordVideo`) and read its frames.
 
 - **A cold launch flashes the wrong colour, and no screenshot shows it.** The launch
-  screen is `host.ios.launchImage` centred on `background_color` (`color_scheme_dark`'s
-  `background_color` in dark mode); unset, the platform's background (the grouped grey
-  under a first route that scrolls a grouped list). Android's launch window takes the same
-  two colours, with the launcher icon on them from Android 12 unless
-  `host.android.launchImage` names a picture or `false`. It is gone before a screenshot
+  screen is `host.ios.launchImage` centred on the launch colour, which a top-level
+  `background_color` names in every scheme, so a lone `"#ffffff"` launches white in dark
+  mode too; `color_scheme_light` or `color_scheme_dark` names one scheme's alone. Unnamed,
+  it is on iOS the app's own background where the build can read it, every route agrees (a
+  colour or a theme's colour on each route, else the root) and nothing may paint over it to
+  the screen's edges, else the platform's (the grouped grey where every route scrolls a
+  grouped list or writes `-exact-grouped-background`), and on Android and the web their own
+  page, as a native app's: name none unless the launch must differ, as it may on Android and
+  the web for an app with a background of its own, or on iOS where a launch recording shows
+  another colour.
+  Android's launch window takes the same colours, with the launcher icon on them from
+  Android 12 unless `host.android.launchImage` names a picture or `false`. It is gone before a screenshot
   can be taken: record one (`xcrun simctl io <udid> recordVideo launch.mp4`, then `simctl
   launch`; `adb shell screenrecord` on Android) and read its frames (the euxy port's white
   launch, 2026-10-21).
@@ -2058,7 +2065,9 @@ price: answers arrive `Later`, outside the action's transaction (LLP 1027.002 D1
   render environment and render each returned value, encoding it as a path segment. An
   app `exact new` made needs no Rust render entry. A source that fails or misses its
   deadline fails the build; an empty list renders no pages. A static build contains only
-  the returned values.
+  the returned values. A listed value whose location a route declared earlier also matches
+  fails the build, naming both routes: with `special "/product/special"` before `product
+  "/product/:id"`, the page at a listed `special` is `special`'s.
 
 - **A link to the same route with a new query pushes a second entry.** A filter written as
   `link href=(path("shop") + "?cat=" + c)` on the shop page reached `follow`, whose

@@ -2,14 +2,15 @@
 // roster `picker`), and `saveFile` and the File System Access pickers (LLP
 // 1069.010, roster `documents`). They are one Swift family: one object
 // presents all three kinds of picker and is the one delegate of UIKit's
-// document pickers, so its target is linked when the composition names
-// either capability. The core keeps the table of `doc:` handles the pickers
+// document pickers, so it is one target, `picker`, which a plan's document
+// pickers select too, and a manifest's `documents` or `media_picker` linked
+// ahead brings. The core keeps the table of `doc:` handles the pickers
 // mint (SessionDocuments.swift), since drops, pastes and a document opened
 // from outside the app mint there too, and answers `requestPermission` from
 // it. The core reaches the pickers only through what this file declares.
 // Without them the runner still rules on each request, and one it would
 // present is refused as tvOS refuses it, having no picker: logged, and the
-// element hears `cancel`. The slot's default is today's picker.
+// element hears `cancel`. `ExactPickers.install()` sets the slot.
 import CExact
 import Foundation
 #if os(iOS)
@@ -120,7 +121,7 @@ package final class NoPicker: FilePicking {
 /// The slot is set before any session is made, and read on the main thread.
 package enum PickerLink {
     /// A session's pickers.
-    package static var make: ((ExactSession) -> any FilePicking)? = { Picker(session: $0) }
+    package static var make: ((ExactSession) -> any FilePicking)?
 }
 
 #if os(iOS)

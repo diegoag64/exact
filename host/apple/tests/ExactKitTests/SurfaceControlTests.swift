@@ -7,6 +7,7 @@ import XCTest
 import CryptoKit
 import ImageIO
 @testable import ExactKit
+@testable import ExactPickers
 @testable import ExactSurfaces
 
 private let recoveryReply = UnsafeMutablePointer<UInt8>.allocate(capacity: 128)

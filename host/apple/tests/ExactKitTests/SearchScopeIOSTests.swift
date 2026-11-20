@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// LLP 1134: a filter tablist right after a header whose search field the
 /// bar projects is that search bar's scope bar (`scripts/fixtures/search-scope.contract`).

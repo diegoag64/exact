@@ -291,6 +291,7 @@ final class ShortcutMenu: NSMenu {
         let silenced = removed.compactMap { item, _, _ in item.keyEquivalent.isEmpty ? nil : (item, item.keyEquivalent) }
         for (item, _) in silenced { item.keyEquivalent = "" }
         defer { for (item, key) in silenced where item.keyEquivalent.isEmpty { item.keyEquivalent = key } }
+        if historyArrow(event) { return true }
         // AppKit compares the typed character with the item's, so a key that
         // types no Latin one (ㅠ under Korean 2-Set) misses ⌘B: the item its
         // physical key's chord names runs here instead (its action validates,
@@ -314,9 +315,31 @@ final class ShortcutMenu: NSMenu {
         defer { for (item, host) in suppressed { item.keyEquivalent = host.menuEquivalent(item) } }
         return super.performKeyEquivalent(with: event)
     }
+
+    /// Command-Left and Command-Right act as Go ▸ Back and Go ▸ Forward outside
+    /// editable text views and fields, matching Safari and Finder (expo/exact#847).
+    private func historyArrow(_ event: NSEvent) -> Bool {
+        guard event.type == .keyDown,
+              event.keyCode == 123 || event.keyCode == 124,
+              event.modifierFlags.intersection([.command, .shift, .option, .control]) == .command
+        else { return false }
+        let window = NSApp.keyWindow ?? NSApp.windows.first { $0.windowNumber == event.windowNumber }
+        if let responder = window?.firstResponder {
+            if let textView = responder as? NSTextView, textView.isEditable { return false }
+            if let textField = responder as? NSTextField, textField.isEditable { return false }
+        }
+        let action = event.keyCode == 123 ? #selector(GoMenuTarget.back(_:)) : #selector(GoMenuTarget.forward(_:))
+        guard let item = items.first(where: { $0.action == action && $0.target is GoMenuTarget }),
+              !item.isHidden,
+              !item.keyEquivalent.isEmpty,
+              let target = item.target as? GoMenuTarget,
+              target.validateMenuItem(item)
+        else { return false }
+        return NSApp.sendAction(action, to: target, from: item)
+    }
 }
 
-final class ShortcutHost: NSObject, NSMenuItemValidation {
+package final class ShortcutHost: NSObject, NSMenuItemValidation {
     private weak var presenter: Presenter?
     private weak var fileMenu: NSMenu?
     private weak var applicationMenu: NSMenu?
@@ -397,7 +420,7 @@ final class ShortcutHost: NSObject, NSMenuItemValidation {
         if let event, !shortcut.matches(event) { return "" }
         return shortcut.keyEquivalent
     }
-    func sync() {
+    package func sync() {
         if let selected = DevMenu.session, selected.presenter !== presenter,
            let menu = viewMenu, menu.supermenu === NSApp.mainMenu { return }
         guard let fileMenu else { return }
@@ -763,7 +786,7 @@ final class ShortcutHost: NSObject, NSMenuItemValidation {
         if appWide.contains(view.id) { return !view.authoredInert }
         return !view.inert && (!key || view.window === NSApp.keyWindow) && view.window?.attachedSheet == nil
     }
-    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+    package func validateMenuItem(_ item: NSMenuItem) -> Bool {
         guard let id = (item.representedObject as? NSNumber)?.uint32Value,
               let view = nodes().first(where: { $0.id == id }) else { return false }
         return enabled(view, key: true)

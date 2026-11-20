@@ -8,11 +8,11 @@ import UIKit
 /// What the bar shows (D1, D4) and how a change reaches it, with the node
 /// that decided it (the agent's `layout`, D7); and whether the status bar
 /// and the home indicator give way, from the node that decided that.
-struct StatusBarChoice: Equatable {
-    var style: UIStatusBarStyle = .default
+package struct StatusBarChoice: Equatable {
+    package var style: UIStatusBarStyle = .default
     var fade = false
     var source: UInt32?
-    var hidden = false
+    package var hidden = false
     var hiddenFade = false
     var hiddenSource: UInt32?
 }
@@ -25,7 +25,7 @@ extension Presenter {
     /// `settled`: a transition's own end, whose coordinator may still be
     /// installed (a sheet's); only a push or pop that navigation starts next
     /// holds the style.
-    func resolveStatusBar(settled: Bool = false) {
+    package func resolveStatusBar(settled: Bool = false) {
         guard !(settled ? navigation.changing : navigation.transitioning), !modals.inTransition else { return }
         let choice = statusBarChoice()
         guard choice != statusBar else { return }

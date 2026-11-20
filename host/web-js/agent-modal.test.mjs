@@ -4,9 +4,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { resolve } from 'node:path';
 import { open } from '../../scripts/agent.mjs';
 import { webCompiler } from './module.mjs';
-import { suiteBrowser } from '../../scripts/agent-launch.mjs';
+import { chromium, suiteBrowser } from '../../scripts/agent-launch.mjs';
+import { need } from '../../scripts/coverage.mjs';
 
 const fixtures = new Map();
+const chromeTest = need('chrome', chromium().unavailable);
 afterAll(async () => {
   for (const pending of fixtures.values()) {
     const fixture = await pending.catch(() => null);
@@ -17,20 +19,31 @@ afterAll(async () => {
   }
 });
 
-// Cache the two page layouts; each input case opens a fresh browser session.
-function fixture(reveal) {
-  if (!fixtures.has(reveal)) fixtures.set(reveal, buildFixture(reveal));
-  return fixtures.get(reveal);
+// Each test opens a fresh browser session on its fixture.
+function fixture(kind) {
+  if (!fixtures.has(kind)) fixtures.set(kind, buildFixture(kind));
+  return fixtures.get(kind);
 }
 
-async function buildFixture(reveal) {
+async function buildFixture(kind) {
   if (webCompiler().cmd === 'cargo') throw new Error('build the compiler first: cargo build -p exact-web-js');
   const root = resolve(import.meta.dir, '../..');
   mkdirSync(resolve(root, 'target'), { recursive: true });
   const dir = mkdtempSync(resolve(root, 'target/modal-agent-test-'));
   try {
     writeFileSync(resolve(dir, 'app.json'), JSON.stringify({ name: 'Modal Agent Test', app: { id: 'test.modal-agent', name: 'Modal Agent Test' }, host: { web: {} }, file_handlers: [{ action: '/', accept: { 'text/plain': ['.txt'] } }] }));
-    writeFileSync(resolve(dir, 'app.contract'), `component ModalAgent
+    writeFileSync(resolve(dir, 'app.contract'), kind === 'busy' ? `component BusyModal
+  state spinning = true
+  action stop
+    spinning = false
+  view
+    column
+      button "Stop" press=stop testId="stop"
+      if spinning
+        progress aria-label="Loading page" testId="spin"
+      dialog id="modal"
+        progress aria-label="Loading dialog"
+` : `component ModalAgent
   state blocked = false
   state presses = 0
   state panned = 0
@@ -74,7 +87,7 @@ async function buildFixture(reveal) {
         column inert=true
           button "Inert child" press=pick testId="inert-child"
         button "Open menu" popovertarget="menu" testId="open-menu"
-${reveal ? `        box height=1200
+${kind === 'reveal' ? `        box height=1200
         column inert=true
           button "Inert below" press=pick testId="inert-below"
         button "Below scrollport" press=pick testId="below"
@@ -100,8 +113,36 @@ ${reveal ? `        box height=1200
   }
 }
 
+chromeTest('clock settle names busy elements including a spinner in a closed dialog', async () => {
+  const { server } = await fixture('busy');
+  const browser = await open({ host: 'web', url: server.url.href });
+  try {
+    const busy = await browser.clock('settle');
+    const { nodes } = await browser.tree();
+    const spinner = nodes.find(node => node.props.accessibilityLabel === 'Loading dialog');
+    expect(spinner.props.accessibilityBusy).toBe(true);
+    const id = String(spinner.id);
+    expect(busy).toMatchObject({ settled: false, reason: 'busy', busy: ['spin', id] });
+    expect(busy.diagnostic).toContain(`aria-busy elements (spin, ${id})`);
+    expect(busy.diagnostic).toContain('`aria-busy` marks an element as still loading');
+    expect(busy.diagnostic).toContain('An indeterminate `progress` (no `value`) implies `aria-busy`');
+    expect(busy.diagnostic).toContain('closed `dialog` keeps its content mounted');
+    expect(busy.diagnostic).toContain('`layout <id>`');
+    const { node } = await browser.layout(id);
+    expect(node.props.accessibilityLabel).toBe('Loading dialog');
+    expect(node.visible.hidden).toBe(true);
+
+    await browser.tap('stop');
+    expect(await browser.clock('settle')).toMatchObject({
+      settled: false, reason: 'busy', busy: [id],
+    });
+  } finally {
+    await browser.close();
+  }
+}, 30_000);
+
 test.each(['tap', 'pan', 'reveal', 'pointer', 'hover', 'wheel', 'check', 'contextpopover', 'autofocus', 'drop'])('a modal escapes an inert ancestor for agent %s input', async input => {
-  const { server } = await fixture(input === 'reveal');
+  const { server } = await fixture(input === 'reveal' ? 'reveal' : 'modal');
   let browser;
   try {
     browser = await open({ host: 'web', url: server.url.href, size: [800, 800] });

@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// LLP 1141.001 D4 over `scripts/fixtures/edge-effect.contract`: content
 /// scrolled under the bar takes iOS 26's scroll edge effect, as a hand-built

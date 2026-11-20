@@ -35,7 +35,8 @@ enum FocusSearch {
         // nodes themselves.
         if view is NodeView || view is PlainView || view is ScrollView || view is MetalView
             || view is UIImageView || view is UIVisualEffectView || view.next is UINavigationController || view.next is BootHolding
-            || view is NativeButtonIOS { return } // a native button's node keeps the focus (LLP 1069.011 D4)
+            || view is NativeButtonIOS // a native button's node keeps the focus (LLP 1069.011 D4)
+            || view is HoldsLiftedNodes { return } // the navigation's holders of lifted nodes (LLP 1083.000 D4)
         candidates.add(view)
     }
 
@@ -59,7 +60,7 @@ enum FocusSearch {
 /// Answer UIKit's focus search for a document viewport.
 package final class Viewport: ScrollView {
     /// The route whose document this viewport scrolls; the session's viewport has no route.
-    weak var documentNode: NodeView?
+    package weak var documentNode: NodeView?
     /// Its bands past the page's area (`Presenter.pageMargins`, LLP 1130 D1).
     var pageMargins = UIEdgeInsets.zero
     /// The control bars over its page's scrollers, each by its edge (`ControlBars.sync`, LLP 1131).
@@ -71,7 +72,7 @@ package final class Viewport: ScrollView {
         super.tintColorDidChange()
         if tintAdjustmentMode != .dimmed { restingTint = tintColor }
     }
-    override init(frame: CGRect) {
+    package override init(frame: CGRect) {
         super.init(frame: frame)
         #if os(iOS)
         // The page's own scroller takes the keyboard down with a drag that
@@ -80,7 +81,7 @@ package final class Viewport: ScrollView {
         keyboardDismissMode = .interactive
         #endif
     }
-    required init?(coder: NSCoder) { nil }
+    package required init?(coder: NSCoder) { nil }
     // tvOS focuses exact2's own nodes (RemoteTVOS), so its search sees every view.
     #if !os(tvOS)
     package override func focusItems(in rect: CGRect) -> [any UIFocusItem] { FocusSearch.items(self, in: rect) }
@@ -104,7 +105,7 @@ extension NodeView {
 package final class PresentationMount: UIView {
     #if os(iOS)
     /// Relay a modal presentation's events to its logical ancestors (`MountRelay`).
-    var relay: MountRelay?
+    package var relay: MountRelay?
     #endif
     // UIKit's views over the ranked route (`keepPlatformViewsOver`).
     package override func didAddSubview(_ subview: UIView) {

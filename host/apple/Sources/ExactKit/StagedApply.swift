@@ -427,6 +427,7 @@ extension ExactSession {
     func order(_ entry: PendingBatch) {
         var entry = entry
         guard state != .destroyed, !entry.batch.busy, !entry.batch.held else { return }
+        entry.cause = coversCause
         takeEventResults(&entry.batch)
         if entry.batch.sequence == 0 { entry.batch.sequence = runtime.sequence.next() }
         let made = entry.batch.sequence
@@ -526,8 +527,10 @@ extension ExactSession {
             plan.passed(entry.batch)
             entry.batch = plan.withheld(entry.batch) { [unowned self] in presenter.views[$0]?.style }
         }
-        if entry.unlessEmpty { applyUnlessEmptyNow(entry.batch, scrolled: entry.scrolled, resized: entry.resized, beside: stage) } else { applyNow(entry.batch, beside: stage) }
-        entry.landed?()
+        inCoversChain(entry.cause) {
+            if entry.unlessEmpty { applyUnlessEmptyNow(entry.batch, scrolled: entry.scrolled, resized: entry.resized, beside: stage) } else { applyNow(entry.batch, beside: stage) }
+            entry.landed?()
+        }
     }
     /// Whether a tick's or an advance's batch waits. The next advance is held
     /// until it applies, as a slice in flight holds it; a tick is not, since
@@ -627,6 +630,8 @@ struct PendingBatch {
     var landed: (() -> Void)? = nil
     var dropped: (() -> Void)? = nil
     var footprint = BatchFootprint()
+    /// A navigation correction keeps its chain across the wait. An owner publication has none.
+    var cause: AnyObject?
     var epoch = 0
 }
 

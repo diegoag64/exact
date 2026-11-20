@@ -87,7 +87,7 @@ export async function open({
   scale,
   port,
   ax = false,
-} = {}) {
+} = {}, { openDevice = openStdio } = {}) {
   browser ??= 'chrome';
   if (!['chrome', 'firefox', 'webkit'].includes(browser))
     throw new Error(`browser: chrome, firefox or webkit, not ${browser}`);
@@ -126,7 +126,8 @@ export async function open({
   // and `screenshot <png> window` draws them, a presented sheet's too; a tap naming a tab or a header button the bars
   // stand for presses it (`native: "tab-bar-item"`, `"bar-button-item"`). The default paints the authored header and
   // tablist, which the tree, layout and every tap address as on the web; a header node the bar would not show is
-  // marked `unshown` in the tree, struck through in a screenshot, and fails an `expect` or a `tap` (LLP 1116 D2).
+  // marked `unshown` in the tree and screenshot reply, struck through in an app render, and fails an `expect` or
+  // a `tap` (LLP 1116 D2).
   // macOS: AppKit's sidebar for a root tab bar, `native: "sidebar-row"` (LLP 1115.002 D3); a `dialog` as its sheet and
   // a popover that is no menu as AppKit's popover, windows of their own that `screenshot <png> window` draws over the
   // window (D7.2, D7.3).
@@ -182,7 +183,7 @@ export async function open({
     } else env = { ...(env ?? {}), EXACT_LAUNCH_URL: url };
   }
   const carrier = device
-    ? await openStdio({ host: 'ios', plan, world, size, env, app, device, phone: pick, onProcess })
+    ? await openDevice({ host: 'ios', plan, world, size, env, app, device, phone: pick, onProcess })
     : // `documents` are the Mac's command line, a terminal's route in (LLP
       // 1033 D3); each window's session then routes by its label (LLP 1069.010).
       host === 'macos' || host === 'mac'
@@ -535,6 +536,10 @@ export async function open({
      * for 16 rounds. Timers fire on the way, each at its own time; motion is seeked, never played. The clock lands
      * where the runner says; a timer's refusal is the error. */
     async clock(spec = 'settle', round = 0, down = null) {
+      if (env.EXACT_AGENT === 'live') {
+        const error = '--live runs the app on the wall clock, which the driver does not hold. Let real time pass between operations (perf frames live <ms> waits and measures), or drive without --live to move the clock.';
+        throw Object.assign(new Error(error), { reply: { error, code: 'live-clock' } });
+      }
       // `held`, `until`: agent-held.mjs
       if (/^held(\s|$)/.test(String(spec))) return heldClock(s, String(spec).split(/\s+/).slice(1));
       if (/^until(\s|$)/.test(String(spec))) return untilClock(s, String(spec));
@@ -653,8 +658,13 @@ export async function open({
                   ? `clock settle stops at held device requests (${(r.tickets ?? []).map(t => '@' + t).join(' ')}); state shows them under pending; answer with tap @N <choice> or type @N <value>`
                   : r.reason === 'requests'
                     ? 'clock settle gave up on requests still in flight at its bound (20 s native); state shows them under pending, and logs a `request N` with no `fulfil N`'
-                    : `clock settle did not reach quiescence: ${JSON.stringify(r.world ?? r)}; state world:* busy shows moving values and busy reasons; state shows held input; logs shows reload/refusals`;
-      // an `after(1, …)` the settle's last commit armed
+                    : r.reason === 'busy'
+                      ? `clock settle is held by aria-busy elements (${r.busy.join(', ')}), named by test ID or view ID. ` +
+                        '`aria-busy` marks an element as still loading. An indeterminate `progress` (no `value`) implies `aria-busy`. ' +
+                        'A closed `dialog` keeps its content mounted, so busy elements inside it count. ' +
+                        'Use `layout <id>` to find the element and its source line in a development build.'
+                      : `clock settle did not reach quiescence: ${JSON.stringify(r.world ?? r)}; state world:* busy shows moving values and busy reasons; state shows held input; logs shows reload/refusals`;
+      // An `after(1, …)` the settle's last commit armed.
       const soon = req.settle && r.settled !== false ? await nextCommitTasks(s, r.clock) : [];
       if (soon.length && round < 16) {
         await this.clock(String(soon[soon.length - 1][1]));
@@ -735,6 +745,7 @@ export async function open({
         if (Object.values(g).some(v => Object.keys(v).length)) replies[k] = await s.op({ op: 'prefer', ...g });
       if (Object.keys(replies).length && ![media, page, fold, mode].some(g => Object.keys(g).length))
         return replies.extension ?? replies.midi;
+      if (Object.hasOwn(page, 'safe-area') && host !== 'web') throw new Error(`prefer safe-area: the ${host} host uses the device's insets; choose web with Chromium to set them`);
       if (carrier.prefer) return s.tagged(await carrier.prefer(media, page, fold, mode));
       return s.op(preferOp(media, page, fold, mode));
     },
@@ -765,14 +776,13 @@ export async function open({
         writeFileSync(resolve(path), bytes);
         return s.tagged({ ...metadata, screenshot: resolve(path) });
       }
-      // `window status` (iOS): with the status bar as the device shows it, to compare with a `simctl io` reference
-      // (euxy FRICTION 5).
+      // `window status` (iOS): with the status bar, to compare with a display reference (euxy FRICTION 5).
       if (form === 'status' && !(target === true && ['ios', 'host-ios'].includes(host)))
-        throw new MalformedOperation("screenshot <png> window status: an iOS simulator's window with its status bar");
+        throw new MalformedOperation("screenshot <png> window status: the iOS window with its status bar");
       // `window app` (iOS): the app's own drawing alone, never the display's (smoke's canvas readback, whose reference
       // is one).
       if (form === 'app' && !(target === true && ['ios', 'host-ios'].includes(host)))
-        throw new MalformedOperation("screenshot <png> window app: an iOS simulator's window as the app draws it");
+        throw new MalformedOperation("screenshot <png> window app: the iOS window as the app draws it");
       // `window pictureinpicture` (macOS): Exact's picture-in-picture window, outside the app's (LLP 1042 §9.1).
       if (form === 'pictureinpicture' && !(target === true && ['macos', 'mac'].includes(host)))
         throw new MalformedOperation(
@@ -789,18 +799,27 @@ export async function open({
         if (r.error) throw new Error(r.error);
         return s.tagged(r);
       }
-      if (form !== undefined && form !== 'status' && form !== 'app')
+      if (form === 'display' && !(target === true && ['ios', 'host-ios'].includes(host)))
+        throw new MalformedOperation('screenshot <png> display: the iOS display');
+      if (form !== undefined && !['status', 'app', 'display'].includes(form))
         throw new MalformedOperation(`screenshot: unknown form ${form}`);
       if (typeof target === 'string')
         return worldTells(
           s,
           await s.op({ op: 'screenshot', ...(await s.target(target)), world: true, path: resolve(path) }),
         );
-      const r = await carrier.screenshot(resolve(path), target, film, form === 'status', form === 'app');
-      if (scale === undefined) return worldTells(s, await s.tagged(r)); // a drawing world's tells (LLP 1127.000 D1)
-      const { image, shrunk } = s.scaled(r);
-      if (shrunk) writeFileSync(r.screenshot, encodePng(image));
-      return worldTells(s, await s.tagged({ ...r, scale }));
+      const area = form === 'display' ? 'display' : target;
+      let r = await carrier.screenshot(resolve(path), area, film || !!s.held, {
+        status: form === 'status', own: form === 'app', skipMotion: !!(s.contact || s.held),
+      });
+      if (r.captureSpace === 'screen' && r.scale === null) return r;
+      if (scale !== undefined) {
+        const { image, shrunk } = s.scaled(r);
+        if (shrunk) writeFileSync(r.screenshot, encodePng(image));
+        r = { ...r, scale };
+      }
+      if (r.captureSpace === 'screen' && r.front !== true) return r;
+      return worldTells(s, await s.tagged(r)); // a drawing world's tells (LLP 1127.000 D1)
     },
     scaled(r) {
       return scaledScreenshot(r, scale, host);
@@ -857,6 +876,11 @@ export async function open({
       return r;
     },
     close: carrier.close,
+    background(ms) {
+      if (!Number.isInteger(ms) || ms < 0 || ms > 2147483647) throw new MalformedOperation('background takes a whole number of milliseconds from 0 through 2147483647');
+      if (!carrier.background) throw new Error('background needs the iOS simulator or a connected iPhone');
+      return carrier.background(ms);
+    },
     springboard: carrier.springboard,
   };
   Object.assign(s, sessionInput(s, { carrier, host, timing, touch, app }));

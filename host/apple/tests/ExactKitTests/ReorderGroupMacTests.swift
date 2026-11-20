@@ -2,13 +2,13 @@
 import AppKit
 import XCTest
 @testable import ExactKit
-@testable import ExactDrag
+@testable import ExactCollections
 
 /// A grouped grip on a Mac (LLP 1094 stage 4): a ghost that follows a drag
 /// in any direction into another grouped list, a drop that holds with the
 /// ghost kept, the hold's end landing it, and the keys.
 final class ReorderGroupMacTests: XCTestCase {
-    override class func setUp() { super.setUp(); ExactDrag.install() } // LLP 1047.001 D4
+    override class func setUp() { super.setUp(); ExactCollections.install() } // LLP 1047.001 D10
     private var window: NSWindow?
     override func tearDown() { window?.close(); window = nil }
 
@@ -18,7 +18,7 @@ final class ReorderGroupMacTests: XCTestCase {
         _ = NSApplication.shared
         let p = Presenter()
         p.viewport.frame = NSRect(x: 0, y: 0, width: 400, height: 300)
-        p.reorderGroupCalls = calls
+        p.reorderHost!.groupCalls = calls
         let entry = { (list: Int, wrapper: Int, root: Int) -> [String: Any] in
             ["view": list, "revision": 1, "scrollSequence": 0, "count": 1, "totalExtent": 40,
              "rows": [["view": wrapper, "root": root, "epoch": 7]], "correction": NSNull()]
@@ -64,6 +64,21 @@ final class ReorderGroupMacTests: XCTestCase {
             eventNumber: 1, clickCount: 1, pressure: 1)!
     }
 
+    func testThePointerChoosesTheDestinationWhenTheGhostStillCoversTheSource() throws {
+        let calls = ReorderGroupRecorder()
+        let (presenter, _) = fixture(calls)
+        let grip = try XCTUnwrap(presenter.views[3])
+        let destination = try XCTUnwrap(presenter.views[5])
+        let start = grip.convert(NSPoint(x: grip.bounds.maxX - 10, y: grip.bounds.midY), to: nil)
+        let point = destination.convert(NSPoint(x: 5, y: destination.bounds.midY), to: nil)
+        let hold = try XCTUnwrap(ReorderGroupHold(grip, point: start, ghost: true))
+        XCTAssertTrue(hold.move(point))
+        let ghost = try XCTUnwrap(hold.ghost)
+        XCTAssertLessThan(ghost.frame.midX, destination.convert(destination.bounds, to: nil).minX)
+        XCTAssertEqual(calls.log.last, "into 5")
+        hold.cancel()
+    }
+
     func testStateReadsOnlyAGroupedOp() {
         let op: [String: Any] = ["op": "reorder", "group": true, "token": "18446744073709551615", "list": 1, "wrapper": 2,
             "phase": "settling", "ending": "timeout", "target": 5, "row": 6, "dispatched": true]
@@ -85,19 +100,19 @@ final class ReorderGroupMacTests: XCTestCase {
         XCTAssertEqual(calls.log, [], "inside the slop nothing is recognized")
         text.mouseDragged(with: event(.leftMouseDragged, text, down: 0, right: 20))
         XCTAssertEqual(calls.log.first, "begin 3 ghost", "a sideways move lifts a grouped grip")
-        let hold = try XCTUnwrap(p.reorderGroup)
+        let hold = try XCTUnwrap(p.reorderHost!.group)
         let ghost = try XCTUnwrap(hold.ghost)
         XCTAssertTrue(ghost.view.superview != nil, "the ghost is in the window's top layer")
-        // Over the second list: its port takes the ghost's centre.
+        // The pointer crosses into the second list.
         NSApp.sendEvent(event(.leftMouseDragged, text, down: 10, right: 220))
         XCTAssertEqual(calls.log.last, "into 5")
         NSApp.sendEvent(event(.leftMouseUp, text, down: 10, right: 220))
         XCTAssertEqual(calls.log.suffix(2), ["into 5", "drop"])
         XCTAssertEqual(hold.state.phase, "holding")
-        XCTAssertTrue(p.reorderGroup === hold, "a hold keeps the ghost and the pin")
+        XCTAssertTrue(p.reorderHost!.group === hold, "a hold keeps the ghost and the pin")
         XCTAssertNotNil(hold.ghost?.view.superview)
         // Escape does nothing while holding: its send is out.
-        p.mouseDrags.reorder.cancel()
+        p.reorders.mouse.cancel()
         XCTAssertFalse(calls.log.contains("cancel"))
         // The answer showed the move: the ghost lands on the row, then the session finishes.
         let landed = expectation(description: "the ghost lands, then the session finishes")
@@ -105,14 +120,14 @@ final class ReorderGroupMacTests: XCTestCase {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { landed.fulfill() }
         wait(for: [landed], timeout: 2)
         XCTAssertEqual(calls.log.last, "finish")
-        XCTAssertNil(p.reorderGroup)
+        XCTAssertNil(p.reorderHost!.group)
         XCTAssertNil(ghost.view.superview, "the ghost is gone")
     }
 
     func testADropReleasesThePointerWhileTheReorderHolds() throws {
         let calls = ReorderGroupRecorder()
         let (p, text) = fixture(calls)
-        defer { p.reorderGroup?.abandon() }
+        defer { p.reorderHost!.group?.abandon() }
         let parent = try XCTUnwrap(p.views[9])
         let target = try XCTUnwrap(p.views[5])
         parent.handlers = ["pointerdown", "pointermove", "pointerup"]
@@ -126,7 +141,7 @@ final class ReorderGroupMacTests: XCTestCase {
         XCTAssertEqual(heard, ["down 9", "move 9"])
         XCTAssertEqual(p.pointerHeld, 9)
         XCTAssertTrue(p.pointerSource === text)
-        let hold = try XCTUnwrap(p.reorderGroup)
+        let hold = try XCTUnwrap(p.reorderHost!.group)
         // The grouped contact's monitor consumes the up before any view sees it.
         NSApp.sendEvent(event(.leftMouseDragged, text, down: 10, right: 220))
         NSApp.sendEvent(event(.leftMouseUp, text, down: 10, right: 220))
@@ -135,7 +150,7 @@ final class ReorderGroupMacTests: XCTestCase {
         XCTAssertNil(p.pointerSource)
         XCTAssertTrue(p.pointerPath.isEmpty)
         XCTAssertEqual(hold.state.phase, "holding")
-        XCTAssertTrue(p.reorderGroup === hold)
+        XCTAssertTrue(p.reorderHost!.group === hold)
         XCTAssertNotNil(hold.ghost?.view.superview)
 
         heard = []
@@ -159,11 +174,11 @@ final class ReorderGroupMacTests: XCTestCase {
         XCTAssertTrue(grip.reorderKeys)
         XCTAssertTrue(grip.acceptsFirstResponder, "a grouped grip is in the key view loop")
         XCTAssertTrue(grip.reorderKey(" "))
-        XCTAssertNil(p.reorderGroup?.ghost)
+        XCTAssertNil(p.reorderHost!.group?.ghost)
         XCTAssertTrue(grip.reorderKey("ArrowRight"))
         XCTAssertTrue(grip.reorderKey("Enter"))
         XCTAssertEqual(calls.log, ["begin 3", "step 4", "drop", "finish"], "no ghost: it finishes as the hold ends")
-        XCTAssertNil(p.reorderGroup)
+        XCTAssertNil(p.reorderHost!.group)
         // A custom action is the same, in one turn.
         calls.log = []
         let actions = try XCTUnwrap(grip.accessibilityCustomActions())

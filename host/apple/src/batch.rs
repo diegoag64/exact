@@ -878,7 +878,7 @@ impl Batch {
                 .push("{\"op\":\"activity\",\"demand\":true}".into());
         }
         let playing =
-            (boot || !runner.plan().sequences.is_empty()).then(|| runner.transport().playing());
+            (boot || !runner.plan().sequences.is_empty()).then(|| runner.transport_playing());
         self.sound(runner.take_sounds(), boot.then(|| runner.plan()), playing);
         let uses = boot && exact_runner::uses::uses_midi(runner.plan());
         if let Some(op) = exact_runner::midi::batch_op(&runner.take_midi(), uses) {

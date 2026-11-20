@@ -51,7 +51,7 @@ extension Presenter {
     }
 
     /// The host's `destroy` of a leaving view: its exit ended.
-    func endExit(_ id: UInt32) -> Bool {
+    package func endExit(_ id: UInt32) -> Bool {
         guard let ended = leaving.removeValue(forKey: id) else { return false }
         ended.view.setGhost(false)
         for member in ended.members { svg?.forget(member.id); member.forget() }
@@ -59,7 +59,7 @@ extension Presenter {
         return true
     }
 
-    func isLeaving(_ view: NodeView) -> Bool { leaving[view.id]?.view === view }
+    package func isLeaving(_ view: NodeView) -> Bool { leaving[view.id]?.view === view }
 
     /// Presented surface boxes and opacity, including ghosts absent from `tree`.
     func presenceObservation() -> [[String: Any]] {

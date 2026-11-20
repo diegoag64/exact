@@ -194,6 +194,21 @@ pub(super) fn passes(arena: &NodeArena, s: u32, space: &Space, depth: f32) -> bo
     }
 }
 
+/// D14's keyboard term for the scroller `s`, whose bottom edge its reach
+/// moves `reach` points down: under `resizes-visual`, where it takes the
+/// docked keyboard that reaches it, the keyboard's overlap with its reached
+/// box, measured up from the space's bottom as the occupancy is (D7); else 0.
+pub(super) fn taken(arena: &NodeArena, s: u32, space: &Space, reach: f32) -> f32 {
+    if arena.observations.keyboards.policy != Some(KeyboardPolicy::ResizesVisual) {
+        return 0.0;
+    }
+    let depth = docked_depth(arena, space);
+    if depth <= 0.0 || passes(arena, s, space, depth) || !past_scrollers(arena, s, space, depth) {
+        return 0.0;
+    }
+    super::area::depth([0.0, depth], space.edges(arena, s)[2] - reach)
+}
+
 /// Whether the scroller `s` passes a docked keyboard in `space` to its
 /// content, which the solve keeps so as to measure that content again when
 /// it changes (`check_scrollers`).
@@ -283,6 +298,8 @@ impl Kernel {
     /// (D4, D9); or a box in the owner reads the keyboard (D7). A frame
     /// that is not finite, or whose size is negative, is refused, keeping
     /// the last.
+    /// A host reports this field with the owner's others through
+    /// [`Kernel::update_owner`], which applies them whole or not at all.
     pub fn set_owner_keyboard(
         &mut self,
         view: ViewId,
@@ -393,7 +410,7 @@ impl Kernel {
 }
 
 /// Refuse a frame that is not finite or has a negative size.
-fn check(keyboard: &Keyboard) -> Result<(), KernelError> {
+pub(super) fn check(keyboard: &Keyboard) -> Result<(), KernelError> {
     let [.., w, h] = keyboard.frame;
     match keyboard.frame.iter().all(|v| v.is_finite()) && w >= 0.0 && h >= 0.0 {
         true => Ok(()),
@@ -407,7 +424,7 @@ fn check(keyboard: &Keyboard) -> Result<(), KernelError> {
 }
 
 /// Whether a reader's `components` read the keyboard.
-pub(crate) fn reads_keyboard(components: u16) -> bool {
+pub(crate) fn reads_keyboard(components: crate::style::calc::Components) -> bool {
     use crate::style::calc::Family;
     components & (Family::Keyboard.bits() | Family::KeyboardUndocked.bits()) != 0
 }

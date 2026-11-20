@@ -2,13 +2,13 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 @testable import ExactCollections
 @testable import ExactGroupedLists
-/// LLP 1084 on UIKit: a grouped list (`listStyle`) is a UICollectionView
-/// with a list layout as the list's only scroller;
-/// its rows are list cells configured from the kernel's model (D5); a tap
-/// selects, highlights and presses; a toggle flips its control; a custom
-/// row's views are carried into their cell and given back before a batch.
+/// LLP 1084 on UIKit: a grouped list (`listStyle`) is a UICollectionView with a list layout as the
+/// list's only scroller; its rows are list cells configured from the kernel's model (D5); a tap
+/// selects, highlights and presses; a toggle flips its control; a custom row's views are carried
+/// into their cell and given back before a batch.
 /// UIKit, so a simulator runs it: bun host/apple/build.mjs --test --ios
 class GroupedListFixture: XCTestCase {
     var window: UIWindow!

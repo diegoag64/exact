@@ -10,13 +10,14 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, posix, resolve, win32 } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { INPUT_TREE, OUTPUT, suiteBrowser } from '../../scripts/agent-launch.mjs';
 import { shaderWatchRoots } from '../../scripts/app.mjs';
 import { within } from '../../scripts/paths.mjs';
 import { runInNewContext } from 'node:vm';
 import { installLock } from '../../scripts/filesystem.mjs';
+import { besidePattern } from '../web/beside.mjs';
 import { appSources } from '../web/serve.mjs';
 import { loopWebDist } from '../../scripts/web-build.mjs';
 import { engagement } from '../web/engagement.js';
@@ -958,11 +959,12 @@ test('real loops keep their pages while test, verify and agent build the same ap
   }
 }, 180_000);
 
-test('the JS watcher rebuilds for included Rust files and declared inputs with output extensions', () => {
+test.each([posix.sep, win32.sep])('the JS watcher skips build outputs and keeps inputs with %s separators', sep => {
   const dir = mkdtempSync(join(tmpdir(), 'exact-output-watch-'));
   const manifest = { gpu: { shaderRoots: ['shader-gen'] }, host: { macos: { resources: [{ from: 'declared.out' }, { from: 'tools/declared.err' }] } } };
   const app = { dir, manifest };
   const source = readFileSync(new URL('./dev.mjs', import.meta.url), 'utf8');
+  const rules = source.slice(source.indexOf('const skipped = '), source.indexOf('/** Whether an entry'));
   const begin = source.indexOf('  const outputIsInput = (name)');
   const end = source.indexOf('  // The resident loop', begin);
   expect(begin).toBeGreaterThan(0);
@@ -972,29 +974,37 @@ test('the JS watcher rebuilds for included Rust files and declared inputs with o
     writeFileSync(join(dir, 'app.json'), JSON.stringify(manifest));
     writeFileSync(join(dir, 'local-crate/Cargo.toml'), '[package]\nname = "included"\nversion = "0.1.0"\n');
     writeFileSync(join(dir, 'local-crate/src/lib.rs'), 'pub const MESSAGE: &str = include_str!("messages.err");\n');
-    let pending, rebuilds = 0;
+    let pending = null, notify, rebuilds = 0;
     const context = {
-      app, OUTPUT, INPUT_TREE, shaderWatchRoots, within, existsSync, dirname,
-      stopping: false, skipped: /^\.exact(?:\/|$)/, contractInput: () => false, settingsFile: () => false,
+      app, OUTPUT, INPUT_TREE, shaderWatchRoots, within, existsSync, dirname, sep, besidePattern,
+      fsWatch: (_path, _options, listener) => { notify = listener; },
+      stopping: false, compilerInput: path => path === join(dir, 'node_modules/used/source.contract'),
+      backendOf: () => 'current', backendSeen: 'previous',
       temporaryOfDesign: () => false, movedSince: () => true, since: Date.now() + 1000,
       resolve, statSync, timer: null, saved: 0, edited: new Set(), residentChild: null,
       starting: { failure: null }, inputs: 0, movedSinceBuild: new Set(), appeared: new Set(),
       stopYoungBuild() {}, clearTimeout() {}, setTimeout: callback => { pending = callback; return 1; },
-      rebuild: () => { rebuilds++; },
+      rebuild() { rebuilds++; },
     };
-    runInNewContext(source.slice(begin, end) + '\nglobalThis.notify = changed(app.dir);', context);
-    for (const name of ['app.contract', 'app.forma', 'app.ts', 'unused.ts', 'helper.js', 'local-crate/src/messages.err', 'local-crate/src/captured.out', 'assets/captured.err', 'shader-gen/captured.out', 'declared.out', 'tools/declared.err']) {
-      writeFileSync(join(dir, name), 'edited');
-      context.notify('change', name);
-      expect(context.edited.has(join(dir, name)), name).toBe(true);
-      expect(pending, name).toBeFunction();
-      pending(); pending = null;
-    }
-    expect(rebuilds).toBe(11);
-    for (const name of ['macos.out', 'macos.err', 'other.OUT', '.exact/evidence.err']) {
-      context.notify('change', name);
+    runInNewContext(rules + source.slice(begin, end) + '\nwatch(app.dir, { recursive: true }, changed(app.dir));', context);
+    for (const name of ['target/web-js-dev-stage/hash/manifest.json', 'app.contract.d.ts', 'macos.out', 'macos.err',
+      'other.OUT', '.exact/evidence.err', 'node_modules/unused/source.contract', 'nested/.cache/file.js']) {
+      notify('change', name.replaceAll('/', sep));
       expect(context.edited.has(join(dir, name)), name).toBe(false);
       expect(pending, name).toBeNull();
+    }
+    expect(rebuilds).toBe(0);
+    const inputs = ['app.contract', 'app.forma', 'app.ts', 'unused.ts', 'helper.js', 'local-crate/src/messages.err',
+      'local-crate/src/captured.out', 'assets/logo.png', 'shader-gen/captured.out', 'declared.out', 'tools/declared.err',
+      '.env.local', '.exact/backend-origin', 'node_modules/used/source.contract'];
+    if (sep === '/') inputs.push('nested\\target\\literal.ts');
+    for (const [index, name] of inputs.entries()) {
+      notify('change', name.replaceAll('/', sep));
+      expect(context.edited.has(join(dir, name)), name).toBe(true);
+      expect(pending, name).toBeFunction();
+      pending();
+      pending = null;
+      expect(rebuilds, name).toBe(index + 1);
     }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

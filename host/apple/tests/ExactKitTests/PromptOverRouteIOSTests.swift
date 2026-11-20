@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// A prompt opened in a page a full-screen route covers. The prompt is
 /// UIKit's alert with `PromptField` standing in for the authored input

@@ -30,14 +30,14 @@ package final class PressHandoff {
     /// Its dispatch is running.
     private var dispatching = true
     /// A sync its dispatch deferred is owed (`pending`) or running (`syncing`).
-    var pending = false
-    var syncing = false
+    package var pending = false
+    package var syncing = false
     private struct Destination { weak var route: NodeView? }
     private var destinations: [Destination] = []
     fileprivate init(_ presenter: Presenter, control: UIView?) { self.presenter = presenter; self.control = control }
     /// Whether its own work is running now: what that work presents or
     /// pushes is its destination.
-    var working: Bool { dispatching || syncing }
+    package var working: Bool { dispatching || syncing }
     /// The press's dispatch returned.
     package func dispatched() {
         dispatching = false
@@ -47,7 +47,7 @@ package final class PressHandoff {
         if !destinations.contains(where: { $0.route === route }) { destinations.append(Destination(route: route)) }
     }
     /// A destination left (its sheet was dismissed); any other stays.
-    func drop(_ route: NodeView) {
+    package func drop(_ route: NodeView) {
         destinations.removeAll { $0.route === route }
         settle()
     }
@@ -68,7 +68,7 @@ package final class PressHandoff {
             return controller.stack == nil
         }
     }
-    func settle() {
+    package func settle() {
         prune()
         if !working, !pending, destinations.isEmpty, let presenter, presenter.pressHandoff === self { presenter.pressHandoff = nil }
     }
@@ -83,7 +83,7 @@ extension Presenter {
         return handoff
     }
     /// A route the live press's own work presents or pushes.
-    func pressShows(_ route: NodeView?) {
+    package func pressShows(_ route: NodeView?) {
         guard let route, let handoff = pressHandoff, handoff.working else { return }
         handoff.record(route)
     }

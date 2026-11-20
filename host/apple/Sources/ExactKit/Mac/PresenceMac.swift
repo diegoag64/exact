@@ -55,7 +55,7 @@ extension Presenter {
     }
 
     /// The host's `destroy` of a leaving view: its exit ended.
-    func endExit(_ id: UInt32) -> Bool {
+    package func endExit(_ id: UInt32) -> Bool {
         guard let ended = leaving.removeValue(forKey: id) else { return false }
         ended.view.setGhost(false)
         for member in ended.members {
@@ -68,7 +68,7 @@ extension Presenter {
         return true
     }
 
-    func isLeaving(_ view: NSView) -> Bool {
+    package func isLeaving(_ view: NSView) -> Bool {
         guard let node = view as? NodeView else { return false }
         return leaving.values.contains { $0.members.contains { $0 === node } }
     }

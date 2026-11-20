@@ -24,7 +24,10 @@ pub(crate) struct Composition {
 }
 
 pub(crate) struct PaintedField {
-    pub(crate) geometry: Geometry,
+    pub(crate) geometry: Rc<Geometry>,
+    paragraph: Rc<Paragraph>,
+    stamp: Option<exact_kernel::text::ParagraphStamp>,
+    geometry_x: (f32, f32),
     pub(crate) value: String,
     spec: Spec,
     content: Rect4,
@@ -39,6 +42,63 @@ pub(crate) struct PaintedField {
 }
 
 impl PaintedField {
+    pub(crate) fn editor_size(kernel: &exact_kernel::Kernel, node: &NodeRef<'_>) -> (f32, f32) {
+        node.field_content_rect()
+            .map(|r| (r.width, r.height))
+            .unwrap_or_else(|| {
+                let (_, _, w, h) = exact_kernel::svg::scene::content_box(kernel, node);
+                (w, h)
+            })
+    }
+
+    /// The field layout an action can read before the next paint, including from a resize handler.
+    pub(crate) fn textarea_scroll_size(
+        previous: Option<&Self>,
+        text: &mut TextEngine,
+        kernel: &exact_kernel::Kernel,
+        node: &NodeRef<'_>,
+    ) -> (f32, f32) {
+        let content = Self::editor_size(kernel, node);
+        let stamp = node.paragraph_stamp();
+        let prior = previous.map(|field| field.paragraph.as_ref());
+        let previous = previous.filter(|f| {
+            f.stamp
+                .as_ref()
+                .zip(stamp.as_ref())
+                .is_some_and(|(a, b)| a.same_metrics(b))
+        });
+        if let Some(field) = previous.filter(|f| (f.content.2, f.content.3) == content) {
+            return field.scroll_max;
+        }
+        if let Some(field) =
+            previous.filter(|f| f.content.2 == content.0 || !f.spec.white_space.model().wraps())
+        {
+            return field.paragraph.textarea_scroll_max(&field.value, content);
+        }
+        let value = previous
+            .map(|field| field.value.as_str())
+            .unwrap_or_else(|| node.props.str(PropId::Value).unwrap_or(""));
+        let mut computed = node.computed_style(StyleMask::INHERITED);
+        if !computed.white_space.model().preserves() {
+            computed.white_space = exact_kernel::WhiteSpace::PreWrap;
+        }
+        let shown = if value.is_empty() {
+            node.props.str(PropId::Placeholder).unwrap_or("")
+        } else {
+            value
+        };
+        let spec;
+        let spec = match previous {
+            Some(field) => &field.spec,
+            None => {
+                spec = text_spec(&computed, shown);
+                &spec
+            }
+        };
+        text.edited_field(spec, Some(content.0), prior)
+            .textarea_scroll_max(value, content)
+    }
+
     pub(crate) fn decoration_state(&self) -> Option<serde_json::Value> {
         self.decorations
             .as_ref()
@@ -50,7 +110,7 @@ impl PaintedField {
         reason = "The paragraph supplies geometry; the other arguments initialize retained field state."
     )]
     fn new(
-        paragraph: &Paragraph,
+        paragraph: Rc<Paragraph>,
         value: &str,
         spec: Spec,
         content: Rect4,
@@ -58,7 +118,11 @@ impl PaintedField {
         masked: bool,
         transform: Transform,
         decorations: Option<Rc<FieldDecorations>>,
+        previous: Option<&PaintedField>,
     ) -> Self {
+        if let Some(previous) = previous.filter(|_| multiline) {
+            paragraph.reuse_field_ink(&previous.paragraph);
+        }
         let left = |width| line_left(spec.align, spec.direction, content.2, width);
         let empty_x = left(0.);
         let first_x = left(spec.text_indent)
@@ -83,25 +147,60 @@ impl PaintedField {
                     (content.3 - paragraph.height) / 2.
                 },
         );
-        let geometry = Geometry::new(
-            paragraph,
-            value,
-            masked,
-            if multiline { empty_x } else { 0. },
-            if multiline { first_x } else { 0. },
-        );
-        let (scroll_width, right_caret_inset) =
-            if !multiline && spec.direction == exact_kernel::Direction::Rtl {
-                // RTL trailing spaces can lie left of the paragraph's origin.
-                let (left, right) = geometry.horizontal_bounds();
-                let x = origin.0 - content.0;
-                let inset = (x + right + 1. - content.2).max(0.);
-                ((inset - x - left).max(0.), inset)
-            } else {
-                ((paragraph.width + 1. - content.2).max(0.), 0.)
-            };
+        let geometry_x = if multiline {
+            (empty_x, first_x)
+        } else {
+            (0., 0.)
+        };
+        let geometry = previous
+            .filter(|prev| {
+                Rc::ptr_eq(&prev.paragraph, &paragraph)
+                    && prev.masked == masked
+                    && prev.geometry_x.0.to_bits() == geometry_x.0.to_bits()
+                    && prev.geometry_x.1.to_bits() == geometry_x.1.to_bits()
+                    && prev.value == value
+            })
+            .map(|prev| prev.geometry.clone())
+            .unwrap_or_else(|| {
+                Rc::new(Geometry::new(
+                    &paragraph,
+                    value,
+                    masked,
+                    geometry_x.0,
+                    geometry_x.1,
+                ))
+            });
+        let (scroll_max, right_caret_inset) = if multiline {
+            (
+                paragraph.textarea_scroll_max(value, (content.2, content.3)),
+                0.,
+            )
+        } else if spec.direction == exact_kernel::Direction::Rtl {
+            // RTL trailing spaces can lie left of the paragraph's origin.
+            let (left, right) = geometry.horizontal_bounds();
+            let x = origin.0 - content.0;
+            let inset = (x + right + 1. - content.2).max(0.);
+            (
+                (
+                    (inset - x - left).max(0.),
+                    (paragraph.height - content.3).max(0.),
+                ),
+                inset,
+            )
+        } else {
+            (
+                (
+                    (paragraph.width + 1. - content.2).max(0.),
+                    (paragraph.height - content.3).max(0.),
+                ),
+                0.,
+            )
+        };
         Self {
             geometry,
+            stamp: previous.and_then(|field| field.stamp.clone()),
+            paragraph,
+            geometry_x,
             value: value.to_owned(),
             spec,
             content,
@@ -110,7 +209,7 @@ impl PaintedField {
             origin,
             scroll: (0., 0.),
             right_caret_inset,
-            scroll_max: (scroll_width, (paragraph.height - content.3).max(0.)),
+            scroll_max,
             transform,
             decorations,
         }
@@ -128,9 +227,13 @@ impl PaintedField {
         if let Some(decorations) = &self.decorations {
             spec = decorations.project(spec, value).spec;
         }
-        let paragraph = text.paragraph(&spec, self.multiline.then_some(self.content.2));
+        let paragraph = text.edited_field(
+            &spec,
+            self.multiline.then_some(self.content.2),
+            self.multiline.then_some(self.paragraph.as_ref()),
+        );
         let mut field = Self::new(
-            &paragraph,
+            paragraph,
             value,
             spec,
             self.content,
@@ -138,6 +241,7 @@ impl PaintedField {
             self.masked,
             self.transform,
             self.decorations.clone(),
+            Some(self),
         );
         field.set_scroll(self.scroll);
         field
@@ -354,12 +458,13 @@ impl Painter {
         let multiline = node.props.str(PropId::SemanticTag) == Some("textarea");
         let decorations = (!placeholder && multiline)
             .then(|| {
-                FieldDecorations::read(
-                    node.props.str(PropId::Decorations)?,
-                    node.props.str(PropId::DecorationStyles)?,
+                FieldDecorations::cached(
+                    node.props.get(PropId::Decorations)?,
+                    node.props.get(PropId::DecorationStyles)?,
+                    self.field_text
+                        .get(&node.id)
+                        .and_then(|field| field.decorations.as_ref()),
                 )
-                .ok()
-                .map(Rc::new)
             })
             .flatten();
         let (spec, inks, backgrounds, shadows) = match &decorations {
@@ -378,6 +483,10 @@ impl Painter {
             (node.id, 0),
             &spec,
             multiline.then_some(content.2),
+            self.field_text
+                .get(&node.id)
+                .filter(|_| multiline)
+                .map(|f| f.paragraph.as_ref()),
         );
         walk.text.insert(node.key, paragraph.clone());
         let mut oy = content.1
@@ -447,7 +556,7 @@ impl Painter {
             None => Cow::Borrowed(std::slice::from_ref(&base)),
         };
         let mut field = PaintedField::new(
-            &paragraph,
+            paragraph.clone(),
             value,
             spec,
             content,
@@ -455,7 +564,9 @@ impl Painter {
             node.props.str(PropId::Type) == Some("password"),
             ts,
             decorations,
+            self.field_text.get(&node.id).map(Rc::as_ref),
         );
+        field.stamp = node.paragraph_stamp();
         field.set_scroll(walk.scene.scroll.get(&node.id).copied().unwrap_or_default());
         let translation = field.scroll_translation();
         ox += translation.0;
@@ -556,12 +667,14 @@ impl Painter {
         // native editor underlines that clause without a selection background.
         if let Some(s) = selection.filter(|_| !cfg!(target_os = "windows") || composition.is_none())
         {
-            self.field_highlight(&field, s);
+            let top = padding.rect.1 - oy;
+            self.field_highlight(&field, s, top..top + padding.rect.3);
         }
         if !placeholder {
             let painted = material::FieldText::painted(&paragraph, (ox, oy), ts);
             self.labels.value(node.id, painted);
         }
+        let text_clip = if multiline { padding.rect } else { content };
         if let Some(shadows) = shadows {
             let ink = self.capture_field_ink(
                 walk.scene.kernel,
@@ -576,16 +689,16 @@ impl Painter {
                 (ox, oy),
                 ts,
                 None,
-                Some((content, padding.rect)),
+                Some((text_clip, padding.rect)),
             );
         } else {
-            self.backend.push_clip(&Shape::rect(content), ts);
+            self.backend.push_clip(&Shape::rect(text_clip), ts);
             let mut engine = self.text.borrow_mut();
             self.backend
                 .text(&mut engine, &paragraph, &palette, (ox, oy), ts);
             self.backend.pop_clip();
         }
-        self.backend.push_clip(&Shape::rect(content), ts);
+        self.backend.push_clip(&Shape::rect(text_clip), ts);
         if let Some(composition) = &composition {
             let line = 1. / self.scale.max(1.);
             let mut underline = |start, end, dotted| {
@@ -595,7 +708,7 @@ impl Painter {
                 for rect in field.geometry.underlines(start, end, line) {
                     let rect = field.place(rect);
                     if dotted {
-                        let visible = super::intersect(rect, content);
+                        let visible = super::intersect(rect, text_clip);
                         let step = line * 2.;
                         let mut x = rect.0 + ((visible.0 - rect.0) / step).ceil() * step;
                         while visible.3 > 0. && x < visible.0 + visible.2 {

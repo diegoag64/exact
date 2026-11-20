@@ -64,7 +64,7 @@ package enum AppFiles {
     }
     /// The URL of the file `open` finds, for a reader that takes a URL (a
     /// player, picture in picture); nil where `open` refuses.
-    static func file(_ path: String) -> URL? {
+    package static func file(_ path: String) -> URL? {
         guard let at = place(path), let handle = AppFileWalk.open(at.root, at.names) else { return nil }
         try? handle.close()
         return at.names.reduce(at.root) { $0.appendingPathComponent($1) }

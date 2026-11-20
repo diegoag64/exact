@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 @testable import ExactNativeViews
 
 /// LLP 1075.003 Stage 1 over the native fixture's own plan and hatch module,

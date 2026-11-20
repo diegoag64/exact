@@ -48,17 +48,17 @@
 import AppKit
 
 /// A sheet's window. Titled, which is what takes the keyboard.
-final class SheetWindow: ExactDrivenWindow {}
+package final class SheetWindow: ExactDrivenWindow {}
 
 /// A dialog's sheet: its window, the view that holds the dialog's subtree,
 /// and the window it is a sheet on. A modal route's sheet is the same, with
 /// its own title row and buttons round that view (`RouteChrome`, D7.4).
 package final class DialogSheet {
-    let window: SheetWindow
+    package let window: SheetWindow
     let rootEdits = RootEdits()
-    let content = BlockView(frame: .zero)
+    package let content = BlockView(frame: .zero)
     /// A modal route's sheet: its rows round the content. Nil for a dialog's.
-    let chrome: (any SheetChrome)?
+    package let chrome: (any SheetChrome)?
     /// The page's window, or the sheet this one stands on.
     private(set) weak var over: NSWindow?
     var begun = false
@@ -79,7 +79,7 @@ package final class DialogSheet {
     }
     /// The content's size, as layout returned it: the window's, with a
     /// route's rows round it.
-    func fit(_ size: CGSize) {
+    package func fit(_ size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
         used = size
         // A window's content is whole points: a fraction's is the next one up.
@@ -90,7 +90,7 @@ package final class DialogSheet {
         window.setContentSize(whole)
     }
     /// The rows round the content changed: the window is the same content and the new rows.
-    func refit() { fit(used) }
+    package func refit() { fit(used) }
 
     /// The dialog's `::backdrop` colour over the window beneath, again after
     /// a batch. It comes in and goes with the sheet, over the quarter of a
@@ -146,7 +146,7 @@ extension NodeView {
 
     /// The subtree moved into a sheet's window, or out of it: its boxes on
     /// the window's ground are painted again, on the ground they now have.
-    func sheetGroundChanged() {
+    package func sheetGroundChanged() {
         if groundIsTheWindows || hasGroupedCardFill { updateMaterial(); applyBoxLayer(); materialContent?.needsDisplay = true; needsDisplay = true }
         for child in structuralChildren { child.sheetGroundChanged() }
     }
@@ -156,7 +156,7 @@ extension NSView {
     /// Native containers move independently of the runner's transform rows.
     /// Read their presentation layers only while a native ancestor animates;
     /// an idle presentation copy may still hold the previous transaction.
-    func convertNativePresentation(_ rect: NSRect, from view: NSView) -> NSRect {
+    package func convertNativePresentation(_ rect: NSRect, from view: NSView) -> NSRect {
         func moving(_ view: NSView) -> CALayer? {
             guard !(view is NodeView), let layer = view.layer, layer.animationKeys()?.isEmpty == false else { return nil }
             return layer.presentation()

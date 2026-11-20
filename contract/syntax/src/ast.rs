@@ -1,7 +1,7 @@
 //! The abstract syntax tree.
 pub use crate::colours::{ColorProfileDecl, DesignSource, ThemeDecl};
 pub use crate::tap::TapForm;
-pub use crate::test_steps::{StateComparison, StateOperand, Step, TestDecl};
+pub use crate::test_steps::{LayoutOperand, StateComparison, StateOperand, Step, TestDecl};
 use crate::Span;
 use std::collections::BTreeMap;
 /// Identifier ranges that are distinct from their AST construct's diagnostic span.
@@ -12,6 +12,9 @@ pub struct NameSpans {
     pub names: BTreeMap<Span, Span>,
     /// Data source name in a resource or send, keyed by its construct.
     pub sources: BTreeMap<Span, Span>,
+    /// Authored view ranges for focused symbol lookups, keyed by control
+    /// keyword, attribute name or positional expression span.
+    pub view_ranges: BTreeMap<Span, (Span, Span)>,
 }
 impl NameSpans {
     /// The exact identifier range, or the construct when it already names a token.
@@ -1234,6 +1237,13 @@ pub enum TemplatePart {
 }
 
 impl Expr {
+    /// A shape built in place, `Shape(key=value, …)`: a call whose arguments are all
+    /// named, at least one of them. Observe's commands send its fields by name.
+    pub fn constructs_shape(&self) -> bool {
+        matches!(self, Expr::Call(_, args, _)
+            if !args.is_empty() && args.iter().all(|a| matches!(a, Expr::NamedArg(..))))
+    }
+
     /// Where.
     pub fn span(&self) -> Span {
         match self {

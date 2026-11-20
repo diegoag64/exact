@@ -13,6 +13,7 @@
 import AppKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 final class RouteSheetMacTests: XCTestCase {
     /// One stack: a home route, and modal routes the app mounts as it

@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 extension NavigationBarIOSTests {
     /// A drawn face is an image for one scheme: the scheme changing while

@@ -7,26 +7,26 @@ import UIKit
 /// A bar item's face drawn from a button whose one child is a filled box
 /// holding a text, a symbol or a picture (an avatar, a badge): CSS's colours and
 /// corners at the bar's image size, light and dark, as the platform draws an image that retains its colours.
-struct BadgeFace: Equatable {
+package struct BadgeFace: Equatable {
     /// A bar item's image size; a title's avatar takes the author's.
-    static let size: CGFloat = 36
-    let size: CGFloat
+    package static let size: CGFloat = 36
+    package let size: CGFloat
     let text: String, symbol: String?
     /// The box's picture (an avatar's photo) once it has loaded, and how it
     /// fills the box (`object-fit`). Until then the face is the box's fill,
     /// with its text or symbol if it has one.
     let picture: CGImage?, natural: CGSize, fit: String
     /// The picture's node, loaded or not.
-    let pictureNode: UInt32?
+    package let pictureNode: UInt32?
     let light: [[Double]], dark: [[Double]]
     let corners: [CGSize]
     #if !os(macOS)
     private let darkScheme: Bool
     /// The fill's and the ink's share of the tint where each is the tint (`AccentColor` 1,
     /// `Highlight` 0.2), nil otherwise: the parts drawn in UIKit's grey while it dims tints.
-    let shares: [Double?]
+    package let shares: [Double?]
     #endif
-    init?(_ button: NodeView) {
+    package init?(_ button: NodeView) {
         let kids = button.childNodes
         guard kids.count == 1, let box = kids.first else { return nil }
         self.init(box: box)
@@ -35,7 +35,7 @@ struct BadgeFace: Equatable {
     /// avatar, §9.10, too). `authored`: draw it at the size the author gave
     /// the box (`faceBoxSize`, the authored points a replaced header has no frame for), between 20
     /// and 44, as a title's avatar is; otherwise at a bar item's 36.
-    init?(box: NodeView, authored: Bool = false) {
+    package init?(box: NodeView, authored: Bool = false) {
         guard box.channels("background_color") != nil else { return nil }
         var text = "", symbol: String?, ink: NodeView?, pictured: NodeView?
         func walk(_ node: NodeView) {
@@ -71,7 +71,7 @@ struct BadgeFace: Equatable {
     }
     // Joined by hand: interpolating an array goes through reflection, and
     // every batch builds each route's source.
-    var source: String {
+    package var source: String {
         let rgba = { (c: [[Double]]) in c.map { $0.map { String($0) }.joined(separator: ",") }.joined(separator: ";") }
         var source = "\(text)|\(symbol ?? "")|\(picture.map { "\(ObjectIdentifier($0))" } ?? "")|\(fit)|\(rgba(light))|\(rgba(dark))|\(corners.map { "\($0.width)x\($0.height)" }.joined(separator: ","))|\(size)"
         #if !os(macOS)
@@ -81,7 +81,7 @@ struct BadgeFace: Equatable {
     }
 
     #if os(macOS)
-    var image: NSImage {
+    package var image: NSImage {
         NSImage(size: CGSize(width: size, height: size), flipped: true) { rect in
             let dark = NSAppearance.current.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
             let colours = dark ? self.dark : self.light
@@ -111,10 +111,10 @@ struct BadgeFace: Equatable {
         }
     }
     #else
-    var image: UIImage { image(dimmed: false) }
+    package var image: UIImage { image(dimmed: false) }
     /// The face drawn; `dimmed`, its tint parts in the grey UIKit dims a tint to, which an
     /// original bitmap does not follow.
-    func image(dimmed: Bool) -> UIImage {
+    package func image(dimmed: Bool) -> UIImage {
         draw(darkScheme ? dark : light, dimmed: dimmed).withRenderingMode(.alwaysOriginal)
     }
     private func draw(_ c: [[Double]], dimmed: Bool) -> UIImage {
@@ -152,7 +152,7 @@ struct BadgeFace: Equatable {
 extension UIColor {
     /// The grey UIKit dims this tint to behind a modal (`tintAdjustmentMode = .dimmed`), at a tint
     /// role's `share` of it (`Highlight` 0.2). UIKit chooses it, including for a node's own accent.
-    func dimmedTint(share: Double) -> UIColor {
+    package func dimmedTint(share: Double) -> UIColor {
         let probe = UIView(); probe.tintColor = self; probe.tintAdjustmentMode = .dimmed
         return share < 1 ? probe.tintColor.withAlphaComponent(share) : probe.tintColor
     }

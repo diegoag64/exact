@@ -85,7 +85,7 @@ extension NodeView {
 /// state at its commit. It is tried at the first main run-loop turn with no
 /// interaction under way after something changed: an input, a reply, a
 /// presented batch.
-final class ReplacementQueue {
+package final class ReplacementQueue {
     struct Candidate {
         // Producer tokens may repeat; every submission has its own identity.
         let id = UUID()
@@ -241,8 +241,8 @@ final class ReplacementQueue {
         if composing(sessions) { return "composition" }
         #endif
         if pressed(sessions) { return "pointer" }
-        // A reorder the keyboard lifted holds no button (`ReorderGroupHold`).
-        if sessions.contains(where: { $0.presenter.reorderGroup?.active == true }) { return "gesture" }
+        // A grouped reorder the keyboard lifted holds no button.
+        if sessions.contains(where: { $0.presenter.reorders.groupActive }) { return "gesture" }
         #if os(macOS)
         // A loop AppKit runs for a menu, a control's press or a scroller keeps its events from every view.
         if !trackpad.isEmpty || RunLoop.main.currentMode == .eventTracking { return "gesture" }
@@ -384,7 +384,7 @@ final class ReplacementQueue {
 
     /// The fingers of a gesture lifted, said by whoever tracked it: this
     /// monitor, a scroll view, or AppKit's swipe tracking (`BackSwipe`).
-    func lifted(_ type: NSEvent.EventType) {
+    package func lifted(_ type: NSEvent.EventType) {
         if trackpad.remove(type.rawValue) != nil { changed() }
     }
 

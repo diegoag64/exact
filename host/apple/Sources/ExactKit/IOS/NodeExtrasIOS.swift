@@ -4,6 +4,12 @@
 #if os(iOS) || os(tvOS)
 import UIKit
 
+/// A transform handle's contact, which the Drag module keeps: the core asks
+/// only for its pinch, which gesture precedence orders.
+package protocol TransformPinchContact: AnyObject {
+    var pinchRecognizer: UIGestureRecognizer { get }
+}
+
 /// What most nodes never set — gestures and their holds, editors and
 /// embedded platform views, a canvas's overlay, symbols, focus rings, a
 /// scroller's bookkeeping — held apart and made on the first write that is
@@ -53,11 +59,11 @@ final class NodeAside {
     var rotate: CGFloat = 0
     var rotationAxis: [Double] = [0, 0, 0]
     var content = CGSize.zero
-    var fitContentHeight: CGFloat?
+    package var fitContentHeight: CGFloat?
     var image: UIImage?
     var raster: (any ImageLease)?
     package var imageLayer: CALayer?
-    var imageSource: String?
+    package var imageSource: String?
     package var loadGeneration = 0
     package var buttonRasterView: UInt32?
     var paintGhosts = 0
@@ -86,12 +92,12 @@ final class NodeExtras {
     var nativeActiveRefusals: [String: String] = [:]
     /// The tint its authored `accent-color` gives its subtree (`applyAccentTint`)
     var authoredAccentTint: UIColor?
-    var pressContact: PressContact?
+    package var pressContact: PressContact?
     var inlinePressed: UInt32?
     /// A Markdown link pressed in this text: its target, followed on release over it.
     var linkPressed: String?
     var svgPressed: UInt32?
-    var clipPath: CGPath?
+    package var clipPath: CGPath?
     var clipRule: CGPathFillRule = .winding
     var clipBox: PlainView?
     /// The box layout moved it from (LLP 1063).
@@ -126,7 +132,7 @@ final class NodeExtras {
     var reorderOrigin: CGPoint = .zero
     var transformRecognizer: UIPanGestureRecognizer?
     var transformHold: DragInput?
-    var transformContact: TransformContact?
+    var transformContact: TransformPinchContact?
     var swipeOrigin: Double = 0
     var contextRecognizer: UILongPressGestureRecognizer?
     var doubleRecognizer: UITapGestureRecognizer?
@@ -137,7 +143,7 @@ final class NodeExtras {
     var textArea: UITextView?
     var field: UITextField?
     var fieldWaits = false
-    weak var headerField: UITextField?
+    package weak var headerField: UITextField?
     #if os(iOS)
     /// A number input's stepper (`NumberStepperIOS.swift`).
     var stepper: FieldStepper?
@@ -197,10 +203,10 @@ final class NodeExtras {
     var pendingScrollTransfer = false
     /// A collapsing title's scroller (LLP 1075.003 Stage 3): its expanded
     /// title's inset, where `scrollTop` 0 rests; 0 for every other scroller.
-    var controlRide: CGFloat = 0
-    var scrollOrigin: CGFloat = 0
+    package var controlRide: CGFloat = 0
+    package var scrollOrigin: CGFloat = 0
     /// …and the smallest inset it has had: its title collapsed.
-    var scrollCollapsed: CGFloat = 0
+    package var scrollCollapsed: CGFloat = 0
     /// What the style last said of the scroll view's indicators and deceleration.
     weak var nativeScrollView: UIScrollView?
     weak var nativeScrollDelegate: (any UIScrollViewDelegate)?
@@ -210,7 +216,7 @@ final class NodeExtras {
     /// reaches into past its box, inset by as much (LLP 1130 D3).
     var pageBand = UIEdgeInsets.zero
     /// The part of the band its scroll view's `contentInset` holds (LLP 1131 D2).
-    var bandInset = UIEdgeInsets.zero
+    package var bandInset = UIEdgeInsets.zero
     /// The bottom inset a keyboard toolbar gives its scroll view (`KeyboardToolbarIOS.swift`).
     var keyboardInset: CGFloat = 0
     /// A control bar over a scroller's content (LLP 1131 D3, D4): the scroller's paint rank, which it is placed
@@ -218,7 +224,7 @@ final class NodeExtras {
     var bandOver: Int64?
     /// A child beside the routes or below their tab panels: it paints over
     /// the whole-view native container (`NavigationHost.clearBesideRoutes`).
-    var clearsNavigation = false
+    package var clearsNavigation = false
     var edgeInteraction: AnyObject?
     var scrollWritten: String?
     /// A hatched node whose hatch undoes its own additions: its row may be
@@ -273,7 +279,7 @@ extension NodeView {
     /// A scroll container's content extent (the `content` op), before the
     /// axes that do not scroll are held to the box.
     package var content: CGSize { get { aside?.content ?? .zero } set { if newValue != .zero || aside != nil { asideMade.content = newValue } } }
-    var fitContentHeight: CGFloat? { get { aside?.fitContentHeight } set { if newValue != nil || aside != nil { asideMade.fitContentHeight = newValue } } }
+    package var fitContentHeight: CGFloat? { get { aside?.fitContentHeight } set { if newValue != nil || aside != nil { asideMade.fitContentHeight = newValue } } }
     /// An image node's picture, once loaded (decoded off the main thread),
     /// the source it came from, and which load is current: a completion
     /// from an older load, or for a view that was destroyed, is dropped.
@@ -289,7 +295,7 @@ extension NodeView {
     }
     /// An image's pixels as a sublayer's contents (`applyImageLayer`).
     package var imageLayer: CALayer? { get { aside?.imageLayer } set { if newValue != nil || aside != nil { asideMade.imageLayer = newValue } } }
-    var imageSource: String? { get { aside?.imageSource } set { if newValue != nil || aside != nil { asideMade.imageSource = newValue } } }
+    package var imageSource: String? { get { aside?.imageSource } set { if newValue != nil || aside != nil { asideMade.imageSource = newValue } } }
     package var loadGeneration: Int { get { aside?.loadGeneration ?? 0 } set { if newValue != 0 || aside != nil { asideMade.loadGeneration = newValue } } }
     var paintGhosts: Int { get { aside?.paintGhosts ?? 0 } set { if newValue != 0 || aside != nil { asideMade.paintGhosts = newValue } } }
     var ghostParent: NodeView? { get { aside?.ghostParent } set { if newValue != nil || aside != nil { asideMade.ghostParent = newValue } } }
@@ -307,10 +313,10 @@ extension NodeView {
         set { if !newValue.isEmpty || extras != nil { more.nativeActiveRefusals = newValue } }
     }
     var inlinePressed: UInt32? { get { extras?.inlinePressed } set { if newValue != nil || extras != nil { more.inlinePressed = newValue } } }
-    var pressContact: PressContact? { get { extras?.pressContact } set { if newValue != nil || extras != nil { more.pressContact = newValue } } }
+    package var pressContact: PressContact? { get { extras?.pressContact } set { if newValue != nil || extras != nil { more.pressContact = newValue } } }
     var linkPressed: String? { get { extras?.linkPressed } set { if newValue != nil || extras != nil { more.linkPressed = newValue } } }
     var svgPressed: UInt32? { get { extras?.svgPressed } set { if newValue != nil || extras != nil { more.svgPressed = newValue } } }
-    var clipPath: CGPath? { get { extras?.clipPath } set { if newValue != nil || extras != nil { more.clipPath = newValue } } }
+    package var clipPath: CGPath? { get { extras?.clipPath } set { if newValue != nil || extras != nil { more.clipPath = newValue } } }
     var clipRule: CGPathFillRule { get { extras?.clipRule ?? .winding } set { if newValue != .winding || extras != nil { more.clipRule = newValue } } }
     var fieldInCell: Bool { get { extras?.fieldInCell ?? false } set { if newValue || extras != nil { more.fieldInCell = newValue } } }
     var paintMore: NodePaintExtras {
@@ -348,7 +354,7 @@ extension NodeView {
     package var reorderOrigin: CGPoint { get { extras?.reorderOrigin ?? .zero } set { if newValue != .zero || extras != nil { more.reorderOrigin = newValue } } }
     package var transformRecognizer: UIPanGestureRecognizer? { get { extras?.transformRecognizer } set { if newValue != nil || extras != nil { more.transformRecognizer = newValue } } }
     package var transformHold: DragInput? { get { extras?.transformHold } set { if newValue != nil || extras != nil { more.transformHold = newValue } } }
-    package var transformContact: TransformContact? { get { extras?.transformContact } set { if newValue != nil || extras != nil { more.transformContact = newValue } } }
+    package var transformContact: TransformPinchContact? { get { extras?.transformContact } set { if newValue != nil || extras != nil { more.transformContact = newValue } } }
     /// A projection's transform over its layout (PresenterIOS), identity for every other node.
     package var contextTransform: CGAffineTransform {
         get { extras?.contextTransform ?? .identity }
@@ -360,7 +366,7 @@ extension NodeView {
     /// While it flies as a shared element (LLP 1013.000 D4): where its image is drawn.
     package var flightLook: FlightLook? { get { extras?.flightLook } set { if newValue != nil || extras != nil { more.flightLook = newValue } } }
     /// LLP 1093 D7: fragments or columns.
-    var columnRecord: ColumnRecord? { get { extras?.columnRecord } set { if newValue != nil || extras != nil { more.columnRecord = newValue } } }
+    package var columnRecord: ColumnRecord? { get { extras?.columnRecord } set { if newValue != nil || extras != nil { more.columnRecord = newValue } } }
     var liveText: String? { get { extras?.liveText } set { if newValue != nil || extras != nil { more.liveText = newValue } } }
     var swipeOrigin: Double { get { extras?.swipeOrigin ?? 0 } set { if newValue != 0 || extras != nil { more.swipeOrigin = newValue } } }
     var contextRecognizer: UILongPressGestureRecognizer? { get { extras?.contextRecognizer } set { if newValue != nil || extras != nil { more.contextRecognizer = newValue } } }
@@ -375,14 +381,14 @@ extension NodeView {
     var fieldWaits: Bool { get { extras?.fieldWaits ?? false } set { if newValue || extras != nil { more.fieldWaits = newValue } } }
     /// UIKit's field standing in for this one while it shows: the bar's
     /// search field (`HeaderSearch`), a prompt's (`PromptField`).
-    var headerField: UITextField? { get { extras?.headerField } set { if newValue != nil || extras != nil { more.headerField = newValue } } }
+    package var headerField: UITextField? { get { extras?.headerField } set { if newValue != nil || extras != nil { more.headerField = newValue } } }
     var selectionField: UITextField? { headerField ?? field }
     /// The editor's text as the app was last told it; nil once the app has set the value since (`FieldComposition.swift`).
     var toldText: String? { get { extras?.toldText } set { if newValue != nil || extras != nil { more.toldText = newValue } } }
     /// A `value` that arrived while text was marked, applied when the composition ends.
     var pendingValue: String? { get { extras?.pendingValue } set { if newValue != nil || extras != nil { more.pendingValue = newValue } } }
-    var video: (any VideoPlaying)? { get { extras?.video } set { if newValue != nil || extras != nil { more.video = newValue } } }
-    package internal(set) var web: UIView? { get { extras?.web } set { if newValue != nil || extras != nil { more.web = newValue } } }
+    package var video: (any VideoPlaying)? { get { extras?.video } set { if newValue != nil || extras != nil { more.video = newValue } } }
+    package var web: UIView? { get { extras?.web } set { if newValue != nil || extras != nil { more.web = newValue } } }
     package var metal: MetalView? { get { extras?.metal } set { if newValue != nil || extras != nil { more.metal = newValue } } }
     package var canvasInput: CanvasInput? { get { extras?.canvasInput } set { if newValue != nil || extras != nil { more.canvasInput = newValue } } }
     package var overlay: PlainView? { get { extras?.overlay } set { if newValue != nil || extras != nil { more.overlay = newValue } } }
@@ -486,12 +492,12 @@ extension NodeView {
     #endif
 }
 extension NodeView {
-    var controlRide: CGFloat { get { extras?.controlRide ?? 0 } set { if newValue != 0 || extras != nil { more.controlRide = newValue } } }
-    var scrollOrigin: CGFloat { get { extras?.scrollOrigin ?? 0 } set { if newValue != 0 || extras != nil { more.scrollOrigin = newValue } } }
-    var scrollCollapsed: CGFloat { get { extras?.scrollCollapsed ?? 0 } set { if newValue != 0 || extras != nil { more.scrollCollapsed = newValue } } }
+    package var controlRide: CGFloat { get { extras?.controlRide ?? 0 } set { if newValue != 0 || extras != nil { more.controlRide = newValue } } }
+    package var scrollOrigin: CGFloat { get { extras?.scrollOrigin ?? 0 } set { if newValue != 0 || extras != nil { more.scrollOrigin = newValue } } }
+    package var scrollCollapsed: CGFloat { get { extras?.scrollCollapsed ?? 0 } set { if newValue != 0 || extras != nil { more.scrollCollapsed = newValue } } }
     var scrollWritten: String? { get { extras?.scrollWritten } set { if newValue != nil || extras != nil { more.scrollWritten = newValue } } }
     package var hatchReusable: Bool { get { extras?.hatchReusable ?? false } set { if newValue || extras != nil { more.hatchReusable = newValue } } }
-    var clearsNavigation: Bool { get { extras?.clearsNavigation ?? false } set { if newValue || extras != nil { more.clearsNavigation = newValue } } }
+    package var clearsNavigation: Bool { get { extras?.clearsNavigation ?? false } set { if newValue || extras != nil { more.clearsNavigation = newValue } } }
     /// Where CSS's `scrollTop` 0 is in UIKit's offsets: past the scroller's
     /// top inset when UIKit insets it — a collapsing title's bar, or the bar
     /// over a route's bottom-edge scroller (`reachBottom`), which stays
@@ -504,7 +510,7 @@ extension NodeView {
     }
     /// Its page band (`NodeExtras.pageBand`), zero for most.
     package var pageBand: UIEdgeInsets { extras?.pageBand ?? .zero }
-    var bandInset: UIEdgeInsets { extras?.bandInset ?? .zero }
+    package var bandInset: UIEdgeInsets { extras?.bandInset ?? .zero }
     var bandOver: Int64? { get { extras?.bandOver } set { if newValue != nil || extras != nil { more.bandOver = newValue } } }
     var edgeInteraction: AnyObject? { get { extras?.edgeInteraction } set { if newValue != nil || extras != nil { more.edgeInteraction = newValue } } }
     /// Whether a touch at `point` can reach this box's children. Overflow
@@ -570,7 +576,7 @@ extension NodeView {
     /// ground is its sheet's surface, which the presentation paints
     /// (`ModalController.paintSurface`), so that below its large detent the
     /// sheet is UIKit's glass (LLP 1141.001 D3).
-    var groundIsSheets: Bool {
+    package var groundIsSheets: Bool {
         #if os(iOS)
         guard props["navigationPresentation"] == "modal", !wrote("background_color"),
               case .object(let o)? = style["background_color"] else { return false }
@@ -587,7 +593,7 @@ extension NodeView {
     /// composites it (Charlie, 2026-11-10); a hand-built viewer is a clear
     /// view presented `overFullScreen` likewise. A full-screen route that
     /// paints nothing stays on the platform's background (LLP 1115 D2).
-    var paintsOverPage: Bool {
+    package var paintsOverPage: Bool {
         #if os(iOS)
         props["navigationPresentation"] == "fullscreen" && (wrote("background_color") || wrote("background_image"))
         #else
@@ -611,7 +617,7 @@ extension NodeView {
     /// LLP 1121 D9).
     /// A field of the author's own (`appearance="none"`) is their box, and
     /// inherits as text does.
-    var fieldInk: UIColor {
+    package var fieldInk: UIColor {
         guard isNativeTextControl else { return color("text_color", SystemColor.canvasText) }
         return showsOwnTextColor ? uiColor("text_color") ?? SystemColor.canvasText : ThemeRoles.color("FieldText", in: self, or: SystemColor.canvasText)
     }

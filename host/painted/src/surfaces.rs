@@ -517,6 +517,7 @@ pub(crate) struct Surfaces {
     abis: BTreeMap<String, Abi>,
     attempted: BTreeSet<String>,
     canvases: BTreeMap<u32, Canvas>,
+    defer_readback: bool,
     performance_due: Option<std::time::Instant>,
     edits_admitted: bool,
     restore: Option<Result<Vec<u8>, String>>,

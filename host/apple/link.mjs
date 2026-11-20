@@ -1,7 +1,7 @@
 // What an Apple app links: the capabilities its composition names, the deployment
 // targets it compiles and links for, and the SDK its executable records, with the
 // device launch link of LLP 1047.001.001.
-import { spawnSync } from './toolchain.mjs';
+import { experimental, spawnSync } from './toolchain.mjs';
 import { readFileSync, writeFileSync, mkdirSync, rmSync, cpSync, statSync } from 'node:fs';
 import { basename, dirname } from 'node:path';
 
@@ -97,6 +97,11 @@ const SWIFT_CAPABILITIES = (() => {
   return rows;
 })();
 
+/** What links ExactAnimations (Package.swift's `played`): the host plays a
+ * box's transitions, drags and motion through the same `animations` op as its
+ * CSS animations. */
+const PLAYED = ['animations', 'motion', 'drag', 'timelines', 'transitions'];
+
 /** The capabilities a development build links only as production would
  * (LLP 1047.001.000 F): each links a framework that costs every iOS launch
  * its images (PhotosUI, AuthenticationServices, ~300 each; SwiftUI; TipKit),
@@ -112,15 +117,20 @@ const BY_USE_IN_DEVELOPMENT = ['media_picker', 'auth_session', 'numerals', 'tips
  * `products` the Swift capability products the composition links and
  * installs, and an embedder links beside
  * ExactKit. Cargo is told `plan` or `all` before the bake; the Rust entry
- * reads that bake's linked set through `exact_bake::apple_link`. */
-export function appleComposition(graph, production, ahead = [], compat = null) {
-  const uses = graph?.uses;
+ * reads that bake's linked set through `exact_bake::apple_link`.
+ * Experimental (`EXACT_EXPERIMENTAL=1`): a `--development` archive links those
+ * too, so every app's archive has one composition and shares one ExactKit
+ * compile, where each combination of them compiles ExactKit anew; the archive
+ * pays their launch time and size. */
+export function appleComposition(graph, production, ahead = [], compat = null, developmentArchive = false) {
+  const uses = developmentArchive && experimental() ? null : graph?.uses;
   const byUse = production ? compat?.inputs?.linked
     : Array.isArray(uses) ? [...uses, ...ahead, ...(compat?.reach?.auth?.sessions === true ? ['auth_session'] : [])] : null;
   const link = !Array.isArray(byUse) ? 'all'
     : production ? [...new Set(byUse)].join(',') || 'none'
     : SWIFT_CAPABILITIES.map(([name]) => name).filter((name) => !BY_USE_IN_DEVELOPMENT.includes(name) || byUse.includes(name)).join(',');
-  const products = SWIFT_CAPABILITIES.filter(([name]) => link === 'all' || link.split(',').includes(name)).map(([, product]) => product);
+  const linked = (name) => link === 'all' || link.split(',').includes(name);
+  const products = SWIFT_CAPABILITIES.filter(([name]) => name === 'animations' ? PLAYED.some(linked) : linked(name)).map(([, product]) => product);
   return { link, products };
 }
 

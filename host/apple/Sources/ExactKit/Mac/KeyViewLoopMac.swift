@@ -9,7 +9,7 @@ import AppKit
 /// default, Tab moves between text fields and lists; on, it reaches every
 /// control. AppKit's own controls read it (`NSButton.canBecomeKeyView`), and
 /// so do Exact's.
-enum KeyboardNavigation {
+package enum KeyboardNavigation {
     /// What stands in for the person's setting: an agent's `prefer
     /// keyboard-navigation` or a test's. Under the agent it is off from
     /// launch, the system's default and never the machine's (LLP 1069.007
@@ -19,7 +19,7 @@ enum KeyboardNavigation {
     /// The setting now. Read at each use, so a change in System Settings is
     /// the next Tab's (`Presenter.flushKeyViewLoop` rebuilds the loop when
     /// the setting it was built for is not this one).
-    static var on: Bool { agent ?? NSApp.isFullKeyboardAccessEnabled }
+    package static var on: Bool { agent ?? NSApp.isFullKeyboardAccessEnabled }
 }
 
 extension NodeView {
@@ -72,7 +72,7 @@ extension Presenter {
     /// (SheetsMac.swift, PopoversMac.swift): the open dialog's loop starts
     /// at its sheet's content, and each such popover is a loop of its own,
     /// as an `NSPopover`'s is.
-    func syncKeyViewLoop() {
+    package func syncKeyViewLoop() {
         keyViewLoopMode = KeyboardNavigation.on
         keyViewBefore.removeAllObjects()
         for scope in keyViewScopes { keyViewLoop(scope.tops, from: scope.start) }

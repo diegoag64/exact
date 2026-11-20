@@ -289,17 +289,20 @@ impl<D: DataSource> Host<D> {
         );
         data.configure_secrets(secret_session.shared.clone())
             .map_err(|error| HostError::Layout(format!("shared secrets: {error:?}")))?;
-        let mut runner = Runner::boot_with_delivery(
-            plan,
-            data,
-            kernel,
-            carried,
-            store_snapshot,
-            delivery.unwrap_or_default(),
-            exact_runner::Viewport::sized(width as f64, height as f64),
-            launch,
-        )
-        .map_err(HostError::Runner)?;
+        let mut runner = crate::PLATFORM
+            .boot(|| {
+                Runner::boot_with_delivery(
+                    plan,
+                    data,
+                    kernel,
+                    carried,
+                    store_snapshot,
+                    delivery.unwrap_or_default(),
+                    exact_runner::Viewport::sized(width as f64, height as f64),
+                    launch,
+                )
+            })
+            .map_err(HostError::Runner)?;
         #[cfg(target_os = "macos")]
         drop(boot_trace);
         #[cfg(any(windows, target_os = "macos"))]
@@ -984,7 +987,7 @@ impl<D: DataSource> Host<D> {
             .map_err(|e| format!("safe area: {e:?}"))?;
         match self
             .runner
-            .refresh_viewport_geometry()
+            .refresh_geometry()
             .map_err(|e| format!("safe area: {e:?}"))?
         {
             Some(receipt) => {
@@ -1056,7 +1059,10 @@ impl<D: DataSource> Host<D> {
                     continue;
                 }
                 let size = crate::paint::look::symbol_size(&node);
-                sizes.push((node.id, (size > 0.).then_some((size, size))));
+                sizes.push((
+                    node.id,
+                    (size > 0.).then(|| crate::paint::look::symbol_natural(&node)),
+                ));
             }
         }
         for (view, size) in sizes {

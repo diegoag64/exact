@@ -8,6 +8,7 @@
 import AppKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 final class SplitMacTests: XCTestCase {
     private var window: NSWindow?

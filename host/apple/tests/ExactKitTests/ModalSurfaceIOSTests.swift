@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 import ExactGroupedLists
 
 /// What a full-screen route stands on, over `scripts/fixtures/navigation-bars.contract`

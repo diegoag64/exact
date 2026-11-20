@@ -41,6 +41,7 @@ fn delivery(platform: &str) {
             hatches: None,
             packages: Vec::new(),
             clock_started: None,
+            preferences: None,
         };
         let (mut p, error) = boot_presenter::<()>(&mut config, (390., 844.)).unwrap();
         assert!(error.is_none(), "{error:?}");

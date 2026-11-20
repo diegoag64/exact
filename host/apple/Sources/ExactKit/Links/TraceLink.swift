@@ -4,13 +4,14 @@
 // session's command dispatch reaches them only through this slot; without
 // them a trace command is refused into the journal, as one that finds no
 // recording is. Frame health's sampler records the frames (FrameSampler.swift,
-// in every build, LLP 1079.000); the family is the commands and the report.
-// The slot's default is today's.
+// in every build, LLP 1079.000); the family is the commands, the report and
+// the public `startTrace`/`stopTrace` (ExactTraces), whose `install()` sets
+// the slot.
 
 /// The slot is set before any session is made, and read on the main thread.
 package enum TraceLink {
     /// `startTrace_EXPERIMENTAL()` or `stopTrace_EXPERIMENTAL([maxBytes])`.
-    package static var command: ((ExactSession, String, [Any]) -> Void)? = { $0.traceCommand($1, $2) }
+    package static var command: ((ExactSession, String, [Any]) -> Void)?
 }
 
 extension ExactSession {

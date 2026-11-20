@@ -3,6 +3,7 @@ import UIKit
 import XCTest
 @testable import ExactImages
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// A header button's face as its author painted it (`ChipFace`, LLP 1115
 /// §2): a dot beside a label, or a label in the author's font, is the bar

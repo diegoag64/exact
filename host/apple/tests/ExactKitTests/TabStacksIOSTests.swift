@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// LLP 1075.003 §3.7 (PlainTabIOS.swift): every tab's controller is made
 /// with the tab container and never replaced. A tab whose panel draws its

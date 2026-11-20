@@ -76,6 +76,8 @@ the build refuses and names the SDK and `"cpu"` remedies.
 for their headless drives unless `EXACT_PAINTER` is set. Those screenshots
 do not qualify the window's composition path.
 A direct `EXACT_SMOKE=1` launch uses the app's painter choice.
+A Windows login item started with `--login hidden` paints its offscreen launch
+frame on the CPU and opens the selected painter when its window first draws.
 Linux and Android still opt into ink per platform; Android refuses it until
 its Vulkan presenter is implemented. Apple keeps the native host by default;
 `host.macos.presenter: "painted"` builds the ink carrier for development,
@@ -133,6 +135,25 @@ The canonical [Messages](../apps/messages/README.md) app is the Exact port of Ex
 chat demo, with model conversations through a local OpenRouter service. It belongs
 to the root workspace and does not use Snapback. Run `bun apps/messages/service.ts`
 and `bun host/web/dev.mjs --app messages --port 8767`.
+
+### Linux KMS rotation and VNC
+
+On Linux KMS, `EXACT_ROTATE=0|90|180|270` turns the completed image clockwise.
+Without it, the connector's `panel orientation` property chooses the angle; an
+absent property means 0. At 90 or 270 degrees layout uses the swapped mode size.
+The GPU rotates the image before display. Absolute evdev and VNC coordinates use
+the inverse transform; relative mouse movement and scrolling keep the user's axes.
+Agent screenshots show the rotated framebuffer, at the panel mode's size. Their
+replies give that image's point dimensions and clockwise `rotation` in degrees;
+comparison maps layout boxes onto those axes. Agent layout and target coordinates
+remain logical. In a headless Linux host, `EXACT_SIZE` supplies the unrotated panel
+size in points. Ink blits its retained target before readback; other painters
+upload their completed pixels for the GPU blit. KMS still reads back into dumb
+buffers.
+
+A Linux development build can serve its screen over VNC: set `EXACT_VNC=1` and
+`EXACT_VNC_PASSWORD` to 1–8 bytes. It listens on `127.0.0.1:5900`; `EXACT_VNC=host:port`
+selects another address. Production bakes ignore both variables.
 
 ## Runtime font families and `aria-disabled`
 
@@ -245,6 +266,30 @@ place and `component`, and `attrs`, each attribute written on it with the place
 of its name and, for a string literal value, `string` with the value and its
 place, quotes included. A button's one argument, which becomes its `text` child, is no element
 of its own. A `--name` query has no `elements`.
+
+Add an element filter to `symbols --editor` to return just the matching
+`elements` across the source graph. `--component` matches the declared name,
+and `--tag` accepts the authored or compiler tag. Repeat `--has <attr>` and
+`--where 'attr=expression'` to require written attributes and exact source
+values. Use `--has` for a bare attribute such as `multiple`. Repeat
+`--match <text>` to look up several
+case-sensitive substrings in one pass. A match can occur in the tag, a written
+attribute name or value, or a positional text expression such as an option
+label or a button's direct text child. Use `--or` to start an independent filter
+group. An element that satisfies any group appears once, in source order
+within its file.
+
+```sh
+contract symbols app.contract --editor --component Editor --tag button --match 'Save draft' \
+  --or --component Preview --tag button --match Cancel
+```
+
+Filtered elements include `binding` on attributes with other written values,
+`text` for text expressions, and `context` for enclosing `if` and `for` headers,
+outermost first. An `if` reports which branch contains the element. Each entry
+includes its authored `source` and range in the element's file. An `end_line`
+appears when the range crosses a line. Element filters can be used with
+`--stdin` and are separate from `--name` queries.
 
 When the program is refused, `symbols` still prints what it found, adds an
 `errors` array of the refusals in `build --json`'s form, writes them to stderr
@@ -733,6 +778,13 @@ app storage is ready and before a TypeScript data module has loaded: a send its
 refused (studio diary R14; notes diary). When nothing takes the path, the
 host says why — no `open-file` field, or the `change` the app refused, and the
 refusal — on stderr and in the journal. `exact uninstall <app>` takes both halves away.
+
+On Windows, pass local files to the executable to open them in the app's
+window. A cold launch and a later launch both deliver a `change` to the one
+mounted field with `testId="open-file"` and a `change` handler, once per file
+in argument order. Relative filenames resolve in the launching process's
+working directory. An app that reads filenames in its Rust startup code can
+move that logic into the handler to receive cold and warm opens once each.
 
 Widget entries are top-level `app.json` `widgets` rows. For example:
 
@@ -1285,14 +1337,37 @@ refuses. Under the agent the roster is the word `app-icon.icons` (`prefer`),
 and each change holds an `app-icon` ticket standing for iOS's alert
 (`docs/recipes/alternate-app-icons.md`).
 
-What shows before the first frame is `app.json`'s Web App Manifest
-`background_color`, and in a dark scheme `color_scheme_dark.background_color`
-(`#RGB`, `#RRGGBB` or `#RRGGBBAA`); a fixed `userInterfaceStyle` takes its side
-alone. The web page has it until the first frame, the iOS launch screen centres
-`host.ios.launchImage` on it, and the Android launch window is it, with the bars'
-icons dark over a light colour. Unset, each is the platform's surface: iOS's
-`systemBackground` (its grouped background under a first route that scrolls a
-grouped list) and Android's `surface`.
+What shows before the first frame is the launch colour, which `app.json` names
+per colour scheme (LLP 1163 D2):
+
+| `app.json` | Light | Dark |
+|---|---|---|
+| `"background_color": "#f4efe6"` | `#f4efe6` | `#f4efe6` |
+| `"color_scheme_light": { "background_color": "#f4efe6" }` | `#f4efe6` | Exact's |
+| `"color_scheme_dark": { "background_color": "#14110d" }` | Exact's | `#14110d` |
+| `"background_color": "#f4efe6", "color_scheme_dark": { "background_color": "#14110d" }` | `#f4efe6` | `#14110d` |
+| none | Exact's | Exact's |
+
+A scheme's own member wins over the top-level one, which holds in every scheme.
+Name none unless the launch must differ from what Exact shows: on iOS the app's
+own background where the build can read it, every route it can open on agrees
+(each route's `background-color`, else its root's, written as a colour or a
+theme's colour) and nothing may paint over it out to the screen's edges, else
+`systemBackground` (its grouped background where every route scrolls a grouped
+list or writes `-exact-grouped-background`); on Android the theme's surface; on
+the web the page's own colour, as a native app starts there. Name the colour
+where the launch must match a background of the app's own on Android or the
+web, or on iOS where something the build cannot see covers it, such as boxes
+sized in points that fill the screen or a scheme the app restores at launch.
+A colour is `#RGB`, `#RRGGBB`, `#RRGGBBAA`, or Display P3 as
+`color(display-p3 r g b)` (`/ a` for alpha), which iOS and the web's first paint
+show in Display P3 and Android takes clipped to sRGB. A fixed
+`userInterfaceStyle` shows its side in both on iOS and the web; Android follows
+the device. The web page has the colour until the first frame, the iOS launch
+screen centres `host.ios.launchImage` on it, and the Android launch window is
+it, with the bars' icons dark over a light colour. `theme_color` takes the same
+three places for the browser's toolbar. The `manifest.json` a browser reads has
+only the W3C members, so a colour named for light alone is not in it.
 
 From Android 12 the launch window (the starting window) shows the launcher icon
 in its middle, as every app's does. `host.android.launchImage` replaces it:
@@ -1381,6 +1456,11 @@ Watch builds keep the watch executable's, complication extension's and runtime
 framework's dSYMs in `<name>.dSYMs/Watch/`. Mac builds keep module library and
 framework dSYMs outside the app too, including the bare products' shared runtime
 at `<namespace>/ExactCore.framework.dSYM`.
+
+To keep Spotlight from indexing build intermediates on your Mac, add the checkout's
+or app's `target/` directory to Spotlight's Search Privacy settings. Keep the release
+dSYMs for the executable, frameworks and extensions in an indexed archive so Xcode can
+find the matching symbols for a crash report. [Apple's guide to symbolication](https://developer.apple.com/documentation/xcode/adding-identifiable-symbol-names-to-a-crash-report).
 A production build links its Rust
 with fat LTO and, when its plan is fixed, leaves out the loaded modules the
 plan cannot reach (LLP 1036.000 §5–§10). `--bundle` prints the stable Mac bundle at
@@ -1474,13 +1554,14 @@ The generated `--embed` composition lists the capabilities to link.
 
 | Product | Capability | Installation |
 | --- | --- | --- |
-| `ExactMarkdown` | Markdown text and editing | `ExactMarkdown.install()` |
-| `ExactCollections` | Windowed lists, swipe rows, reorder groups and iOS list row cells | `ExactCollections.install()` |
-| `ExactDrag` | Reorder, height and transform drags | `ExactDrag.install()` |
+| `ExactMarkdown` | Markdown text and editing, and its atoms' icons in text | `ExactMarkdown.install()` |
+| `ExactCollections` | Windowed lists, swipe rows, reordering rows (grips and groups) and iOS list row cells | `ExactCollections.install()` |
+| `ExactDrag` | Height and transform drags | `ExactDrag.install()` |
 | `ExactGroupedLists` | Native grouped lists | `ExactGroupedLists.install()` |
 | `ExactSurfaces` | GPU and Canvas surfaces | `ExactSurfaces.install()`; links `ExactImages`, which Canvas 2D images read through |
-| `ExactImages` | Image files, animated images and package pictures; icons in text | `ExactImages.install()` |
-| `ExactMediaPicker` | Native media picking | `ExactMediaPicker.install()` |
+| `ExactImages` | Image files, animated images and package pictures; the files icons in text read | `ExactImages.install()` |
+| `ExactPickers` | File inputs' picker, `saveFile` and the File System Access pickers | `ExactPickers.install()` |
+| `ExactMediaPicker` | Native media picking (the composition links `ExactPickers` with it) | `ExactMediaPicker.install()` |
 | `ExactAuthSession` | Authentication sessions | `ExactAuthSession.install()` |
 | `ExactNumerals` | Numeric content transitions | `ExactNumerals.install()` |
 | `ExactTips` | Platform tips | `ExactTips.install()` |
@@ -1493,9 +1574,25 @@ The generated `--embed` composition lists the capabilities to link.
 | `ExactSticky` | `position: sticky` | `ExactSticky.install()` |
 | `ExactNotifications` | Notifications, their actions and push registration | `ExactNotifications.install()`; the app delegate calls `ExactApp.installNotificationClicks` before launch completes |
 | `ExactHostEventMailbox` | Host events a package takes (an accepted iCloud share) | `ExactHostEventMailbox.install()`; the app delegate calls `ExactApp.installHostEvents` before any scene connects |
+| `ExactActivities` | Live Activities (links `ExactWidgetPublication`, whose generation their sends name) | `ExactActivities.install()` |
 | `ExactActivities` | Live Activities | `ExactActivities.install()` |
+| `ExactToolDoor` | The tool door: the system's calls of the plan's tools | `ExactToolDoor.install()`; the app delegate calls `ExactApp.installToolDoor` before launch completes |
+| `ExactIndexMirror` | The content index `@exact/search-index` writes: its mirror, Spotlight, entity queries | `ExactIndexMirror.install()`; the app delegate calls `ExactApp.installContentIndex` before launch completes |
 | `ExactWakeCarriers` | Wakes, background transfers and monitored regions | `ExactWakeCarriers.install()`; the app delegate calls `ExactApp.installWakes` before launch completes, and `ExactApp.handleTransferEvents` |
 | `ExactGradients` | CSS gradients: `background-image` and `mask-image` | `ExactGradients.install()` |
+| `ExactTraces` | The traces an app records, and `ExactSession.startTrace()` and `stopTrace(maxBytes:)` | `ExactTraces.install()` |
+| `ExactWakeLock` | `wakelock="screen"` | `ExactWakeLock.install()` |
+| `ExactContentRegions` | Content regions an entry registers (the Mac's region controller) | `ExactContentRegions.install()` |
+| `ExactVideo` | `video` and `audio` elements' players; an image's picture in picture | `ExactVideo.install()` |
+| `ExactWebViews` | `iframe` web views | `ExactWebViews.install()` |
+| `ExactSound` | Declared sounds, sequences and the voice-table commands | `ExactSound.install()` |
+| `ExactMIDI` | MIDI ports and a sequence's MIDI output | `ExactMIDI.install()` |
+| `ExactAnimations` | What Core Animation plays for a box: its CSS animations (`animation`, `@keyframes`), transitions, drags and spring motion, so any of `animations`, `transitions`, `motion`, `drag` or `timelines` links it; SVG's element animations play through it too | `ExactAnimations.install()` |
+| `ExactNavigation` | Route stacks, tabs and their bars, route modals; on the Mac route sheets, the list beside its detail, Back and Forward, the root tabs as the sidebar | `ExactNavigation.install()` |
+| `ExactTextSelection` | iOS's selection of text a `user-select` of `text` or `all` makes selectable (the Mac's is in `ExactKit`, and every Mac composition names it) | `ExactTextSelection.install()` |
+| `ExactWidgetPublication` | Widgets and Live Activities: the app's publication of its entries to the App Group and its observation of the store they write | `ExactWidgetPublication.install()` |
+| `ExactDialogs` | iOS and tvOS: a `dialog` shown by `showModal()` as UIKit's sheet, or as the author's box when it paints its surface; any `dialog` in the plan links it. On the Mac the core presents a `dialog` | `ExactDialogs.install()` |
+| `ExactSharing` | `share(…)`'s sheet, a link's context-menu Share item, and a received share's claim | `ExactSharing.install()` |
 
 Development builds log a missing Markdown or drag installation once per session,
 with the product and installation call. Without it, Markdown remains literal
@@ -1991,6 +2088,13 @@ trust and needs one of two variables, and refuses without either:
 absent `android` is `"0"`, so set `"A"` for each platform that takes updates
 before its release build.
 
+When `push` discovers a missing head with signed release history, it stops
+before publishing to any stream. Run `deploy` to repair the head.
+Keep the original production build receipt so `deploy` can restore missing
+binary input evidence that matches the signed digest and byte length. On
+Apple and Linux a fresh bake can also supply matching evidence. Deploy can
+restore that evidence at the current sequence when the bundle is current.
+
 ### What `deploy` publishes
 
 `deploy` builds each platform's update, which takes minutes, and its dry run
@@ -2202,10 +2306,12 @@ asset index holds one card per asset (name, URL, SHA-256, length) and the
 entry plans' `plans` map, at most 4 MiB, about 20,000 cards; its card URLs
 resolve against the index's own URL. The web build prints both sizes against
 their bounds with the asset count (`exact.json 0.6 KiB of 64.0 KiB, assets.json
-101.2 KiB of 4096.0 KiB for 537 assets`); a build, a dev generation or a
-publish whose file would pass its bound is refused with the same numbers.
+101.2 KiB of 4096.0 KiB for 537 assets`). When publishing a stream, an
+oversized envelope reports its size, limit and largest field. An oversized
+asset index reports its size, limit and asset count.
 Every client checks the index against the envelope's card before it reads a
-card, and a signed head covers the index through its digest.
+card, and a signed head covers the index through its digest. A signed stream
+head also names the frozen cohort receipt by URL, SHA-256 and byte length.
 
 Agent replies carry `generation`, `epoch`, `incarnation` and `clock` (LLP 1029.000.002 D10).
 `generation` starts at 1 and advances once for each committed replacement or
@@ -2320,16 +2426,15 @@ Missing coverage is not a zero.
 
 On Apple, `"perf frames live 500"` observes display-link callbacks for 500 ms without
 advancing or changing the current clock. Its reply identifies scheduling, substitutions
-and dropped records. An ordinary launch on the wall clock is available on macOS and the
-iOS simulator with
+and dropped records. An ordinary launch on the wall clock is available on macOS and iOS with
 `bun scripts/agent.mjs macos --live --storage latency "tap change-station" "type station-search Palo" state`
-(`ios --live` likewise). The driver launches and closes this process and keeps input
+(use `ios --live` on a simulator or `ios --device --live` on a phone). The driver launches and closes this process and keeps input
 available. `--live` uses normal scheduling and the wall clock: `performanceNow()` and
 timers advance in real time between operations, and `perf frames` records real frames
 (with `--touch platform` on the simulator, a drag is a real touch and the `scroll`
 source observes it). The driver never holds the clock, so `clock` is refused; let time
-pass with `perf frames live <ms>`. A phone is not supported: its carrier is agent mode,
-and a real drag there needs an XCTest runner on the device. `--storage` chooses its
+pass with `perf frames live <ms>`. On a physical iPhone, taps and drags still use the agent input path. A real
+UIKit drag requires an on-device XCTest runner. `--storage` chooses its
 scratch store. Set
 `EXACT_STORE=real` in the launch environment to use the app's real secret and preference
 stores and secret presence. App files still follow the drive's scratch-store setting
@@ -2338,6 +2443,10 @@ app files. `state.observation` reports clock mode, scheduling and substitutions.
 `--timing platform` alone keeps agent execution substitutions. A substituted run does not establish production-equivalent performance,
 and callback timing does not prove compositor presentation. `layout` distinguishes target
 and presented geometry; an unavailable presentation remains explicit.
+
+On Android, `bun scripts/agent.mjs android --live` drives the reader APK on platform time
+with layer playback enabled. `clock` and `screenshot … over … every …` are refused. See
+[Driving the reader](../host/android/README.md#driving-the-reader-llp-1107-d1) for the recording command.
 
 ## Generate TypeScript data-source types
 
@@ -3637,9 +3746,17 @@ register beside them under this grant.
   ephemeral authorization, it asks nothing. Then the app registers, and the call answers the
   system's answer: the subscription, or `AbortError` with the system's
   message.
-- `pushSubscription()` reads `{apple: {deviceToken}}`, the token's bytes in
-  lowercase hex, or on Android `{android: {installationId, token, appId}}`, the
-  Firebase Installations ID, FCM registration token and installed package id.
+- `pushSubscription()` reads `{apple: {deviceToken, appId, installationId}}`, the
+  token's bytes in lowercase hex, the installed bundle id and a UUID for the
+  installation, or on Android
+  `{android: {installationId, token, appId}}`, the Firebase Installations ID,
+  FCM registration token and installed package id. Apple's `installationId`
+  stays the same when APNs replaces the token, so a server can replace the
+  installation's old token. The package keeps it in the Keychain on this device
+  only, so a backup restored to another device gets a new one. It is empty while
+  the Keychain cannot give one (before the device's first unlock, or a signature
+  without a data-protection Keychain); on iOS readers are told again after the
+  first unlock.
   Otherwise it reads null. It never asks: its
   first read in a launch registers once when permission is already granted, as
   Apple asks of every launch (on Android, once the app has subscribed), and a
@@ -3656,7 +3773,7 @@ register beside them under this grant.
   `available: false`.
 
 The server sends APNs an alert (`apns-push-type: alert`, `apns-topic` the
-bundle id), APNs's own `aps` dictionary and one key of Exact's:
+subscription's `appId`), APNs's own `aps` dictionary and one key of Exact's:
 
 ```json
 { "aps": { "alert": { "title": "Delayed", "body": "The 9:41 now leaves at 9:52" }, "sound": "default" },
@@ -3764,20 +3881,71 @@ A notification message follows the presentation path above and raises no
 `push` event. Delivery remains subject to FCM, Doze and the phone's battery
 policy; a server must keep alerts available for the app to reconcile.
 
-`getExpoPushTokenAsync(subscription, manifest)` from `@exact/push/expo`
-exchanges `android.token` through Expo's service. Pass the app's imported
-`app.json`: `extra.eas.projectId` names its EAS project. The subscription's
-`android.appId` supplies the installed package id, including normalization and
-the selected variant's suffix. Expo's `deviceId` is a UUID derived from the
-first 16 bytes of the case-sensitive Firebase installation ID's SHA-256,
-with the v4 version and variant bits set. It stays the same while the
-installation ID does, including across FCM token rotations, without separate
-storage. It returns `{type: "expo", data: "ExponentPushToken[…]"}`. An HTTP
+`getExpoPushTokenAsync(subscription, manifest, options)` from
+`@exact/push/expo` exchanges the subscription's token through Expo's service:
+`android.token` as an FCM token, or `apple.deviceToken` as an APNs one. Pass the
+app's imported `app.json`: `extra.eas.projectId` names its EAS project. The
+subscription's `appId` supplies the installed package or bundle id, with the
+selected variant's suffix and, on Android, its normalization.
+
+An APNs token also needs `options.development`: `true` when the build
+registers with APNs's sandbox (a simulator, or a development profile), `false`
+for an Ad Hoc, TestFlight or App Store build. Expo uses the sandbox for a token
+exchanged with `true`
+([`ExpoPushTokenOptions`](https://github.com/expo/expo/blob/main/packages/expo-notifications/src/Tokens.types.ts)),
+and APNs answers `BadDeviceToken` to a token from the other environment. The
+app states it because Exact does not read it: iOS has no public call that
+reads the signed `aps-environment` (LLP 1133.004 §9 P3). Without it the call
+throws and sends nothing. An FCM token ignores it.
+
+Expo's `deviceId` is a UUID made from the first 16 bytes of the SHA-256 of the
+subscription's `installationId` (case-sensitive), with the v4 version and
+variant bits set. It stays the same while the installation ID does, including
+across FCM and APNs token rotations, so Expo replaces the installation's token.
+A subscription without an installation ID throws and sends nothing.
+
+The call returns `{type: "expo", data: "ExponentPushToken[…]"}`. An HTTP
 refusal throws with Expo's status and the first 500 characters of its reply;
 if the reply cannot be read, the error still carries the status.
 Grant `net.fetch https://exp.host`, exchange again when the live subscription
 changes, and send the Expo token to your server. The [push recipe](recipes/push.md)
 includes the handler, channel and backend send.
+
+### Expo push on iOS and iPadOS
+
+The app needs no Firebase file. Give the EAS project an Apple Push
+Notifications service key with `eas credentials`, as
+[Expo's setup guide](https://docs.expo.dev/push-notifications/push-notifications-setup/#get-credentials-for-development-builds)
+describes. The Contract is the Android example's below, without the `push`
+handler. In `app.ts` the exchange names the APNs environment the build
+registers with:
+
+```ts
+const APNS_SANDBOX = import.meta.env.APNS_SANDBOX ?? '';
+
+export const answer: Answer = async (source, args) => {
+  if (source === 'exchangePush') {
+    const [subscription] = args;
+    if (!subscription?.apple) return { type: 'expo', data: '' };
+    const token = await getExpoPushTokenAsync(subscription, manifest, { development: APNS_SANDBOX === '1' });
+    // Save token.data on the backend, as the Android example does.
+    return token;
+  }
+  throw new Error(`Unknown source ${source}`);
+};
+```
+
+Exact does not read the environment, so the build supplies it: declare
+`"env": ["APNS_SANDBOX"]` in `app.json` and set `APNS_SANDBOX=1` in the
+commands that build for a simulator or sign with a development profile. The
+value follows the signing, not the variant or the build mode: App Store
+Connect signs a TestFlight or App Store build for production. A build that
+leaves it unset exchanges as production. A wrong value still exchanges, and
+APNs then refuses the token as `BadDeviceToken`.
+
+On Apple no app code runs when a push arrives. The backend sends `title` and
+`body` at the top level of the message, which the system shows, and `navigate`
+in `data`, which the tap opens.
 
 ### Android Expo push example
 
@@ -3863,29 +4031,30 @@ network work inside its mutation so the wake owns it. A socket's
 `exactStream` mapper cannot post; have its mapped counter key a resource
 whose answer calls `showNotification` instead.
 
-
 Under the agent nothing reaches APNs or FCM, and `pushSubscription()` reads null
 while the permission is not granted, as on the phone. A subscribe while
 `prompt` waits on the
 `permission` ticket (`tap @t allow`), then on the subscription's value (`type
-@t '{"apple":{"deviceToken":"ab12"}}'`); `prefer extension
+@t '{"apple":{"deviceToken":"ab12","appId":"com.example.app","installationId":"6f1d3a52-8c0e-4b7a-9e21-5d4c3b2a1f00"}}'`); `prefer extension
 push.pushSubscription=<json>` sets the value later, as a rotation.
 
 Android's data-message routing, deadline, registration and token rotation have
-JVM coverage; Expo's exchange request is checked with mocked fetch. Real
+JVM coverage; Expo's exchange request, for an FCM token and for an APNs one,
+is checked with mocked fetch. Real
 registration and FCM/Expo delivery need the app's Firebase project and have
 not been verified here. The [device checklist](../packages/push/test/checklist.md)
 names the foreground, background and killed-process checks.
 
 Run on an iOS 27 simulator: the real prompt; a registration the simulator
-answered with a token; a relaunch that only reads `pushSubscription()`
+answered with a token, read with the installed bundle id; a relaunch that only reads `pushSubscription()`
 answering the same token; the entitlement in the built app; pushes sent with
 `xcrun simctl push` shown and their taps opening `navigate`, with the app in
 front, from the Home Screen and at launch. On 2026-11-14, Xcode's iOS 27.0
 simulator accepted a `mutable-content: 1` push for the extension fixture but
 did not launch its service extension or write its App Group marker. The direct
 reference separately constructed requests and called the handler's receipt and
-expiry methods with a controlled download callback. Not yet run: delivery through APNs, the
+expiry methods with a controlled download callback. Not yet run: delivery through APNs, an
+APNs token exchanged with Expo's service and a push delivered through it, the
 entitlement and extension signed against device profiles, and a production
 build. `packages/push/test/checklist.md` is those checks; until they pass,
 nothing here is claimed for a device.
@@ -4158,12 +4327,14 @@ each voice ended is the same on every host and under the driver's clock
 | Android | AAudio with the shared C mixer in `libexact_sound.so`, loaded at the first play; scheduled by the stream's output timestamp, with gain, playback rate, pan, live changes and cancellation |
 | Linux, Windows | no Contract sound output: the runner keeps the voice record |
 
-Under the driver no scheduled sound plays on any host (`output: "agent"`). The
-runner initializes `state.sounds.output` to `"agent"`; Linux and Windows
-leave it there even outside the driver. Android's state reader is available
-only under the driver and retains `"agent"`; it does not expose AAudio's output
-state or latency. Outside the driver, macOS, iOS and tvOS
-replace it with an object whose `kind` is `"avaudioengine"` and whose `state` is `"closed"`,
+Seekable drives keep Contract sounds silent (`output: "agent"`). Android
+reader drives with `--live` play sounds through AAudio and read voice state
+on platform time.
+Their `state.sounds.output` reports `kind: "aaudio"`, the stream's state and,
+while running, its estimated output latency in seconds. The runner initializes
+the field to `"agent"`. Linux and Windows retain that value in ordinary
+launches. When macOS, iOS and tvOS enable audio output, they report
+an object whose `kind` is `"avaudioengine"` and whose `state` is `"closed"`,
 `"running"`, `"stopped"` or `"failed"`. Both web targets report an object with
 `kind: "web-audio"` and the audio context's `state` once the output loads; before
 that, the JS target reports `{kind: "web-audio", state: "loading"}` and the wasm
@@ -4216,14 +4387,31 @@ output becomes noisy (for example, headphones are unplugged). A transient focus
 loss also stops effects; new effects may play after focus returns. A permanent
 loss waits until the activity returns to the foreground.
 
+On Android, `@exact/speech-synthesis` requests audio focus for its speech queue.
+Set `speak`'s `audioSessionType` to `transient` to let music duck, or to
+`transient-solo` to pause the other player temporarily so it can resume when
+speech ends. Use `playback` for sustained listening. It takes permanent focus,
+so the listener must restart the other player. [Android audio focus](https://developer.android.com/media/optimize/audio-focus).
+
 The Android arm decodes declared WAVs at first play. It uses
 [AAudio's speaker timestamp](https://developer.android.com/ndk/reference/group/audio#aaudiostream_gettimestamp)
 to place frames; startup waits up to 100 ms for that timestamp, then uses the
 stream's buffer size as a latency estimate if none is available. Late effects
 start from their attack. The idle stream closes after its last frames reach the
 speaker and releases its focus claim. A failed open or disconnected stream is
-reported; a play at least one second after the failure tries again. Background
-playback, MIDI output and timed sequence haptics on Android remain unavailable.
+reported; a play at least one second after the failure tries again. MIDI output
+and timed sequence haptics on Android remain unavailable.
+
+On Android, `"audio_session": "playback"` lets an audible `audio` element
+keep playing when the user goes Home or locks the device. Android's foreground
+media service shows the playback notification and supplies a system pause
+control. An audio element with empty bounds can play, including inside
+a closed dialog or a canvas that composites its children. `exactPage().frozen`
+stays false while the playback service is in the foreground. Pausing in the app
+or through the system ends background playback for that element, as does
+removing it or reaching the end of its source. Opted-in audio lets the display
+sleep by default. Android pauses a `video` when the activity stops and keeps
+its position.
 
 The Mac has no session. A development run with `EXACT_SOUND_CHECK=1` taps the
 engine's main mixer and journals (and prints) how far each onset after a
@@ -4348,6 +4536,7 @@ recently started playing, across every session of a process on Apple.
 | --- | --- |
 | web (both targets) | `navigator.mediaSession`: the metadata (the artwork resolved as the page resolves an asset), the handlers, the declared `playbackState` and `setPositionState`; the browser decides where it shows (Chrome's media hub, the system's Now Playing) and routes the media keys; under the driver too, in the driver's own browser |
 | macOS, iOS, tvOS | `MPNowPlayingInfoCenter` and `MPRemoteCommandCenter`, from the video arm (AVKit's own publication is off while a claimant owns the session); under the driver nothing is assigned and `state.mediaSession.published` is `"agent"` |
+| Android | the system playback session follows audible `audio` with `audio_session: "playback"`; Contract metadata and custom actions stay in `state.mediaSession` |
 | Linux, Windows | none: the record only (`published: "none"`, no `play` or `pause`) |
 
 On iOS the lock screen and Control Center show only a non-mixable playback
@@ -4478,7 +4667,8 @@ display, in display-list order, without a picker or window activation
 physical pixel sizes and the corresponding `ScreenDetailed`, with
 `clientRect` in the session window's CSS pixels (null without a window).
 `directory` is an `app:/` root such as `app:/tmp` or a directory below one.
-The default is one `screen-<n>.png` per display. Encoding options follow
+Every call writes a fresh file per display. Use the returned paths to draw or
+remove those files. The default format is PNG. Encoding options follow
 `captureCanvas`. The grants are `device.screen-recording <usage-key>` and
 `fs.write <directory>`; drawing a file also needs `fs.read`.
 

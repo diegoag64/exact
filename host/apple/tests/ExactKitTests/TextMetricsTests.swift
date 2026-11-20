@@ -8,6 +8,7 @@ import CExact
 import XCTest
 @testable import ExactKit
 @testable import ExactNativeViews
+@testable import ExactContentRegions
 
 extension Presenter {
     func applyParagraphFixture(_ id: UInt32, _ rows: [[String: Any]]) {

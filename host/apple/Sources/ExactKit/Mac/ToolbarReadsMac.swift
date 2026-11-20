@@ -32,7 +32,7 @@ import AppKit
 struct BarReads {
     var nodes = Set<UInt32>()
     var names = Set<String>()
-    var controls = false
+    package var controls = false
 }
 
 /// What NavigationHost, the split, the dialogs and the sidebar decided that
@@ -138,7 +138,7 @@ extension WindowToolbarHost {
     /// The broad test NavigationHost's sheet headers still use: any op that
     /// makes, removes or moves a node, writes props, style or words, or
     /// carries a command (RouteSheetMac.swift reads only with a sheet up).
-    func mayChangeAHeader(_ batch: Batch) -> Bool { batch.ops.contains { Self.broad.contains($0.op) } }
+    package func mayChangeAHeader(_ batch: Batch) -> Bool { batch.ops.contains { Self.broad.contains($0.op) } }
     private static let broad: Set<BatchOp.Kind> = [.create, .destroy, .children, .roots, .props, .style, .paragraph, .command]
 
     /// What the navigation and its neighbours decide now, of what the bar reads.

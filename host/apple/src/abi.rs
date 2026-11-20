@@ -330,8 +330,10 @@ impl<D: DataSource> Bridge<D> {
             // target answered now) is never released; one it keeps for its
             // effects is.
             parked.retain(|_, r| h.runner().holds(r.ticket));
-            // An abort made in this batch's turns is answered at the next pump: wake it.
-            if h.runner_mut().collected_aborts() {
+            // An abort made in this batch's turns, or a request the host
+            // refused at once (a capture with canvases unlinked), is answered
+            // at the next pump: wake it.
+            if h.runner_mut().collected_aborts() || h.has_request_refusals(x.ordered_idle()) {
                 x.notify();
             }
             presenter.presences(h.runner_mut().take_presence_asks_json());
@@ -392,11 +394,11 @@ impl<D: DataSource> Bridge<D> {
                 Outcome::Surface(SurfaceOutcome::Captured(body))
             }
             7 if body.is_empty() => Outcome::Surface(SurfaceOutcome::Restored),
-            8 if self.host.is_some() => self.host.as_mut().expect("booted").canvas_captured(
-                ticket,
-                &body,
-                self.links.io.map(|io| io.write_file),
-            ),
+            8 if self.host.as_ref().is_some_and(|h| h.turn.canvas.is_some()) => {
+                let host = self.host.as_mut().expect("booted");
+                let captured = host.turn.canvas.expect("linked").captured;
+                captured(host, ticket, &body, self.links.io.map(|io| io.write_file))
+            }
             2..=4 => Outcome::Failed {
                 kind: match kind {
                     2 => FailureKind::Refused,

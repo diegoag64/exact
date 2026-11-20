@@ -45,7 +45,7 @@ public enum ExactDocuments {
     /// each joins Open Recent — a save's once it is written, since AppKit
     /// lists only files that exist — and is kept for an app granted
     /// `doc.keep` (LLP 1069.010.000 D3); the window shows the last.
-    static func chosen(_ urls: [URL], in session: ExactSession) {
+    package static func chosen(_ urls: [URL], in session: ExactSession) {
         // One that exists was noted and kept as it was chosen (`keptChoice`).
         for url in urls where !FileManager.default.fileExists(atPath: url.path) {
             noteWhenWritten(url) { [weak session] in session?.keepDocument(url) }

@@ -76,7 +76,7 @@ extension Presenter {
         mouseLayoutPan.retire(id)
         mouseDrags.height.retire(id)
         mouseDrags.transform.retire(id)
-        mouseDrags.reorder.retire(id)
+        reorders.mouse.retire(id)
         tables.renewed(view)
         if hoveredNodes.contains(where: { $0 === view }) {
             hoveredNodes.removeAll { $0 === view }

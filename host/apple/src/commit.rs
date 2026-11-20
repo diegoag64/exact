@@ -2,7 +2,7 @@
 use super::*;
 
 impl<D: DataSource> Host<D> {
-    /// [`crate::link::MotionLowering`]'s commit: what Core Animation can play
+    /// [`crate::link::TurnMotion`]'s commit: what Core Animation can play
     /// of the motion a commit's sync started, and the rest resampled.
     pub(crate) fn lower_committed_motion(&mut self, sync: &MotionSync) {
         let runner = &self.runner;
@@ -76,7 +76,9 @@ impl<D: DataSource> Host<D> {
             // Flights capture their leavers before an exit takes them
             // out of the presenter's maps (LLP 1013.000 D4.1).
             self.begin_flights(r, &mut batch);
-            self.begin_exits(r, &mut batch);
+            if let Some(motion) = self.turn.motion {
+                (motion.exits)(self, r, &mut batch);
+            }
             for key in &r.destroyed {
                 if let Some(id) = self.keys.remove(key) {
                     self.ranks.remove(&id);
@@ -93,7 +95,9 @@ impl<D: DataSource> Host<D> {
                         }
                         self.mirror.remove(&id);
                         self.end_flight_of(id);
-                        if !self.exit_holds(id, &mut batch) && !omitted {
+                        let motion = self.turn.motion;
+                        let held = motion.is_some_and(|m| (m.exit_holds)(self, id, &mut batch));
+                        if !held && !omitted {
                             batch.destroy(id);
                         }
                     }
@@ -158,21 +162,29 @@ impl<D: DataSource> Host<D> {
             debug_assert!(applied.is_ok(), "kernel rows are always valid engine input");
             if let Some(motion) = self.turn.motion {
                 (motion.commit)(self, &sync);
+                (motion.play_exits)(self, &mut batch);
             }
-            self.play_exits(&mut batch);
             self.start_flights(&t.receipt);
-            self.seed_layout(&t.receipt, &mut batch);
+            if let Some(motion) = self.turn.motion {
+                (motion.seed_layout)(self, &t.receipt, &mut batch);
+            }
             self.sync_paint(&t.receipt, &mut batch);
-            self.reconcile_height_handles(&mut batch, true);
+            if let Some(drag) = self.turn.drag {
+                (drag.reconcile_heights)(self, &mut batch, true);
+            }
             let synced = self.sync_height_owner();
             debug_assert!(synced.is_ok(), "validated height sync");
-            if let Err(error) = self.sync_height_transitions() {
-                height_target_error.get_or_insert(error);
+            if let Some(motion) = self.turn.motion {
+                if let Err(error) = (motion.heights)(self) {
+                    height_target_error.get_or_insert(error);
+                }
             }
             // Latest target/declaration must reach the held slot before an
             // invalidated header cancels it (negative delays sample at once).
-            self.cancel_invalid_height_drag();
-            self.reconcile_transform_drags(&mut batch);
+            if let Some(drag) = self.turn.drag {
+                (drag.cancel_invalid_height)(self);
+                (drag.reconcile_transforms)(self, &mut batch);
+            }
         }
         self.repaint_renewed(&repaint, &mut batch);
         let seek = self.engine.advance(self.engine_time(self.now_ms));
@@ -194,7 +206,9 @@ impl<D: DataSource> Host<D> {
         if layout_error.is_some() && !receipts.is_empty() {
             self.emit_ranks(&mut batch);
         }
-        self.canvas_turn(&mut batch);
+        if let Some(canvas) = self.turn.canvas {
+            (canvas.turn)(self, &mut batch);
+        }
         for s in self.runner.take_surface_updates() {
             batch.surface(&s);
         }
@@ -214,7 +228,9 @@ impl<D: DataSource> Host<D> {
     pub(super) fn commit_finish(&mut self, mut batch: Batch, error: Option<String>) -> String {
         self.persist();
         self.emit_language(&mut batch);
-        self.emit_transform_drags(&mut batch);
+        if let Some(drag) = self.turn.drag {
+            (drag.emit_transforms)(self, &mut batch);
+        }
         self.present(&mut batch, false);
         self.finish(batch, error)
     }

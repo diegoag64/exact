@@ -9,25 +9,47 @@
 //! What the bake alone can know (an image file's bytes, the app's module
 //! artifact) it adds to the set itself (`exact_bake`'s `production_uses`).
 
-use super::{constant_str, decoration_rows, runs_command, uses, Capability, Uses};
+use super::{
+    constant_str, decoration_rows, keeps_midi, runs_command, runs_sounds, uses,
+    uses_picture_in_picture, Capability, Uses,
+};
 use exact_kernel::{NodeType, PropId, StyleId};
-use exact_plan::{BindingKind, BindingsRow, Plan};
+use exact_plan::{BindingKind, BindingsRow, EventKind, Plan};
 
 /// What `plan` uses on Apple: [`uses`], with [`Capability::Grid`] the grid
 /// rows' grammars and the grid algorithm together, which a grid row or a
 /// layout that can reach the algorithm ([`lays_out_grid`]) selects,
-/// [`Capability::Effects`] a box's `filter` or what SVG uses, and the
-/// native roster's entries. The browser lays out a grid itself, and the
+/// [`Capability::Effects`] a box's `filter` or what SVG uses,
+/// [`Capability::Drag`] a height or transform drag (a reorder is the
+/// lists'), and the native roster's entries. [`Capability::TextSelection`] is
+/// iOS's reading; the bake adds it to every Mac set. The browser lays out a grid itself, and the
 /// other native hosts link the algorithm whole, so for them the capability
 /// is the rows' grammars.
 pub fn apple_uses(plan: &Plan) -> Uses {
-    let mut uses = uses(plan).beyond(Uses::NONE.with(Capability::Effects));
+    let mut uses = uses(plan).beyond(Uses::NONE.with(Capability::Effects).with(Capability::Drag));
     let mut add = |capability, used: bool| {
         if used {
             uses = uses.with(capability);
         }
     };
     add(Capability::Grid, lays_out_grid(plan));
+    // A link's own context menu offers Share (`ExactSharing`).
+    add(Capability::Share, has_link_menu(plan));
+    // A height or transform drag is the drag family's; a reorder is the
+    // lists' (`Capability::Collections`, below), and its motion is `Motion`.
+    add(
+        Capability::Drag,
+        binds(plan, BindingKind::Prop, PropId::HeightDragFor as u16)
+            || binds(plan, BindingKind::Prop, PropId::TransformDragFor as u16)
+            || plan.handlers.iter().any(|h| {
+                matches!(
+                    h.event,
+                    EventKind::Heightrelease
+                        | EventKind::Transformgeometry
+                        | EventKind::Transformrelease
+                )
+            }),
+    );
     // A box's `filter`, bound or in a decoration table, is the family's;
     // `clip-path`, which the web's entry counts too, is the core's mask on
     // Apple.
@@ -40,6 +62,20 @@ pub fn apple_uses(plan: &Plan) -> Uses {
             }
             _ => false,
         }),
+    );
+    // One Swift family presents the file picker and the document pickers;
+    // `requestPermission` and dropped or pasted documents are the core's.
+    add(
+        Capability::Picker,
+        runs_command(
+            plan,
+            &[
+                "saveFile",
+                "showOpenFilePicker",
+                "showDirectoryPicker",
+                "showSaveFilePicker",
+            ],
+        ),
     );
     // An event-only or a view-only package reaches the module seam too.
     add(
@@ -65,6 +101,15 @@ pub fn apple_uses(plan: &Plan) -> Uses {
         runs_command(plan, &["startTrace_EXPERIMENTAL", "stopTrace_EXPERIMENTAL"]),
     );
     add(Capability::Controls, uses_controls(plan));
+    // `wakelock="screen"` holds the display awake (LLP 1125 D11).
+    add(
+        Capability::WakeLock,
+        plan.bindings.iter().any(|b| {
+            b.kind == BindingKind::Prop
+                && b.id == PropId::Wakelock as u16
+                && can_be(plan, &b, |v| v == "screen")
+        }),
+    );
     // A flight follows a shared element's name from a leaver to an arriver.
     add(
         Capability::Flights,
@@ -76,6 +121,22 @@ pub fn apple_uses(plan: &Plan) -> Uses {
             b.kind == BindingKind::Style
                 && StyleId::from_bit(u32::from(b.id)) == Some(StyleId::PositionType)
                 && can_be(plan, &b, |v| v.trim().eq_ignore_ascii_case("sticky"))
+        }),
+    );
+    // iOS selects only text its author made selectable (LLP 1115.000 D11.6):
+    // a `user-select` that can be `text` or `all`, on a box or an inline
+    // run (`contain`, which the compiler refuses, reads as `text`). A
+    // decoration table paints a `textarea`, whose text is the field's.
+    add(
+        Capability::TextSelection,
+        plan.bindings.iter().any(|b| {
+            b.kind == BindingKind::Style
+                && StyleId::from_bit(u32::from(b.id)) == Some(StyleId::UserSelect)
+                && can_be(plan, &b, |v| {
+                    ["text", "all", "contain"]
+                        .iter()
+                        .any(|k| v.trim().eq_ignore_ascii_case(k))
+                })
         }),
     );
     // A background transfer (`@exact/background-transfer`) asks no device
@@ -103,13 +164,87 @@ pub fn apple_uses(plan: &Plan) -> Uses {
         }),
     );
     // A Live Activity's sends, or the resource that reads them.
+    let activities = plan.sources.iter().any(|row| {
+        matches!(
+            plan.str(row.name),
+            "startActivity" | "updateActivity" | "endActivity" | "exactActivities"
+        )
+    });
+    add(Capability::Activities, activities);
+    // An entry's plan boots only in a binary that publishes entries; a Live
+    // Activity's sends name the generation that publication makes.
     add(
-        Capability::Activities,
+        Capability::Widgets,
+        !plan.snapshot_entry.is_empty() || activities,
+    );
+    // The media family's four products, each beside its loaded arm. An
+    // `audio` element is a `Video` node.
+    add(
+        Capability::Video,
+        has_node(plan, |t| t == NodeType::Video) || uses_picture_in_picture(plan),
+    );
+    add(
+        Capability::WebViews,
+        has_node(plan, |t| t == NodeType::WebView),
+    );
+    // The transport answers `exactTransport` (LLP 1125 D5).
+    add(
+        Capability::Sound,
+        runs_sounds(plan)
+            || plan
+                .resources
+                .iter()
+                .any(|r| plan.str(r.source) == crate::transport::SOURCE),
+    );
+    add(Capability::Midi, keeps_midi(plan));
+    // A navigation root or a route: lowering gives the first root with a
+    // `navigationKey` its `navigationBack`, and every route has a key. The
+    // others are a route's or a root's props, each read only by the family.
+    add(
+        Capability::Navigation,
+        [
+            PropId::NavigationBack,
+            PropId::NavigationKey,
+            PropId::NavigationPresentation,
+            PropId::NavigationDetent,
+            PropId::NavigationInitialDetent,
+            PropId::NavigationGrabber,
+            PropId::NavigationBar,
+            PropId::NavigationSplit,
+            PropId::NavigationHistory,
+            PropId::NavigationScroll,
+            PropId::NavigationSource,
+        ]
+        .into_iter()
+        .any(|id| binds(plan, BindingKind::Prop, id as u16)),
+    );
+    // `@exact/search-index`'s names: only that package writes the content
+    // index. Without it the store refuses a change (`NotSupportedError`), a
+    // generated entity query answers none, and a search result an earlier
+    // build indexed opens the app where it starts. A package whose
+    // implementation reaches `context.contentIndex` belongs here, as the
+    // wakes' names do.
+    add(
+        Capability::ContentIndex,
         plan.sources.iter().any(|row| {
             matches!(
                 plan.str(row.name),
-                "startActivity" | "updateActivity" | "endActivity" | "exactActivities"
+                "setContentIndex"
+                    | "addContentIndexEntry"
+                    | "deleteContentIndexEntry"
+                    | "contentIndexEntries"
             )
+        }),
+    );
+    // HTML's `dialog`: the host makes it a sheet unless its rows make it a
+    // confirmation when it opens (`MenuHost.isSheet`), and the author's box
+    // whatever its rows once its author paints it, so any `dialog` can be one.
+    add(
+        Capability::Dialogs,
+        plan.bindings.iter().any(|b| {
+            b.kind == BindingKind::Prop
+                && b.id == PropId::SemanticTag as u16
+                && can_be(plan, &b, |v| v == "dialog")
         }),
     );
     // A swipe row, a reorder group, a reorder grip and a list whose rows
@@ -266,6 +401,27 @@ fn uses_controls(plan: &Plan) -> bool {
 /// accepts, or a computed one, which can be anything.
 fn can_be(plan: &Plan, binding: &BindingsRow, used: impl Fn(&str) -> bool) -> bool {
     constant_str(plan, plan.code(binding.expr)).is_none_or(used)
+}
+
+/// Whether a link can get the host's own context menu, as
+/// `NodeView.hasLinkMenu` decides on iOS: an `href` that is not empty and
+/// is `http:`, `https:` or has no scheme (resolved against the app's origin).
+fn has_link_menu(plan: &Plan) -> bool {
+    plan.bindings.iter().any(|b| {
+        b.kind == BindingKind::Prop
+            && b.id == PropId::Href as u16
+            && can_be(plan, &b, |href| {
+                let scheme = href.split_once(':').map(|(s, _)| s).filter(|s| {
+                    s.starts_with(|c: char| c.is_ascii_alphabetic())
+                        && s.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+                });
+                !href.is_empty()
+                    && scheme.is_none_or(|s| {
+                        s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https")
+                    })
+            })
+    })
 }
 
 fn has_node(plan: &Plan, of: impl Fn(NodeType) -> bool) -> bool {

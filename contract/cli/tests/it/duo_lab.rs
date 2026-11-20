@@ -193,6 +193,68 @@ fn a_bar_names_one_edge_then_its_options() {
 }
 
 #[test]
+fn a_box_pads_by_its_margins_as_uikit_gives_them() {
+    let path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/duo-lab/fixtures/margins.contract");
+    let mut r = plan(&std::fs::read_to_string(&path).unwrap());
+    let k = r.kernel_mut();
+    let (root, route) = (id_of(k, "root"), id_of(k, "route"));
+    let block = HostBlock {
+        tactic: Default::default(),
+        width: BlockAxis::Is(SIZE.0),
+        height: BlockAxis::Is(SIZE.1),
+    };
+    k.set_host_block(route, Some(block)).unwrap();
+    k.set_owner_band(route, Some(BAND), &[]).unwrap();
+    // What UIKit reports on the iPhone 18 Pro (iOS 27.0): the controller view's margins 16 at
+    // the sides past the band, a plain view's 8
+    let reported = exact_kernel::OwnerMargins {
+        root: [BAND[0], 16.0, BAND[2], 16.0],
+        plain: [8.0; 4],
+        minimum: [0.0, 16.0, 0.0, 16.0],
+        readable_width: 672.0,
+    };
+    k.set_owner_margins(route, Some(reported)).unwrap();
+    k.compute_layout(root, Offer::definite(SIZE.0, SIZE.1))
+        .unwrap();
+    let padding = |k: &Kernel, t: &str| k.resolved_padding(k.find_by_test_id(t)[0]).unwrap();
+    // The plain box under the band pads its own 8 below the band's 62, and 8 at its sides; the
+    // preserving one 16 at its sides; the readable column, its directional margins split into
+    // leading 30 and trailing 5, its leading 30 and the mean of the two on its trailing side
+    assert_eq!(padding(k, "plain"), (8.0, BAND[0] + 8.0, 8.0, 8.0));
+    assert_eq!(padding(k, "preserving"), (16.0, 8.0, 16.0, 8.0));
+    assert_eq!(padding(k, "readable"), (30.0, 0.0, 17.5, 0.0));
+}
+
+#[test]
+fn a_box_in_container_units_is_a_share_of_its_content_root() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../apps/duo-lab/fixtures/container-units.contract");
+    let mut r = plan(&std::fs::read_to_string(&path).unwrap());
+    let k = r.kernel_mut();
+    let (root, route) = (id_of(k, "root"), id_of(k, "route"));
+    let report = |k: &mut Kernel, width: f32| {
+        let block = HostBlock {
+            tactic: Default::default(),
+            width: BlockAxis::Is(width),
+            height: BlockAxis::Is(SIZE.1),
+        };
+        k.set_host_block(route, Some(block)).unwrap();
+        k.set_owner_band(route, Some(BAND), &[]).unwrap();
+        // The screen keeps its size, so a share of the viewport stays as it was
+        k.compute_layout(root, Offer::definite(SIZE.0, SIZE.1))
+            .unwrap();
+        let f = k.node(id_of(k, "half")).unwrap().frame;
+        (f.width, (f.height * 100.0).round() / 100.0)
+    };
+    // The content root is the screen less the two bands: half of its width, a tenth of its height
+    let tall = SIZE.1 - BAND[0] - BAND[2];
+    assert_eq!(report(k, SIZE.0), (SIZE.0 / 2.0, tall / 10.0));
+    // A block of another width resizes it, as a viewport unit would not
+    assert_eq!(report(k, 300.0).0, 150.0);
+}
+
+#[test]
 fn the_safe_area_attributes_lower_to_their_rows() {
     let source = "component A\n  view\n    column\n      column testId=\"a\" -exact-safe-area-ignore=\"keyboard bottom align top\" -exact-additional-safe-area=\"0 0 20 0\" -exact-safe-area-padding=\"auto 0\"\n      column testId=\"b\" -exact-safe-area-ignore=\"align center\"\n";
     let mut r = plan(source);
@@ -205,12 +267,12 @@ fn the_safe_area_attributes_lower_to_their_rows() {
         exact_kernel::SafeAreaIgnore::css(a.rare.safe_area_ignore),
         "keyboard bottom"
     );
-    assert_eq!(format!("{:?}", &a.rare.safe_area_ignore_align), "Top");
+    assert_eq!(format!("{:?}", a.rare.safe_area_ignore_align), "Top");
     assert_eq!(
         exact_kernel::SafeAreaIgnore::css(b.rare.safe_area_ignore),
         "container keyboard"
     );
-    assert_eq!(format!("{:?}", &b.rare.safe_area_ignore_align), "Center");
+    assert_eq!(format!("{:?}", b.rare.safe_area_ignore_align), "Center");
     // CSS's one-to-four-value expansion, `auto` the platform's padding
     let added = [
         a.rare.additional_safe_area_top.clone(),

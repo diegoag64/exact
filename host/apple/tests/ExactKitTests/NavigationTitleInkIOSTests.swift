@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// A bar title's authored colour and typography, over the native fixture:
 /// each is the route's own item appearance, and a heading with none leaves

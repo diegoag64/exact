@@ -134,10 +134,12 @@ extension Presenter {
     /// (BlockHostMac.swift); on iOS a route to its tab panel or the routes'
     /// owner (LLP 1123 D2). Never the page under a popover or a dialog that
     /// is not its ancestor.
-    func eventParent(of view: KeyPlatformView) -> KeyPlatformView? {
+    package func eventParent(of view: KeyPlatformView) -> KeyPlatformView? {
         #if os(macOS)
         if let node = view as? NodeView { return menus.authoredParent(of: node) ?? dialogs.authoredParent(of: node) ?? blocks.parent(of: node) }
         #else
+        // A node lifted over the tab container bubbles to its parent (LLP 1083.000 D4)
+        if let parent = navigation.lifted?.parent(of: view) { return parent }
         if let node = view as? NodeView, navigation.routeSurfaces[node.id]?.node === node,
            let parent = navigation.logicalParent(of: node) ?? navigation.container {
             return parent
@@ -403,7 +405,7 @@ extension NodeView {
     /// and `charactersIgnoringModifiers` loses it. Option and Control change
     /// `characters` too, so with either the layout is asked for Command's
     /// character alone.
-    static func commandKey(_ event: NSEvent) -> String? {
+    package static func commandKey(_ event: NSEvent) -> String? {
         let typed = event.modifierFlags.isDisjoint(with: [.control, .option])
             ? event.characters : event.characters(byApplyingModifiers: .command)
         return (typed ?? event.charactersIgnoringModifiers)?.lowercased()
@@ -411,7 +413,7 @@ extension NodeView {
     /// Whether Command is the only modifier held, as the Edit menu's ⌘A and
     /// ⌘C have it, ignoring Caps Lock, the numeric pad and Fn: a chord with
     /// another (⇧⌘C) is a different command.
-    static func isCommandAlone(_ event: NSEvent) -> Bool {
+    package static func isCommandAlone(_ event: NSEvent) -> Bool {
         event.modifierFlags.intersection(.deviceIndependentFlagsMask).subtracting([.capsLock, .numericPad, .function]) == .command
     }
 }

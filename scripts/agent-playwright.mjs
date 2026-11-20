@@ -1,6 +1,7 @@
 // Firefox and WebKit carrier for scripts/agent.mjs. Chrome deliberately stays
 // in agent-web.mjs on its direct CDP pipe; importing Playwright is deferred until
 // one of these browsers is selected.
+import { storedScript } from './agent-web.mjs';
 import { MalformedOperation, keyArguments } from './agent-keys.mjs';
 import { spawnSync } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -317,8 +318,14 @@ export async function openPlaywrightWeb({ browser: name, plan, world, size, url:
     };
     await installFaults(facts.failFetch);
     const address = agentPage(new URL(hosted.url), { facts, storage, env });
+    const stored = storedScript(env, address.origin);
+    const seedScript = stored && await page.addInitScript(stored);
     await page.goto(address.href, { waitUntil: 'commit' });
     let boot = await waitForBoot(page, neverBooted('the page never booted'));
+    if (seedScript) {
+      await seedScript.dispose();
+      if (await page.evaluate(() => !!globalThis.__exactSeedStored)) throw new Error('stored: the web build did not load the initial persisted state');
+    }
     if (await page.evaluate(() => matchMedia('(prefers-reduced-transparency: reduce)').matches)) throw new Error(`${name} cannot emulate the required prefers-reduced-transparency: no-preference launch fact`);
     if (plan && !hosted.js) {
       const carry = world ? worldFile(world).toString('base64') : null;
@@ -417,6 +424,7 @@ export async function openPlaywrightWeb({ browser: name, plan, world, size, url:
       ask,
       async reveal(id) { const r = await ask({ op: 'reveal', id }); if (r.scrolled) await frame(); return r; },
       async prefer(media, pageFacts, fold = {}, mode = {}) {
+        if (Object.hasOwn(pageFacts, 'safe-area')) throw new Error(`prefer safe-area: ${name} uses the device's insets; choose Chromium to set them`);
         const unsupported = Object.entries(media).find(([key, value]) => key === 'display-mode' || key === 'pointer' || key === 'hover' || (key === 'prefers-reduced-transparency' && value !== 'no-preference') || (key === 'prefers-contrast' && !['more', 'no-preference'].includes(value)));
         if (unsupported) throw new Error(`${name} prefer cannot emulate ${unsupported[0]} ${unsupported[1]} through Playwright`);
         if (pageFacts['display-scale'] != null && pageFacts['display-scale'] !== 1) throw new Error(`${name} prefer cannot set display-scale ${pageFacts['display-scale']}: a browser's scale is fixed when it launches, and Playwright's is 1 here`);

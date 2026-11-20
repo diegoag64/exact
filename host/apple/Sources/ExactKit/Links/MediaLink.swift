@@ -1,11 +1,12 @@
-// @ref LLP 1047.001 D10 — media (cut list C5: iframes' web views, video and
-// audio elements, sound, MIDI, the audio session and picture in picture) is
-// a family the composition selects. Its arms already load on demand; this
-// file is how the core reaches their Swift halves. Without the family the
-// session holds `NoWebViews` and `NoAudioOutput`, a node gets no player, and
-// the core makes none of its four audio-session calls. The `AudioSession`
-// enum itself stays in ExactKit: canvases (ExactSurfaces) and hatches hold
-// and release through it. The slots' defaults are today's.
+// @ref LLP 1047.001 D10 — media is four products the composition selects,
+// each the Swift half of a loaded arm: `ExactVideo` (video and audio
+// elements' players, and an image's picture in picture), `ExactWebViews`
+// (iframes), `ExactSound` and `ExactMIDI`. This file is how the core reaches
+// them; each product's `install()` sets its slots. Without one, the session
+// holds `NoWebViews` or `NoAudioOutput`, or a node gets no player, or a
+// picture-in-picture request is refused. The audio session's code is the
+// core's, since players, sound, canvases (ExactSurfaces) and hatches
+// (ExactNativeViews) all claim it; each of those installs it.
 import CExact
 #if os(macOS)
 import AppKit
@@ -120,44 +121,52 @@ package final class NoAudioOutput: AudioOutputting {
 
 #if os(iOS) || os(tvOS)
 /// What the core asks of the process's audio session (AudioSession.swift).
-package protocol AudioSessionControlling: AnyObject {
+/// Functions, not a conforming type, so that an app with no claimant links
+/// none of the session's code.
+package struct AudioSessionCalls {
     /// Around a batch's presentation: claims made while it is applied settle once.
-    func beginPresentation()
-    func endPresentation()
+    let beginPresentation: () -> Void
+    let endPresentation: () -> Void
     /// Whether a background audio claim keeps the app running in the background.
-    func backgroundExecutionEligible() -> Bool
-    func enteredBackground()
+    let backgroundExecutionEligible: () -> Bool
+    let enteredBackground: () -> Void
 }
 #endif
 
 /// The slots are set before any session is made, and read on the main thread.
 package enum MediaLink {
     /// A session's web views.
-    package static var makeWeb: (() -> any WebHosting)? = { WebViews() }
+    package static var makeWeb: (() -> any WebHosting)?
     /// A video or audio element's player, made when its node is.
-    package static var makeVideo: ((NodeView) -> any VideoPlaying)? = { VideoView(owner: $0) }
+    package static var makeVideo: ((NodeView) -> any VideoPlaying)?
     /// A session's sound and MIDI output.
-    package static var makeSound: ((ExactSession) -> any AudioOutputting)? = { SoundOutput($0) }
-    package static var makeMIDI: ((ExactSession) -> any AudioOutputting)? = { MIDIOutput($0) }
+    package static var makeSound: ((ExactSession) -> any AudioOutputting)?
+    package static var makeMIDI: ((ExactSession) -> any AudioOutputting)?
     #if os(iOS) || os(tvOS)
-    /// The process's audio session.
-    package static var audioSession: (any AudioSessionControlling)? = BuiltInAudioSession()
+    /// The process's audio session: nil until a family that claims it
+    /// (players, sound, canvases' audio, hatches) is installed, since
+    /// without a claim the core's four calls have nothing to do.
+    package static var audioSession: AudioSessionCalls?
+    /// A family that claims the audio session installs it.
+    package static func claimsAudioSession() {
+        audioSession = AudioSessionCalls(beginPresentation: AudioSession.beginPresentation, endPresentation: AudioSession.endPresentation,
+                                         backgroundExecutionEligible: AudioSession.backgroundExecutionEligible, enteredBackground: AudioSession.enteredBackground)
+    }
     #endif
     /// An image's picture in picture: the page's `requestPictureInPicture`
     /// and `exitPictureInPicture`; its source changed, or it left the document.
-    package static var pictureCommand: ((Presenter, String, [Any]) -> Void)? = { presenter, name, args in
-        if name == "requestPictureInPicture" { presenter.pictureInPicture(args) } else { PictureInPictureHost.exit(presenter.session) }
-    }
-    package static var pictureChanged: ((NodeView) -> Void)? = { PictureInPictureHost.changed($0) }
-    package static var pictureGone: ((NodeView) -> Void)? = { PictureInPictureHost.gone($0) }
+    package static var pictureCommand: ((Presenter, String, [Any]) -> Void)?
+    package static var pictureChanged: ((NodeView) -> Void)?
+    package static var pictureGone: ((NodeView) -> Void)?
 }
+
 
 #if os(macOS) && EXACT_AGENT
 extension MediaLink {
     /// The agent's view of Exact's picture-in-picture window (LLP 1042 §9.1):
     /// its row in `tree`, a tap on its controls, its screenshot.
-    package static var pictureDecorate: ((Agent, [String: Any]) -> [String: Any])? = { $0.decoratePictureInPicture($1) }
-    package static var pictureTap: ((Agent, [String: Any], String) -> [String: Any])? = { $0.pictureInPictureTap($1, control: $2) }
-    package static var pictureShot: ((Agent, String, UInt32?) -> [String: Any])? = { $0.pictureInPictureShot($1, of: $2) }
+    package static var pictureDecorate: ((Agent, [String: Any]) -> [String: Any])?
+    package static var pictureTap: ((Agent, [String: Any], String) -> [String: Any])?
+    package static var pictureShot: ((Agent, String, UInt32?) -> [String: Any])?
 }
 #endif

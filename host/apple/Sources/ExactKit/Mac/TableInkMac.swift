@@ -31,10 +31,10 @@
 import AppKit
 
 /// A painted list's selected row's selection (`NodeView.drawSelection`).
-final class RowSelectionLayer: CALayer {
+package final class RowSelectionLayer: CALayer {
     weak var row: NodeView?
     var emphasized = false
-    override func action(forKey event: String) -> CAAction? { NSNull() }
+    package override func action(forKey event: String) -> CAAction? { NSNull() }
 }
 
 extension NodeView {
@@ -60,7 +60,7 @@ extension NodeView {
     /// glyph's view is made clear: whether it is hidden is CSS `visibility`'s
     /// (`applyCssVisibility`), written again with every style. Any other
     /// symbol's glyph is drawn, so one that stopped being a chevron shows.
-    func rowDisclosure(hidden: Bool) {
+    package func rowDisclosure(hidden: Bool) {
         func walk(_ view: NSView) {
             if let node = view as? NodeView, let leaf = node.symbolView {
                 let chevron = ["chevron.forward", "chevron.right"].contains(node.props["symbolName"] ?? "")
@@ -80,12 +80,12 @@ extension NodeView {
     /// otherwise. A painted row's content can start nearer the edge (10
     /// points in the Mac's grouped form), or a swipe row can be inset by its
     /// margin, so the selection is placed by the content: 8 points before
-    /// its first leaf and after the row's padding at the end, and no more
+    /// its first leaf or first painted box and after the row's padding at the end, and no more
     /// than 10 points in from, or out past, the view that holds the row (a
     /// section's card, the list's document). It is a layer of that view,
     /// over its own box and under its rows, so a swipe row's scroll view
     /// does not clip it.
-    func drawSelection(_ mark: RowSelectionLayer, emphasized: Bool) {
+    package func drawSelection(_ mark: RowSelectionLayer, emphasized: Bool) {
         guard let holder = superview else { mark.removeFromSuperlayer(); return }
         holder.wantsLayer = true
         guard let layer = holder.layer else { return }
@@ -95,8 +95,10 @@ extension NodeView {
             let box = layer.sublayers?.last { sublayer in paint.contains { $0 === sublayer } }
             if let box { layer.insertSublayer(mark, above: box) } else { layer.insertSublayer(mark, at: 0) }
         }
+        // A box that paints (a monogram's disc, a symbol's tile) is where the content starts, not the glyph in it.
+        let paints = { (v: NodeView) in v.boxFill != nil || v.boxGradient != nil || v.boxBorder != nil }
         var leaf: NodeView = self
-        while let first = leaf.childNodes.first(where: { !$0.isHidden }) { leaf = first }
+        while leaf === self || !paints(leaf), let first = leaf.childNodes.first(where: { !$0.isHidden }) { leaf = first }
         let start = leaf === self ? frame.minX + number("padding_left") : holder.convert(leaf.bounds, from: leaf).minX
         let end = frame.maxX - number("padding_right"), edges = holder.bounds
         let left = min(max(start - 8, edges.minX), edges.minX + 10), right = max(min(end + 8, edges.maxX), edges.maxX - 10)
@@ -110,7 +112,7 @@ extension NodeView {
 
     /// The selection's colour, in this row's appearance and the system's
     /// accent as they are now.
-    func colorSelection(_ mark: RowSelectionLayer) {
+    package func colorSelection(_ mark: RowSelectionLayer) {
         effectiveAppearance.performAsCurrentDrawingAppearance {
             let fill = (mark.emphasized ? NSColor.selectedContentBackgroundColor : .unemphasizedSelectedContentBackgroundColor).cgColor
             if mark.backgroundColor != fill { mark.backgroundColor = fill }
@@ -128,7 +130,7 @@ extension NodeView {
     /// The row this node is the root view of became, or stopped being, a
     /// selected row drawn emphasized: every paragraph in it resolves its ink
     /// again, and every symbol is drawn as a cell's image is.
-    func rowEmphasisChanged(_ emphasized: Bool) {
+    package func rowEmphasisChanged(_ emphasized: Bool) {
         func walk(_ view: NSView) {
             if let node = view as? NodeView {
                 if node.kind == "text" { node.reapplyColors() }

@@ -146,8 +146,9 @@ impl<D: DataSource> Host<D> {
         batch.seq = self.runner.seq_range();
         batch.alerts = self.runner.take_alerts();
         batch.journal = self.runner.take_journal();
-        batch.canvas_frames(self.runner.canvas_wants_frame());
-        self.canvas_owed_onto(batch);
+        if let Some(canvas) = self.turn.canvas {
+            (canvas.onto)(self, batch);
+        }
     }
 
     fn withhold_layout(&mut self) {
@@ -217,8 +218,7 @@ impl<D: DataSource> Host<D> {
             self.layout_calls += 1;
         }
         self.sync_height_owner()?;
-        self.sync_height_transitions()?;
-        self.collect_height_samples()?;
+        self.sync_height_motion()?;
         self.height_presented.clear();
         let epoch = self.runner.kernel().epoch();
         self.height_presented
@@ -232,6 +232,7 @@ impl<D: DataSource> Host<D> {
                     }),
             );
         let (w, h) = self.viewport;
+        let environment = self.runner.kernel().env();
         for root in self.runner.roots() {
             // A miss has filled its cache on main before returning. Re-run
             // silently, collecting both receipts so a final unchanged frame
@@ -265,6 +266,22 @@ impl<D: DataSource> Host<D> {
                     return Err("layout: field chrome remained provisional after three passes; batch refused before presentation".into());
                 }
             }
+        }
+        if environment != self.runner.kernel().env() {
+            let readers: Vec<_> = self
+                .preorder()
+                .into_iter()
+                .filter(|&id| {
+                    self.runner
+                        .kernel()
+                        .node(id)
+                        .is_some_and(|node| exact_kernel::uses_env(node.style))
+                })
+                .collect();
+            for id in readers {
+                self.update(id, batch);
+            }
+            self.emit_paragraphs(batch);
         }
         self.height_projection.clear();
         self.height_projection
@@ -357,7 +374,9 @@ impl<D: DataSource> Host<D> {
     /// the presenter last heard them.
     fn emit_layout(&mut self, batch: &mut Batch) -> Result<(), String> {
         self.emit_flat_hits(batch);
-        self.judge_list_moves();
+        if let Some(motion) = self.turn.motion {
+            (motion.list_moves)(self);
+        }
         // Preserve publication order without a tree insertion for each touch.
         self.queue_flat_descendants();
         let mut pending: Vec<_> = std::mem::take(&mut self.pending_layout)
@@ -545,13 +564,15 @@ impl<D: DataSource> Host<D> {
                 }
             }
             // @ref LLP 1063 — a moved box plays from where it was.
-            if !self.presence.snap {
-                self.observe_layout(key, batch);
+            if let Some(motion) = self.turn.motion.filter(|_| !self.presence.snap) {
+                (motion.observe_layout)(self, key, batch);
             }
         }
         self.emit_fitted(&visited, &moved, batch);
         self.emit_extents(!visited.is_empty(), batch);
-        self.snap_layout(batch);
+        if let Some(motion) = self.turn.motion {
+            (motion.snap_layout)(self, batch);
+        }
         self.emit_sticky(batch);
         self.place_timelines(batch);
         self.emit_fragments(batch);
@@ -603,7 +624,9 @@ impl<D: DataSource> Host<D> {
             return self.layout(batch);
         }
         if !self.height_layout_if_needed(batch)? && committed {
-            self.judge_list_moves();
+            if let Some(motion) = self.turn.motion {
+                (motion.list_moves)(self);
+            }
             self.emit_collections(batch)?;
         }
         Ok(())

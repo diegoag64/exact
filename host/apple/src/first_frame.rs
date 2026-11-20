@@ -40,14 +40,18 @@ impl<D: DataSource> Host<D> {
             return self.arrange_settle();
         }
         let mut error = self.height_layout_if_needed(&mut batch).err();
-        self.runner.canvas_frame();
         // A tick is never waited for where draws are deferred (LLP 1072
         // §9): it draws in its own turn.
-        self.canvas_draw_turn(&mut batch);
+        if let Some(canvas) = self.turn.canvas {
+            (canvas.frame)(self);
+            (canvas.draw_turn)(self, &mut batch);
+        }
         // Only suspended ancestor mappings need a settle recheck. Normal
         // photo Translate/Scale frames keep the existing cheap tick path.
         if self.transform_drags.mapping_pending {
-            self.emit_transform_drags(&mut batch);
+            if let Some(drag) = self.turn.drag {
+                (drag.emit_transforms)(self, &mut batch);
+            }
         }
         match self.heard_present() {
             Ok(Some(receipt)) => {

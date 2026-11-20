@@ -1,5 +1,6 @@
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 @testable import ExactImages
 #if os(macOS)
 import AppKit

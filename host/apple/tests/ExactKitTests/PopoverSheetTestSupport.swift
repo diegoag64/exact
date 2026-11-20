@@ -2,6 +2,8 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactDialogs
+@testable import ExactNavigation
 @testable import ExactNativeViews
 
 extension PopoverSheetIOSTests {

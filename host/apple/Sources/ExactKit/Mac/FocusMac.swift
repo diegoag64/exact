@@ -31,7 +31,7 @@ extension NodeView {
     /// (`ControlHost.canFocusMember`) never asks which member is the stop.
     private var focusableByKind: Bool {
         kind == "button" || isNativeButton || isDateOrSelect || canvases?.wantsInput(id) == true || pressable || !handlers.isDisjoint(with: Self.focusEvents)
-            || reorderKeys || radioTabStop // a grouped grip takes the keys (LLP 1094 D9); a radio group one stop (x2apps survey #2)
+            || presenter?.reorders.takesKeys(self) == true || radioTabStop // a grouped grip takes the keys (LLP 1094 D9); a radio group one stop (x2apps survey #2)
     }
     /// Sequential focus honours macOS "Keyboard navigation" (LLP 1115.000
     /// D7.2; `tabStop`, KeyViewLoopMac.swift): off, a button is no key view,

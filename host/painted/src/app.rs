@@ -501,6 +501,36 @@ pub fn boot_presenter<D: DataSource + Default>(
     Ok(result)
 }
 
+#[cfg(any(windows, test))]
+/// Decide whether the window starts hidden and start early preparation for a visible launch.
+/// A measured frame run always shows its window. @ref LLP 1133.025 D6.
+pub fn prepare_window_painter<P, E>(
+    login: Option<bool>,
+    measured: bool,
+    prepare: impl FnOnce() -> Result<Option<P>, E>,
+) -> Result<(bool, Option<P>), E> {
+    let hidden = !measured && login == Some(true);
+    Ok((hidden, if hidden { None } else { prepare()? }))
+}
+
+#[cfg(any(windows, test))]
+pub(crate) fn boot_window_with_painter<D: DataSource + Default>(
+    config: &mut Config,
+    viewport: (f32, f32),
+    hidden: bool,
+    painter: PainterBoot,
+) -> Result<(Presenter<D>, Option<String>), String> {
+    let boot = if hidden {
+        PainterBoot::selected(crate::presenter::PainterChoice::Cpu)
+    } else {
+        painter
+    };
+    let (mut presenter, warning) = boot_presenter_with_painter(config, viewport, boot)?;
+    presenter.set_output_rotation(config.output_rotation);
+    presenter.deferred_painter = hidden.then_some(painter);
+    Ok((presenter, warning))
+}
+
 thread_local! {
     /// Whether the agent drives the presenter this thread boots: the presenter
     /// is the agent's from its first commit, so a request its boot makes (a
@@ -526,39 +556,36 @@ pub(crate) fn boot_phase(name: &'static core::ffi::CStr) {
     }
 }
 
-/// Load fonts and lay out while the carrier's device opens. Readiness is bounded
-/// by the boot budget; a late device takes over after first pixel. @ref LLP 1149 D6.3.
+/// Boot the window while its device prepares, or defer opening the painter for
+/// a hidden launch. The startup measurement can move preparation after layout.
+/// @ref LLP 1149 D6.3.
 #[cfg(windows)]
-pub fn boot_presenter_with_device<D: DataSource + Default>(
+pub fn boot_window_presenter<D: DataSource + Default>(
     config: &mut Config,
     viewport: (f32, f32),
-    preparing: exact_ink::device::d3d11::Startup,
+    hidden: bool,
+    preparing: Option<exact_ink::device::d3d11::Startup>,
+    prepare_after_layout: bool,
 ) -> Result<(Presenter<D>, Option<String>), String> {
+    if hidden || (preparing.is_none() && !prepare_after_layout) {
+        let painter = PainterBoot::selected(config.painter());
+        return boot_window_with_painter(config, viewport, hidden, painter);
+    }
     let (mut presenter, warning) = boot_presenter_with_painter(
         config,
         viewport,
         PainterBoot::selected(crate::presenter::PainterChoice::Cpu),
     )?;
-    presenter.install_prepared_painter(preparing)?;
-    Ok((presenter, warning))
-}
-
-#[cfg(windows)]
-/// Measurement arm: prepare the device only after the ordinary first layout.
-pub fn boot_presenter_after_layout_device<D: DataSource + Default>(
-    config: &mut Config,
-    viewport: (f32, f32),
-) -> Result<(Presenter<D>, Option<String>), String> {
-    let (mut presenter, warning) = boot_presenter_with_painter(
-        config,
-        viewport,
-        PainterBoot::selected(crate::presenter::PainterChoice::Cpu),
-    )?;
-    let device = std::env::var("EXACT_INK_DEVICE").ok();
-    let preparing = exact_ink::device::d3d11::Startup::start(
-        exact_ink::device::direct_d3d11(device.as_deref()).unwrap_or(false),
-    )
-    .map_err(|error| error.to_string())?;
+    let preparing = match preparing {
+        Some(preparing) => preparing,
+        None => {
+            let device = std::env::var("EXACT_INK_DEVICE").ok();
+            exact_ink::device::d3d11::Startup::start(
+                exact_ink::device::direct_d3d11(device.as_deref()).unwrap_or(false),
+            )
+            .map_err(|error| error.to_string())?
+        }
+    };
     presenter.install_prepared_painter(preparing)?;
     Ok((presenter, warning))
 }

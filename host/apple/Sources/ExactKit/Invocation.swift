@@ -12,16 +12,16 @@ import UIKit
 /// ASCII case-insensitively and untrimmed; an invalid `popovertargetaction`
 /// toggles. (HTML: the button element's activation behaviour, and the popover
 /// target attribute activation behaviour.)
-struct Invocation {
-    enum Action { case show, hide, toggle, showModal, close }
-    let target: NodeView
-    let action: Action
+package struct Invocation {
+    package enum Action { case show, hide, toggle, showModal, close }
+    package let target: NodeView
+    package let action: Action
 
     /// Whether it can put its target up (`show`, `toggle`, `show-modal`)
-    var opens: Bool { action != .hide && action != .close }
+    package var opens: Bool { action != .hide && action != .close }
     /// Whether it opens a popover, as a header's menu button does:
     /// `show-modal` on a `dialog` that is also a popover is no menu
-    var opensPopover: Bool { action == .show || action == .toggle }
+    package var opensPopover: Bool { action == .show || action == .toggle }
     /// Whether it closes `target` while that shows modally or as a popover:
     /// HTML's dialog `close` closes a modal dialog, and `hide-popover` a popover.
     func closes(_ target: NodeView, modally: Bool) -> Bool {
@@ -69,7 +69,7 @@ extension Presenter {
     /// What `source` invokes now, resolving names among this session's views
     /// (the lowest id among several with one `id`, as `aria-*` references do)
     /// and then its paragraphs' named runs.
-    func invocation(of source: NodeView) -> Invocation? {
+    package func invocation(of source: NodeView) -> Invocation? {
         Invocation(of: source, element: invocationElement)
     }
 
@@ -171,7 +171,7 @@ extension ExactSession {
     /// dialog's close and a popover's `toggle`. Beside a staged batch the
     /// input on `id` is admitted as `admit` says (LLP 1072 T13).
     // Input without a touch hit test still installs ownership before its runner call.
-    func applyInput(_ input: @autoclosure () -> Batch, at id: UInt32? = nil) {
+    package func applyInput(_ input: @autoclosure () -> Batch, at id: UInt32? = nil) {
         guard admits(id) else { return }
         #if os(iOS)
         presenter.navigation.finishBootOwner()

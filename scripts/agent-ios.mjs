@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { openTouches, realDoubleTap, realPinch, realTap, springboard, withAccessibilityRuntime } from '../host/apple/touches.mjs';
 import { nativeKey } from './agent-keys.mjs';
-import { jsonLines, hangup, waitAtMost, bootRefusal, simulatorConsole, REPLY_MS } from './agent-wire.mjs';
+import { activateIOS, backgroundIOS, jsonLines, hangup, waitAtMost, bootRefusal, simulatorConsole, REPLY_MS } from './agent-wire.mjs';
 import { bundleId, install } from '../host/apple/build.mjs';
 import { simulatorAssetRoot, simulatorPlanPath } from '../host/apple/assets.mjs';
 import {
@@ -264,6 +264,7 @@ async function openIOSOwned({ a, bundle, id, dev, plan, size, extra, session, ho
       crashes,
       udid: dev.udid,
       installNote: kept?.note,
+      background: ms => backgroundIOS(lines, ms, id, bundle => activateIOS(['simctl', 'launch', dev.udid], bundle)),
       springboard: request =>
         springboard(touches, request, name => {
           if (socket.destroyed || launch.done)
@@ -383,18 +384,12 @@ async function openIOSOwned({ a, bundle, id, dev, plan, size, extra, session, ho
         if (r.error) throw new Error(r.error);
         return r;
       },
-      // `own`: the app's drawing alone, never the display's (smoke's canvas readback); `window === 'display'`: the
-      // display as it is (`displayAsIs`).
-      async screenshot(path, window = false, film = false, status = false, own = false) {
+      async screenshot(path, window = false, film = false, { status = false, own = false, skipMotion = false } = {}) {
+        if (window === 'display') return simulatorDisplay(dev.udid, () => displayAsIs(ask, path, dev.udid, { skipMotion }));
         const take = async () => {
-          const r = await ask({
-            op: 'screenshot',
-            path,
-            window: window === 'display' || window,
-            ...(film ? { film } : {}),
-          });
+          const motion = skipMotion && !film ? { skipMotion } : {};
+          const r = await ask({ op: 'screenshot', path, window, ...motion, ...(film ? { film } : {}) });
           if (r.error) throw new Error(r.error);
-          if (window === 'display' && !film) return displayAsIs(r, path, dev.udid);
           const bar = r.statusBar;
           if (!status) delete r.statusBar;
           // The host draws the window (with an alert or sheet up, or asked); its pixels are then the display's, `simctl
@@ -406,7 +401,7 @@ async function openIOSOwned({ a, bundle, id, dev, plan, size, extra, session, ho
             return own
               ? (delete r.materials, r)
               : withMaterials(r, path, async p => {
-                  const w = await ask({ op: 'screenshot', path: p, window: true });
+                  const w = await ask({ op: 'screenshot', path: p, window: true, ...motion });
                   if (w.error) throw new Error(w.error);
                   return withDisplay(w, p, dev.udid, w.statusBar ?? 0, { probe });
                 });

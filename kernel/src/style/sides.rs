@@ -2,8 +2,11 @@
 //! `border-width`, `border-style`, `border-color`, `scroll-padding`,
 //! `scroll-margin` (CSS Box 4 §6, CSS Backgrounds 3 §4, CSS Position 3 §3.1,
 //! CSS Scroll Snap 1 §6), `border-radius` (CSS Backgrounds 3 §5.1) and
-//! Exact's `-exact-hit-slop`, `-exact-additional-safe-area` and
-//! `-exact-safe-area-padding` (LLP 1123 D11), spelled as `padding` is. The
+//! Exact's `-exact-hit-slop`, `-exact-additional-safe-area`,
+//! `-exact-safe-area-padding` (LLP 1123 D11), `-exact-layout-margins` and
+//! `-exact-directional-layout-margins` (D8, the latter top, leading, bottom,
+//! trailing), `-exact-scroll-content-inset`, the two indicator insets (D14)
+//! and `-exact-safe-area-extend-bounds` (D13), spelled as `padding` is. The
 //! compiler splits a literal, or a template at its text's white space, into
 //! its four rows, as the browser expands the shorthand, and refuses another
 //! computed list (LLP 1001 §1): no row splits one.
@@ -14,7 +17,7 @@ use crate::generated::StyleId;
 /// The shorthands' rows, in top, right, bottom, left order, and
 /// `border-radius`'s corners in top-left, top-right, bottom-right,
 /// bottom-left order, which CSS fills from fewer values the same way.
-pub const FAMILIES: [[StyleId; 4]; 12] = [
+pub const FAMILIES: [[StyleId; 4]; 18] = [
     [
         StyleId::PaddingTop,
         StyleId::PaddingRight,
@@ -81,6 +84,42 @@ pub const FAMILIES: [[StyleId; 4]; 12] = [
         StyleId::SafeAreaPaddingRight,
         StyleId::SafeAreaPaddingBottom,
         StyleId::SafeAreaPaddingLeft,
+    ],
+    [
+        StyleId::LayoutMarginTop,
+        StyleId::LayoutMarginRight,
+        StyleId::LayoutMarginBottom,
+        StyleId::LayoutMarginLeft,
+    ],
+    [
+        StyleId::LayoutMarginTop,
+        StyleId::LayoutMarginLeading,
+        StyleId::LayoutMarginBottom,
+        StyleId::LayoutMarginTrailing,
+    ],
+    [
+        StyleId::ScrollContentInsetTop,
+        StyleId::ScrollContentInsetRight,
+        StyleId::ScrollContentInsetBottom,
+        StyleId::ScrollContentInsetLeft,
+    ],
+    [
+        StyleId::ScrollVerticalIndicatorInsetsTop,
+        StyleId::ScrollVerticalIndicatorInsetsRight,
+        StyleId::ScrollVerticalIndicatorInsetsBottom,
+        StyleId::ScrollVerticalIndicatorInsetsLeft,
+    ],
+    [
+        StyleId::ScrollHorizontalIndicatorInsetsTop,
+        StyleId::ScrollHorizontalIndicatorInsetsRight,
+        StyleId::ScrollHorizontalIndicatorInsetsBottom,
+        StyleId::ScrollHorizontalIndicatorInsetsLeft,
+    ],
+    [
+        StyleId::SafeAreaExtendBoundsTop,
+        StyleId::SafeAreaExtendBoundsRight,
+        StyleId::SafeAreaExtendBoundsBottom,
+        StyleId::SafeAreaExtendBoundsLeft,
     ],
 ];
 

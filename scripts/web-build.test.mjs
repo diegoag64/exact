@@ -321,7 +321,8 @@ test('JS Rust producers generate privately and read grants from their captured m
     const env = { resolve, mkdirSync, existsSync, dirname: path => resolve(path, '..'), cpSync, readFileSync, createHash,
       rustLinked: true, root: dir, sep: '/', moduleSourceDirs: () => [], devReload: true, devLogic: [], opt: () => null, out, gen, app: 'fixture', canvas2d: false, appDir: dir, ts: false,
       normalizeGrants: () => ({ entries: [] }),
-      buildModule(app, at) {
+      buildModule(app, at, draw, appDir, options) {
+        expect(options.dev).toBe(true);
         expect(at).toBe(resolve(gen, 'rust-module')); mkdirSync(at, { recursive: true });
         const path = resolve(at, 'app.module.wasm'); writeFileSync(path, 'captured'); return path;
       },
@@ -332,7 +333,7 @@ test('JS Rust producers generate privately and read grants from their captured m
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('a Rust module holds its Cargo product claim through optimization and capture', async () => {
+test('a Rust module holds its Cargo product claim from writing inputs through capture', async () => {
   const { awaitBuildOutput } = await import('./app.mjs');
   const { lockHeld } = await import('../host/web/build-lock.mjs');
   const source = readFileSync(resolve(import.meta.dir, '../host/web-js/module.mjs'), 'utf8');
@@ -342,8 +343,8 @@ test('a Rust module holds its Cargo product claim through optimization and captu
   try {
     const env = { TARGET: dir, WEB: 'fixture', createHash, readFileSync, writeFileSync,
       WASM_OPT: () => 'fixture', OPT: [],
-      spawnSync: () => ({ status: 0, stdout: JSON.stringify({ packages: [] }) }), refreshCargoRustShapes() {},
-      resolve, dirname: path => resolve(path, '..'), mkdirSync, cpSync, existsSync, statSync, awaitBuildOutput, moduleDepInfo: new Map(),
+      moduleMetadata: () => ({ metadata: { packages: [] }, locked: false }), refreshCargoRustBindings() {},
+      resolve, dirname: path => resolve(path, '..'), realpathSync, mkdirSync, cpSync, existsSync, statSync, awaitBuildOutput, moduleDepInfo: new Map(),
       fresh: () => false, cargoWasm() {
         expect(lockHeld(lock)).toBe(true);
         const wasm = resolve(dir, 'wasm32-unknown-unknown/release/fixture.wasm');
@@ -353,7 +354,12 @@ test('a Rust module holds its Cargo product claim through optimization and captu
       replace: (path, write) => write(path), optimize(from, to) { expect(lockHeld(lock)).toBe(true); writeFileSync(to, 'captured module'); },
     };
     const build = new Function('env', `const {${Object.keys(env).join(',')}} = env; ${body}; return module;`)(env);
-    expect(readFileSync(build(resolve(dir, 'Cargo.toml'), 'fixture', out, 'fixture'), 'utf8')).toBe('captured module');
+    const manifest = resolve(dir, 'Cargo.toml');
+    const built = build(manifest, 'fixture', out, 'fixture', () => {
+      expect(lockHeld(lock)).toBe(true);
+      writeFileSync(manifest, 'wrapper manifest');
+    });
+    expect(readFileSync(built, 'utf8')).toBe('captured module');
     expect(lockHeld(lock)).toBe(false);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -1,6 +1,17 @@
 //! What the paint walk draws through.
 use super::*;
 
+/// The pointer arrow's outline, at the origin, in points.
+pub const POINTER: [(f32, f32); 7] = [
+    (0.0, 0.0),
+    (0.0, 16.0),
+    (4.0, 12.5),
+    (7.0, 19.0),
+    (9.5, 18.0),
+    (6.5, 11.5),
+    (11.5, 11.5),
+];
+
 /// The consumer of a completed paint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameTarget {
@@ -299,6 +310,17 @@ pub trait Backend {
         _direct: bool,
     ) {
     }
+    /// An audio player whose element has no visible controls to place.
+    fn boxless_audio(&mut self, id: ViewId, props: &str) {
+        self.native(
+            id,
+            NativeKind::Video,
+            &Shape::rect((0., 0., 0., 0.)),
+            Transform::identity(),
+            props,
+            false,
+        );
+    }
     /// Paint a paragraph with its top-left at `origin`.
     fn text(
         &mut self,
@@ -412,7 +434,8 @@ pub trait Backend {
     fn layer_recolored(&mut self) {}
     /// A node its reader animates (`crate::host::lower`): what follows, to
     /// [`Backend::layer_end`], is its layer `key`, moved and faded about
-    /// `pivot` in `ts`'s space from `base` (translate x, y, scale, rotate,
+    /// `pivot` in `ts`'s space. Percentage translations use the width and height
+    /// of `reference`. The layer starts from `base` (translate x, y, scale, rotate,
     /// opacity, a circle's radius, path units per dash offset unit). False:
     /// drawn where it is.
     fn layer_begin(
@@ -420,6 +443,7 @@ pub trait Backend {
         _key: u64,
         _ts: Transform,
         _pivot: (f32, f32),
+        _reference: (f32, f32),
         _base: [f32; 7],
     ) -> bool {
         false

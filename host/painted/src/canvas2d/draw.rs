@@ -498,6 +498,21 @@ impl Replayer {
             .pre_translate(dx, dy)
             .pre_scale(dw / sw, dh / sh)
             .pre_translate(ox - sx, oy - sy);
+        let whole = |v: f32| (v - v.round()).abs() < 1e-3;
+        if whole(sx)
+            && whole(sy)
+            && whole(sw)
+            && whole(sh)
+            && sw > 0.0
+            && sh > 0.0
+            && dw > 0.0
+            && dh > 0.0
+            && (pixmap.width() as f32 - sw).abs() < 1e-3
+            && (pixmap.height() as f32 - sh).abs() < 1e-3
+            && self.blit(&pixmap, space)
+        {
+            return;
+        }
         let Some(rect) = Rect::from_xywh(dx, dy, dw, dh) else {
             return;
         };
@@ -512,6 +527,53 @@ impl Replayer {
             band: None,
         };
         self.draw(Geom::Fill(&path, FillRule::Winding, ts), src);
+    }
+
+    /// An image drawn at its own size on whole pixels, with nothing else
+    /// applying, is copied row by row.
+    fn blit(&mut self, image: &Pixmap, space: Transform) -> bool {
+        let near = |a: f32, b: f32| (a - b).abs() < 1e-3;
+        if !(near(space.sx, 1.0)
+            && near(space.sy, 1.0)
+            && near(space.kx, 0.0)
+            && near(space.ky, 0.0))
+            || !near(space.tx, space.tx.round())
+            || !near(space.ty, space.ty.round())
+            || self.state.alpha != 1.0
+            || self.state.clip.is_some()
+            || self.shadowed()
+            || blend(self.state.composite) != BlendMode::SourceOver
+            || exact_canvas::composite_clips_extent(self.state.composite)
+        {
+            return false;
+        }
+        let (tx, ty) = (space.tx.round() as i64, space.ty.round() as i64);
+        let (iw, ih) = (image.width() as i64, image.height() as i64);
+        let (pw, ph) = (self.pixmap.width() as i64, self.pixmap.height() as i64);
+        let (x0, x1) = (tx.max(0), (tx + iw).min(pw));
+        let (y0, y1) = (ty.max(0), (ty + ih).min(ph));
+        if x0 >= x1 || y0 >= y1 {
+            return true;
+        }
+        let from = image.data();
+        let to = Arc::make_mut(&mut self.pixmap).data_mut();
+        let n = ((x1 - x0) * 4) as usize;
+        for y in y0..y1 {
+            let s = (((y - ty) * iw + (x0 - tx)) * 4) as usize;
+            let d = ((y * pw + x0) * 4) as usize;
+            let (src, dst) = (&from[s..s + n], &mut to[d..d + n]);
+            if src.chunks_exact(4).all(|p| p[3] == 255) {
+                dst.copy_from_slice(src);
+            } else {
+                for (o, i) in dst.chunks_exact_mut(4).zip(src.chunks_exact(4)) {
+                    let k = 255 - i[3] as u32;
+                    for c in 0..4 {
+                        o[c] = (i[c] as u32 + (o[c] as u32 * k + 127) / 255).min(255) as u8;
+                    }
+                }
+            }
+        }
+        true
     }
 
     /// `putImageData`: raw backing pixels, premultiplied; nothing else

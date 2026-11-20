@@ -3,6 +3,7 @@ import AppKit
 import WebKit
 import XCTest
 @testable import ExactKit
+@testable import ExactWebViews
 
 final class AgentWebWindowMacTests: XCTestCase {
     nonisolated(unsafe) private static var pages: FramePages?

@@ -16,17 +16,17 @@ package struct TabFace: Equatable {
     /// icon's path token (`FaceSymbol`, stage 9 A2) has no variant.
     /// `accessibilityDisabled`: `aria-disabled`, which reads as disabled
     /// and still presses.
-    let base: String?, title: String, disabled: Bool, accessibilityDisabled: Bool
+    package let base: String?, title: String, disabled: Bool, accessibilityDisabled: Bool
     /// A child image's bundled raster (`app:/…` or a bundle-relative name)
     /// where the tab has no symbol: drawn as the item's template glyph.
     package let raster: String?
     /// A filled box holding a text among the tab's children: the item's
     /// badge (LLP 1075.003 §9.9), as the web paints it on the tab.
-    let badge: String?
+    package let badge: String?
     /// An svg-only icon's token name (`icon.reply`) where the face says it:
     /// the agent's name for a path `base`.
-    let icon: String?
-    init(_ tab: NodeView) {
+    package let icon: String?
+    package init(_ tab: NodeView) {
         var icon: String?, raster: String?
         var symbol: String?, label = tab.props["accessibilityLabel"] ?? "", badges: [String] = []
         if tab.isNativeButton, let face = tab.face {
@@ -72,7 +72,7 @@ package struct TabFace: Equatable {
     /// screen's scale and template-rendered, so the bar tints it as it tints
     /// an SF Symbol (UIKit renders a tab's image as a template whatever its
     /// mode). Nil for an empty image.
-    static func rasterImage(_ image: UIImage, points: CGFloat) -> UIImage? {
+    package static func rasterImage(_ image: UIImage, points: CGFloat) -> UIImage? {
         guard points > 0, image.size.width > 0, image.size.height > 0 else { return nil }
         let fit = min(points / image.size.width, points / image.size.height)
         let size = CGSize(width: (image.size.width * fit).rounded(), height: (image.size.height * fit).rounded())

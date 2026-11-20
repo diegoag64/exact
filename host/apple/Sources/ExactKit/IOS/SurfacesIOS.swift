@@ -3,10 +3,11 @@ import UIKit
 
 package struct SessionSurface {
     package enum Kind: Equatable { case document, route, dialog, popover }
-    let view: UIView
-    let label: String
-    let kind: Kind
-    var owned: [UIView] = []
+    package let view: UIView
+    package let label: String
+    package let kind: Kind
+    package var owned: [UIView] = []
+    package init(view: UIView, label: String, kind: Kind, owned: [UIView] = []) { (self.view, self.label, self.kind, self.owned) = (view, label, kind, owned) }
 }
 
 extension Presenter {
@@ -32,7 +33,7 @@ extension Presenter {
 
     /// The innermost surface containing a view; the document's scrolling
     /// port is still `viewport`, even when its root is the session's view.
-    func surface(containing view: UIView, includingRetiring: Bool = true) -> SessionSurface? {
+    package func surface(containing view: UIView, includingRetiring: Bool = true) -> SessionSurface? {
         surfaces(includingRetiring: includingRetiring).last { view === $0.view || view.isDescendant(of: $0.view) }
     }
 
@@ -54,7 +55,7 @@ extension Presenter {
 /// A lifted popover belongs to its sheet even though UIKit places its layer
 /// beside the sheet's controller view, outside that controller's responders.
 package enum ViewPresentation {
-    static func isPresented(_ controller: UIViewController, above ancestor: UIViewController) -> Bool {
+    package static func isPresented(_ controller: UIViewController, above ancestor: UIViewController) -> Bool {
         sequence(first: controller.presentingViewController, next: { $0?.presentingViewController })
             .contains { $0 === ancestor }
     }
@@ -79,7 +80,7 @@ package enum ViewPresentation {
 
     /// The controllers on the responder chain from the owner, nearest first:
     /// its containment ancestors, then those presenting it.
-    static func controllers(for view: UIView, layout: Bool = false) -> [UIViewController] {
+    package static func controllers(for view: UIView, layout: Bool = false) -> [UIViewController] {
         guard let controller = controller(for: view, layout: layout) else { return [] }
         return sequence(first: controller as UIResponder, next: { responder in
             if let route = responder as? any RouteSurface, let surface = route.bootSurface { return surface.next }
@@ -89,7 +90,7 @@ package enum ViewPresentation {
 
     /// The owner, followed through presentations that are not being dismissed;
     /// nil out of a window, where UIKit refuses to present and calls back nothing.
-    static func presenter(for view: UIView) -> UIViewController? {
+    package static func presenter(for view: UIView) -> UIViewController? {
         var owner = controller(for: view, fallbackToWindow: true, layout: false)
         guard view.window != nil else { return nil }
         while let presented = owner?.presentedViewController, !presented.isBeingDismissed { owner = presented }

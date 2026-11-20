@@ -470,16 +470,6 @@ impl Recorder {
         }
     }
 
-    fn rect_radii(&mut self, s: &Shape) {
-        for v in [s.rect.0, s.rect.1, s.rect.2, s.rect.3] {
-            self.f(v);
-        }
-        for (rx, ry) in s.radii {
-            self.f(rx);
-            self.f(ry);
-        }
-    }
-
     fn path(&mut self, ops: &[PathOp]) {
         self.ops.push(ops.len() as u32);
         for op in ops {
@@ -732,6 +722,12 @@ impl Backend for Recorder {
         self.native_element(id, kind, shape, ts, props, direct);
     }
 
+    fn boxless_audio(&mut self, id: ViewId, props: &str) {
+        self.transform(Transform::identity());
+        let empty = Shape::rect((0., 0., 0., 0.));
+        self.record_native(id, crate::paint::NativeKind::Video, &empty, props);
+    }
+
     fn canvas(&mut self, pixels: &Arc<Pixmap>, dst: Rect4, clips: &[Shape], ts: Transform) {
         // A canvas is drawn by the presenter into pixels (Canvas 2D in Rust);
         // the reader shows them as a picture, sent again when they change.
@@ -932,12 +928,19 @@ impl Backend for Recorder {
         self.slot_reopen(row, id)
     }
 
-    fn layer_begin(&mut self, key: u64, ts: Transform, pivot: (f32, f32), base: [f32; 7]) -> bool {
+    fn layer_begin(
+        &mut self,
+        key: u64,
+        ts: Transform,
+        pivot: (f32, f32),
+        reference: (f32, f32),
+        base: [f32; 7],
+    ) -> bool {
         // Retained layers animate in page coordinates, outside any projective plane.
         if !self.planes.is_empty() {
             return false;
         }
-        self.layer_open(key, ts, pivot, base);
+        self.layer_open(key, ts, pivot, reference, base);
         true
     }
 
@@ -1105,7 +1108,7 @@ pub struct CanvasHost<D: DataSource> {
     /// live layer's keyframes as last sent (`TRACKS`).
     origin_ns: i64,
     clock_sent: bool,
-    tracks: HashMap<u32, Vec<u32>>,
+    tracks: HashMap<u32, (layer::Basis, Vec<u32>)>,
     /// The scroller [`CanvasHost::scroll`] moves, and a finger last did.
     feed: Option<ViewId>,
     /// Whether the windows' lead is back after the first frame (and after
@@ -1149,7 +1152,7 @@ const MOVES_MOUNTED: u32 = 6;
 impl<D: DataSource + Default> CanvasHost<D> {
     /// One turn: the presenter's work, then a recording when anything
     /// changed. `Some` is the new op stream (valid until the next call).
-    pub fn frame(&mut self) -> Option<Vec<u32>> {
+    pub fn frame(&mut self, vsync: bool) -> Option<Vec<u32>> {
         self.p.timer_visibility(false);
         // After the first frame: the windows' lead, realized off the frame.
         if self.painted_once && !self.lead && !self.responding {
@@ -1161,7 +1164,7 @@ impl<D: DataSource + Default> CanvasHost<D> {
         let p = &mut self.p;
         let _frame = Section::begin(c"exact frame");
         p.hold_collections(self.scrolled);
-        let frame = self.frame_held(now);
+        let frame = self.frame_held(now, vsync);
         self.p.hold_collections(false);
         if std::mem::take(&mut self.responding) {
             self.p.slice_collections(None, 0.0);
@@ -1169,7 +1172,7 @@ impl<D: DataSource + Default> CanvasHost<D> {
         frame
     }
 
-    fn frame_held(&mut self, now: f64) -> Option<Vec<u32>> {
+    fn frame_held(&mut self, now: f64, vsync: bool) -> Option<Vec<u32>> {
         // A frame a scroll step asks for: replies and pictures arrive through
         // [`CanvasHost::poll`] when their fds wake, so this one skips them.
         let quick = self.scrolled;
@@ -1189,7 +1192,7 @@ impl<D: DataSource + Default> CanvasHost<D> {
         }
         // The presenter's clock: the runner's frame tasks and timers, and
         // the hatches' tickets and `after`s.
-        if let Some(e) = p.reader_clock(now, agent::clock(p).is_none()) {
+        if let Some(e) = p.reader_clock(now, agent::clock(p).is_none(), vsync) {
             eprintln!("exact: {e}");
         }
         if quick {
@@ -1301,35 +1304,30 @@ impl<D: DataSource + Default> CanvasHost<D> {
         let epoch = self.p.host().lowered_epoch();
         let since = self.tracks_epoch;
         self.tracks_epoch = epoch;
-        for (id, key, base) in alive {
-            // An indicator's tracks change only with the device's motion
-            // setting: sent with its layer, and again when that changes.
-            if crate::host::lower::is_spinner(key) {
-                let words = self.p.host().spinner_tracks();
-                if self.tracks.get(&id) != Some(&words) {
-                    ops.extend([layer::TRACKS, id, words.len() as u32]);
-                    ops.extend(&words);
-                    self.tracks.insert(id, words);
+        for (id, key, basis) in alive {
+            let cached = self.tracks.get(&id);
+            let words = if crate::host::lower::is_spinner(key) {
+                self.p.host().spinner_tracks()
+            } else {
+                let key = exact_kernel::motion::node_key(key);
+                if cached.is_some_and(|(old, _)| *old == basis)
+                    && (epoch == since || !self.p.host().lowered_changed_after(key, since))
+                {
+                    continue;
                 }
-                continue;
-            }
-            let key = exact_kernel::motion::node_key(key);
-            if self.tracks.contains_key(&id)
-                && (epoch == since || !self.p.host().lowered_changed_after(key, since))
-            {
-                continue;
-            }
-            let mut p = crate::paint::Presented::IDENTITY;
-            p.translate = (base[0], base[1]);
-            p.scale = base[2];
-            p.rotate = base[3];
-            p.opacity = base[4];
-            let words = self.p.host().layer_tracks(key, &p);
-            if self.tracks.get(&id) != Some(&words) {
+                let base = basis.base;
+                let mut p = crate::paint::Presented::IDENTITY;
+                p.translate = (base[0], base[1]);
+                p.scale = base[2];
+                p.rotate = base[3];
+                p.opacity = base[4];
+                self.p.host().layer_tracks(key, &p, basis.reference)
+            };
+            if cached.is_none_or(|(_, old)| *old != words) {
                 ops.extend([layer::TRACKS, id, words.len() as u32]);
                 ops.extend(&words);
-                self.tracks.insert(id, words);
             }
+            self.tracks.insert(id, (basis, words));
         }
     }
 
@@ -1351,11 +1349,13 @@ impl<D: DataSource + Default> CanvasHost<D> {
         if self.p.module_pending() {
             self.p.first_pixel();
         }
-        updated || self.animating()
+        updated || self.animating(false)
     }
-    /// Whether another display frame is wanted.
-    pub fn animating(&self) -> bool {
-        // A moved paint owes a paint: the frame after scrolling stops.
+    /// Whether more work is wanted, or only work that must wait for vsync.
+    pub fn animating(&self, vsync_only: bool) -> bool {
+        if vsync_only {
+            return agent::clock(&self.p).is_none() && self.p.wants_frames();
+        }
         self.p.dirty()
             || self.p.scroll_end_due().is_some_and(|due| due <= self.now())
             || self.p.needs_animation_frame()

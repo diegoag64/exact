@@ -393,24 +393,9 @@ fn build(options: &Options) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-// A reader observes either complete output. Only a temporary file this
-// invocation successfully created is removed on failure.
 fn write_output(path: &str, bytes: &[u8]) -> Result<(), contract::CompileError> {
-    let temporary = format!("{path}.{}.tmp", std::process::id());
-    let refusal =
-        |cause: std::io::Error| error("contract-output-write", cause.to_string(), Some(path));
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .map_err(refusal)?;
-    let written = file.write_all(bytes);
-    drop(file);
-    let result = written.and_then(|_| std::fs::rename(&temporary, path));
-    if result.is_err() {
-        let _ = std::fs::remove_file(&temporary);
-    }
-    result.map_err(refusal)
+    contract::write_output(std::path::Path::new(path), bytes)
+        .map_err(|cause| error("contract-output-write", cause.to_string(), Some(path)))
 }
 
 #[cfg(test)]

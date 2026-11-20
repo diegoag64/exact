@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// A press and the focus it takes on UIKit. A tap focuses only a node that
 /// asked for focus (`focusesOnPress`), as UIKit's buttons take none from a

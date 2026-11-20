@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 extension NavigationTabsIOSTests {
     func testALazyTabWithShortScrollContentOpensWithItsLargeTitle() throws {
@@ -28,6 +29,18 @@ extension NavigationTabsIOSTests {
         tapTab(tabs, 1)
         waitFor("the reselected tab settles") { !Agent(session: session).nativeInFlight() }
         XCTAssertTrue(showsLargeTitle(saved), "reselection keeps the resting title open")
+    }
+
+    func testARootTabsSymbolIsFilledInBothStates() throws {
+        let session = try fixture("lazy-tab-title", wholeScreen: true, plan: "EXACT_LAZY_TAB_TITLE_PLAN")
+        let tabs = try XCTUnwrap(session.presenter.navigationHost.tabController)
+        let items = try XCTUnwrap(tabs.tabControllers).compactMap(\.tabBarItem)
+        XCTAssertEqual(items.count, 2)
+        let house = UIImage(systemName: "house.fill")?.pngData(), bookmark = UIImage(systemName: "bookmark.fill")?.pngData()
+        XCTAssertEqual(items[0].image?.pngData(), house, "the selected tab's own image")
+        XCTAssertEqual(items[0].selectedImage?.pngData(), house)
+        XCTAssertEqual(items[1].image?.pngData(), bookmark, "an unselected tab, written `bookmark`")
+        XCTAssertEqual(items[1].selectedImage?.pngData(), bookmark)
     }
 
     func showsLargeTitle(_ nav: UINavigationController) -> Bool {

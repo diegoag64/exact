@@ -236,7 +236,7 @@ package struct ButtonFace: Equatable {
     package var title: String?
     var subtitle: String?
     var placement: String?
-    var rows = ButtonFaceRows()
+    package var rows = ButtonFaceRows()
     package var symbol: String?
     /// An svg-only icon's token name (`icon.reply`), the agent's name for its path.
     var symbolIcon: String?
@@ -248,12 +248,12 @@ package struct ButtonFace: Equatable {
     var image: Image?
     package var raster = false
     var leading = true
-    var label: String?
+    package var label: String?
     package var fits = true
     /// A tab's badge (LLP 1075.003 §9.9): the text of the filled box beside
     /// its face, which the kernel reads from the tab's children.
     var badge: String?
-    var style: String?
+    package var style: String?
     var ios = ButtonFace.unsaid
     var iosBefore26 = ButtonFace.unsaid
     var macos = "push"
@@ -315,8 +315,8 @@ package struct ButtonFace: Equatable {
 /// (`designRequiresCompatibility`, `host/apple/build.mjs`) draws as before 26
 /// on iOS 27 and macOS 27, where a glass button configuration or bezel draws
 /// no glass. Read once; callers also check the OS (`#available(… 26.0, *)`).
-enum LinkedDesign {
-    static let liquidGlass: Bool = {
+package enum LinkedDesign {
+    package static let liquidGlass: Bool = {
         guard let header = _dyld_get_image_header(0) else { return false }
         var at = UnsafeRawPointer(header).advanced(by: MemoryLayout<mach_header_64>.size)
         for _ in 0..<header.pointee.ncmds {
@@ -332,7 +332,7 @@ enum LinkedDesign {
 
 
 /// Only authored rows cross this dictionary; absence is UIKit's answer (D1–D2).
-struct ButtonFaceRows: Equatable {
+package struct ButtonFaceRows: Equatable {
     package var title: NodeStyle = [:], subtitle: NodeStyle = [:], symbol: NodeStyle = [:], button: NodeStyle = [:]
     var imageGap: CGFloat?
     init() {}

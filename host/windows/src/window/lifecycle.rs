@@ -8,23 +8,27 @@
 //! against Close minimizing to the notification area
 //! ([Notifications and the notification area](https://learn.microsoft.com/windows/win32/uxguide/winenv-notification)).
 //! The app's own `close()` still closes it. A login item registered
-//! `hidden` shows no window at its launch (D6): a frame painted to pixels
-//! that nothing presents is the launch's first pixel, and nothing is drawn
-//! into the window until it shows. A later launch of the app
+//! `hidden` shows no window at its launch (D6). Its offscreen CPU frame
+//! stands for first pixel. The selected painter opens when the window is
+//! first ready to draw. A later launch of the app
 //! (`crate::instance`) or a bare `focus()` shows it.
 use super::*;
-use crate::instance::{Claim, Handed, Instance};
+use crate::instance::{Activation, Claim, Handed, Instance};
 
 /// This launch's claim to be the app's one instance (D6), or the exit code
 /// it ends with: 0 once the running instance has its arguments, 1 when that
 /// instance did not answer. A measured run (`frame_limit`, the readiness
 /// probe) stands alone.
-pub(super) fn claim(measured: bool, compat: &str, name: &str) -> Result<Option<Instance>, i32> {
+pub(super) fn claim(
+    measured: bool,
+    compat: &str,
+    name: &str,
+    args: &[String],
+) -> Result<Option<Instance>, i32> {
     if measured || std::env::var_os("EXACT_AGENT_WINDOW_READY").is_some() {
         return Ok(None);
     }
-    let args: Vec<String> = std::env::args().collect();
-    match crate::instance::claim(&crate::instance::key(compat, name), &args) {
+    match crate::instance::claim(&crate::instance::key(compat, name), args) {
         Claim::First(instance) => Ok(Some(instance)),
         Claim::Handed => Err(0),
         Claim::Busy => {
@@ -32,6 +36,38 @@ pub(super) fn claim(measured: bool, compat: &str, name: &str) -> Result<Option<I
             Err(1)
         }
         Claim::Alone => Ok(None),
+    }
+}
+
+/// The initial location boots the plan. Its document fields exist after
+/// mount, when the same delivery as a subsequent launch can take them.
+pub(super) fn cold_documents(config: &mut Config, compat: &str, args: &[String]) -> Vec<String> {
+    let Handed::Open(items) = crate::instance::handed(args) else {
+        return Vec::new();
+    };
+    let mut documents = Vec::new();
+    let mut location = None;
+    for item in items {
+        match item {
+            Activation::Document(path) => documents.push(path),
+            Activation::Location(href) => location = Some(href),
+        }
+    }
+    if !documents.is_empty() {
+        config.launch = app::launch_location(
+            location
+                .into_iter()
+                .chain(std::env::var("EXACT_LAUNCH_URL").ok()),
+            compat,
+        );
+    }
+    documents
+}
+
+fn deliver_document<D: DataSource>(p: &mut Presenter<D>, path: String) {
+    if let Err(refused) = p.open_document(path) {
+        eprintln!("exact-windows: {refused}");
+        p.host_mut().log(refused);
     }
 }
 
@@ -111,6 +147,10 @@ impl<D: DataSource + Default + 'static> App<D> {
             page.hidden = true;
             page.persisted = true;
         });
+        self.surface = None;
+        if let Some(p) = &mut self.presenter {
+            p.suspend_window_painter(self.config.painter());
+        }
     }
 
     /// The app's bare `focus()`, or a later launch: the window shown if it
@@ -161,13 +201,6 @@ impl<D: DataSource + Default + 'static> App<D> {
         p.surface_lifecycle(unseen, !self.focused);
     }
 
-    /// Whether this launch shows no window: the login item's, registered
-    /// `hidden` (LLP 1133.025 D6). A measured run always shows its window.
-    pub(super) fn launches_hidden(&self) -> bool {
-        let args: Vec<String> = std::env::args().collect();
-        self.frame_limit.is_none() && crate::desktop::login_launch(&args) == Some(true)
-    }
-
     /// While the window is hidden: a frame painted to pixels that nothing
     /// presents is the launch's first pixel (LLP 1133.025 D6), since the
     /// window's composition takes no present while it is not visible; the
@@ -181,6 +214,10 @@ impl<D: DataSource + Default + 'static> App<D> {
 
     /// What later launches of the app asked of it.
     pub(super) fn handed_launches(&mut self) {
+        let Some(p) = &mut self.presenter else { return };
+        for path in std::mem::take(&mut self.cold_documents) {
+            deliver_document(p, path);
+        }
         let Some(launches) = self.instance.as_ref().map(Instance::take) else {
             return;
         };
@@ -188,13 +225,19 @@ impl<D: DataSource + Default + 'static> App<D> {
             match crate::instance::handed(&args) {
                 Handed::Nothing => {}
                 Handed::Show => self.bring_forward(),
-                Handed::Open(href) => {
+                Handed::Open(items) => {
                     self.bring_forward();
                     if let Some(p) = &mut self.presenter {
                         p.advance(self.started.elapsed().as_secs_f64() * 1000.);
-                        let now = p.host().now();
-                        if let Some(refused) = p.open_location(&href, now) {
-                            p.host_mut().log(refused);
+                        for item in items {
+                            match item {
+                                Activation::Document(path) => deliver_document(p, path),
+                                Activation::Location(href) => {
+                                    if let Some(refused) = p.open_location(&href, p.host().now()) {
+                                        p.host_mut().log(refused);
+                                    }
+                                }
+                            }
                         }
                     }
                 }

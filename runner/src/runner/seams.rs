@@ -12,6 +12,7 @@
 //! motion is chosen by the host alone, by whether it plays transitions and
 //! animations.
 
+use super::audio_seam::{Audio, LinkedAudio, NoAudio};
 use super::calls::{CallHow, LinkedTools};
 use super::list_seam::{Lists, NoLists};
 use super::lists::LinkedLists;
@@ -46,6 +47,9 @@ pub struct ModuleLinks<D: DataSource> {
     /// The list engine's runner half (LLP 1047.000 §9), beside
     /// [`super::RunnerLinks::lists`], its instance half.
     pub lists: &'static dyn Lists<D>,
+    /// The voice table, the transport and MIDI (LLP 1096; LLP 1125), for a
+    /// plan that plays a sound or a sequence or uses MIDI.
+    pub audio: &'static dyn Audio<D>,
 }
 
 impl<D: DataSource> Clone for ModuleLinks<D> {
@@ -64,6 +68,7 @@ impl<D: DataSource> ModuleLinks<D> {
         presence: &LinkedPresence,
         text_axes: &LinkedTextAxes,
         lists: &LinkedLists,
+        audio: &LinkedAudio,
     };
 
     /// No part: the core alone.
@@ -73,6 +78,7 @@ impl<D: DataSource> ModuleLinks<D> {
         presence: &NoPresence,
         text_axes: &NoTextAxes,
         lists: &NoLists,
+        audio: &NoAudio,
     };
 
     /// The parts `plan` uses of these, `presence` whether its store keeps a
@@ -108,6 +114,7 @@ impl<D: DataSource> ModuleLinks<D> {
                 true => self.lists,
                 false => &NoLists,
             },
+            audio: self.audio,
         }
     }
 }

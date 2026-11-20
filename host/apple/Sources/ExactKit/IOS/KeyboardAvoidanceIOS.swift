@@ -16,9 +16,10 @@
 import UIKit
 
 /// One keyboard contribution to a scroll view's shared bottom insets.
-final class KeyboardInset {
+package final class KeyboardInset {
     private var amount: CGFloat = 0
-    func apply(_ desired: CGFloat, to scroll: UIScrollView) {
+    package init() {}
+    package func apply(_ desired: CGFloat, to scroll: UIScrollView) {
         let change = desired - amount
         // Record the contribution before UIKit setters can reenter layout
         amount = desired
@@ -92,7 +93,7 @@ extension Presenter {
     /// below it (ExactView `paintUnderKeys`): the background of the scroller
     /// there (a grouped list's), or the nearest painted box above it (a
     /// route's backdrop), never a row's own. Nil where nothing is painted.
-    func bottomEdgeColor() -> UIColor? {
+    package func bottomEdgeColor() -> UIColor? {
         var b = viewport.bounds.inset(by: pageMargins)
         if let top = keyboardTop, let window = viewport.window {
             let edge = viewport.convert(CGPoint(x: 0, y: top), from: window).y
@@ -135,6 +136,8 @@ extension Presenter {
                 for case let sibling as NodeView in parent.subviews[(at + 1)...] where sibling.layoutPosition == "absolute" {
                     consider(sibling)
                 }
+                // And those lifted over the tab container, after it (LLP 1083.000 D4)
+                navigation.lifted?.absoluteNodes(after: child, in: parent).forEach(consider)
             }
             child = parent
             up = parent.superview
@@ -275,7 +278,7 @@ extension NodeView {
     /// keeps UIKit's `.none`. An authored `keyboardDismissMode` wins, `none`
     /// included: the prop has no default row, so unsaid it is absent from
     /// the node's props, and absence is the whole test.
-    var keyboardDismissal: UIScrollView.KeyboardDismissMode {
+    package var keyboardDismissal: UIScrollView.KeyboardDismissMode {
         switch props["keyboardDismissMode"] {
         case "interactive": return .interactive
         case "on-drag": return .onDrag
@@ -300,7 +303,7 @@ extension NodeView {
 extension Presenter {
     /// A bar's search field began or ended editing: the scrollers under it
     /// take their drag's answer again (`keyboardDismissal`).
-    func searchEditingChanged() {
+    package func searchEditingChanged() {
         for id in scrollers { views[id]?.updateKeyboardDismissal() }
     }
 

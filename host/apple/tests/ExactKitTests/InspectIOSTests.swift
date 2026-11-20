@@ -1,6 +1,7 @@
 #if os(iOS) && EXACT_INSPECT
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 import UIKit
 
 /// Inspect mode's hit test (LLP 1122 D5, T2c; InspectIOS.swift): a tap

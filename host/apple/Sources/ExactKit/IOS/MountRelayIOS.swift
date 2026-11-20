@@ -11,7 +11,7 @@ import UIKit
 /// — a pointer observer, a long press (`contextmenu`), a double tap
 /// (`dblclick`) — unless a nearer listener in the sheet takes it with its
 /// own recognizer. Recognition and arbitration stay UIKit's.
-final class MountRelay: NSObject, UIGestureRecognizerDelegate {
+package final class MountRelay: NSObject, UIGestureRecognizerDelegate {
     private weak var presenter: Presenter?
     unowned let mount: UIView
     private let pointer = PointerRecognizer(target: nil, action: nil)
@@ -19,7 +19,7 @@ final class MountRelay: NSObject, UIGestureRecognizerDelegate {
     private let double = UITapGestureRecognizer()
     private weak var pressed, doubled: NodeView?
 
-    init(_ presenter: Presenter, mount: UIView) {
+    package init(_ presenter: Presenter, mount: UIView) {
         self.presenter = presenter
         self.mount = mount
         super.init()
@@ -42,13 +42,16 @@ final class MountRelay: NSObject, UIGestureRecognizerDelegate {
     func listener(_ touched: UIView?, contextMenu: Bool = false, _ listens: (NodeView) -> Bool) -> NodeView? {
         var view = touched
         while let v = view {
-            if let n = v as? NodeView, listens(n), !(contextMenu ? n.formDisabled : n.disabled) { return n.isDescendant(of: mount) ? nil : n }
+            // One inside the mount, or one that holds it (the root over a layer of lifted nodes), hears the touch itself
+            if let n = v as? NodeView, listens(n), !(contextMenu ? n.formDisabled : n.disabled) {
+                return n.isDescendant(of: mount) || mount.isDescendant(of: n) ? nil : n
+            }
             view = presenter?.pointerParent(of: v) ?? v.superview
         }
         return nil
     }
 
-    func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+    package func gestureRecognizer(_ g: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
         // What a node's own long press and double tap leave to native input
         // (`NodeView.gestureRecognizer(_:shouldReceive:)`)
         if g !== pointer, NodeView.nativeInputOwns(touch.view, below: mount) { return false }

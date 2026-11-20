@@ -3,6 +3,7 @@ import UIKit
 import ObjectiveC.runtime
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 @testable import ExactMarkdown
 
 /// LLP 1086.000.000 D2: the agent's `reveal` counts what a person sees as in

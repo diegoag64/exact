@@ -3,6 +3,7 @@ import AppKit
 import WebKit
 import XCTest
 @testable import ExactKit
+@testable import ExactWebViews
 
 /// A scaled iframe hears its events where it is drawn: the web view converts
 /// a window point by AppKit's geometry, which a layer's transform does not

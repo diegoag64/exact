@@ -5,7 +5,7 @@
 #if os(macOS)
 import AppKit
 
-final class InputGates {
+package final class InputGates {
     private unowned let presenter: Presenter
     /// Each node's gates as last applied: hidden, route-inert, `inert`, `aria-hidden`.
     private var gates: [UInt32: [Bool]] = [:]
@@ -19,7 +19,7 @@ final class InputGates {
 
     /// The nodes a batch can have changed the gates of, and the subtrees
     /// whose ancestry it changed (`reparented`, and the roots it names).
-    func touched(by batch: Batch, reparented: Set<UInt32>) -> (touched: Set<UInt32>, subtrees: Set<UInt32>) {
+    package func touched(by batch: Batch, reparented: Set<UInt32>) -> (touched: Set<UInt32>, subtrees: Set<UInt32>) {
         var touched = Set<UInt32>(), subtrees = reparented
         for op in batch.ops {
             if let id = op.nodeID {
@@ -37,7 +37,7 @@ final class InputGates {
     /// Apply the gates of `touched` and of everything under `subtrees`, and
     /// of `placeholder`, a view out of its authored ancestors' views (the
     /// split pane's), when one of those ancestors is in `subtrees`.
-    func settle(touched: Set<UInt32>, subtrees: Set<UInt32>, placeholder: NSView?) {
+    package func settle(touched: Set<UInt32>, subtrees: Set<UInt32>, placeholder: NSView?) {
         var touched = touched, subtrees = subtrees
         // Reuse the presenter's ancestor inert gate for focus/input. AppKit's
         // accessibility subtree is suppressed as HTML inert suppresses it.

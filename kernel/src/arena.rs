@@ -1143,7 +1143,7 @@ impl NodeArena {
         self.contents[slot as usize]
     }
 
-    /// An intrinsic size, when the host has reported it.
+    /// A replaced element's measured or host-reported intrinsic size.
     pub fn intrinsic(&self, slot: u32) -> Option<(f32, f32)> {
         self.intrinsic.get(&slot).copied()
     }

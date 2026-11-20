@@ -2,6 +2,7 @@
 import UIKit
 import XCTest
 @testable import ExactKit
+@testable import ExactNavigation
 
 /// A chain of covers corrections, a change no answer causes and what the runtime's answers to its deliveries make in
 /// turn, has eight passes, however its answers branch and whether they apply at once or wait behind a slice; a change no

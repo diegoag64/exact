@@ -9,14 +9,14 @@
 import ExactCore
 import Foundation
 
-struct NavigationTabs {
-    let tablist: NodeView
+package struct NavigationTabs {
+    package let tablist: NodeView
     /// The tabs that name a panel, and those panels, in tab order.
-    let tabs: [NodeView]
-    let panels: [NodeView]
+    package let tabs: [NodeView]
+    package let panels: [NodeView]
 
     /// A panel's stack: its children that carry a `navigationKey`.
-    static func routes(in node: NodeView) -> [NodeView] {
+    package static func routes(in node: NodeView) -> [NodeView] {
         node.childNodes.filter { $0.props["navigationKey"] != nil }
     }
 
@@ -24,7 +24,7 @@ struct NavigationTabs {
     /// as the last batch to say them gave them (`Presenter.rootTabs`),
     /// resolved to the presenter's views. A tab whose tab or panel has no
     /// view is left out.
-    static func of(_ root: NodeView, _ presenter: Presenter) -> NavigationTabs? {
+    package static func of(_ root: NodeView, _ presenter: Presenter) -> NavigationTabs? {
         guard let kernel = presenter.rootTabs[root.id], let tablist = presenter.views[kernel.tablist] else { return nil }
         var tabs: [NodeView] = [], panels: [NodeView] = []
         for (tab, panel) in zip(kernel.tabs, kernel.panels) {

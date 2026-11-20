@@ -3,9 +3,8 @@
 // family the composition selects. The core reaches it only through what this
 // file declares: the presenter holds `any NavigationHosting` and
 // `any ModalHosting`, and core code that meets a route or a plain tab casts to
-// `RouteSurface` or `BootHolding`, never to the family's classes. The slots'
-// defaults are today's hosts, so every app still links navigation; its own
-// target will install them instead.
+// `RouteSurface` or `BootHolding`, never to the family's classes. The
+// `ExactNavigation` product fills the slots when the composition links it.
 //
 // Without the family the presenter holds `NoNavigation` and `NoModals`. A plan
 // without `navigationBack` never builds a stack, but the host still did core
@@ -153,6 +152,74 @@ package enum RouteGeometry {
     }
 }
 
+extension UITabBarController {
+    /// Its tabs' controllers in tab order, whether it holds them as
+    /// `viewControllers` or as `UITab`s, whose `viewControllers` is nil.
+    package var tabControllers: [UIViewController]? {
+        if let viewControllers { return viewControllers }
+        guard #available(iOS 18.0, tvOS 18.0, *), !tabs.isEmpty else { return nil }
+        return tabs.compactMap(\.viewController)
+    }
+
+    /// The bar the controller projects, including iPadOS's floating list of tab items.
+    package var projectedTabBar: UIView? {
+        if #available(iOS 18.0, tvOS 18.0, *), isTabBarHidden { return nil }
+        #if os(iOS)
+        return tabBar.window != nil ? tabBar : floatingTabList
+        #else
+        return tabBar
+        #endif
+    }
+
+    /// The projected bar, when it is visibly on screen.
+    package var shownTabBar: UIView? { RouteGeometry.shownBar(projectedTabBar) }
+}
+
+#if os(iOS)
+extension UITabBarController {
+    /// iPadOS 18's floating tab bar, in a regular width: no `UITabBar` in the
+    /// window (`tabBar` is out of it), but a list of the tabs' items at the
+    /// top, a collection view whose first section has a cell per tab, in
+    /// their order, and whose others are empty (iPadOS 27 keeps a second,
+    /// for tabs a person adds), beside the selected tab's view. Its cells
+    /// carry their items' accessibility identifiers (the tabs' test ids,
+    /// `syncItems`), or their titles as labels, as the agent's aim reads
+    /// them: a list of the same shape whose cells name other things (a
+    /// hatch's) is not it. A sidebar's list of tabs (`mode = .tabSidebar`,
+    /// TabsIOS.swift) has the same shape, and while it shows the floating
+    /// bar does not. Nil where the bar is UIKit's classic one, where no such
+    /// list shows, or where two would.
+    package var floatingTabList: UICollectionView? {
+        guard tabBar.window == nil, let controllers = tabControllers, case let items = controllers.compactMap(\.tabBarItem), !items.isEmpty, items.count == controllers.count,
+              let selected = selectedViewController?.viewIfLoaded else { return nil }
+        func names(_ cell: UIView, _ item: UITabBarItem) -> Bool {
+            let id = item.accessibilityIdentifier ?? ""
+            if id.isEmpty, (item.title ?? "").isEmpty { return false }
+            var pending = [cell]
+            while !pending.isEmpty {
+                let v = pending.removeFirst()
+                if id.isEmpty ? v.accessibilityLabel == item.title : v.accessibilityIdentifier == id { return true }
+                pending += v.subviews
+            }
+            return false
+        }
+        var found: [UICollectionView] = [], pending: [UIView] = view.subviews
+        while !pending.isEmpty {
+            let v = pending.removeFirst()
+            guard v !== selected, !v.isHidden, !(v is NodeView) else { continue }
+            if let list = v as? UICollectionView, list.numberOfSections >= 1, list.numberOfItems(inSection: 0) == items.count,
+               (1..<list.numberOfSections).allSatisfy({ list.numberOfItems(inSection: $0) == 0 }) {
+                let shown = list.indexPathsForVisibleItems.filter { $0.section == 0 }
+                if !shown.isEmpty, shown.allSatisfy({ path in list.cellForItem(at: path).map { names($0, items[path.item]) } ?? false }) { found.append(list) }
+                continue
+            }
+            pending += v.subviews
+        }
+        return found.count == 1 ? found[0] : nil
+    }
+}
+#endif
+
 /// What the core asks of a presenter's navigation. Call sites keep their
 /// places, so the hook order is the presenter's source order: in `apply`,
 /// `modals.prepare`, then `prepare`, the op loop with `installInitialOwner`
@@ -240,6 +307,8 @@ package protocol NavigationHosting: AnyObject {
     func scopes(tablist: NodeView) -> Bool
     func tabIntent(_ kind: UInt32, _ text: String) -> Bool
     func setAppDelegate(_ controller: AnyObject, _ delegate: AnyObject?)
+    /// The nodes it lifts out of their parents to paint over its tab container.
+    var lifted: (any LiftedNodes)? { get }
     #if os(tvOS)
     /// The Siri remote's Menu goes back in a pushed stack.
     var menuGoesBack: Bool { get }
@@ -247,6 +316,8 @@ package protocol NavigationHosting: AnyObject {
     #endif
 
     #if EXACT_INSPECT && os(iOS)
+    /// The header group a bar's title view stands for, when `view` is one.
+    func inspectTitle(_ view: UIView) -> UInt32?
     /// Where a route's bar shows `node`, for Inspect's outline.
     func inspectPlace(of node: NodeView) -> (() -> CGRect?)?
     /// The plan node behind a navigation bar's item or title at `p`, in the bar's coordinates.
@@ -266,6 +337,8 @@ package protocol NavigationHosting: AnyObject {
     func barItem(ofTab index: Int) -> UITabBarItem?
     func tabBarStands(for node: NodeView) -> Bool
     func observation() -> [String: Any]
+    /// The bar's search field submitting, as the keyboard's Search key does; false when `editor` is no bar's search field.
+    func submitSearch(_ editor: UITextField) -> Bool
     func agentBack() -> String?
     func activateChrome(_ node: NodeView, before: (CGPoint?) -> Bool) -> [String: Any]?
     func drawnSearch(_ node: NodeView) -> UITextField?
@@ -274,6 +347,38 @@ package protocol NavigationHosting: AnyObject {
     /// `segments` is no route's scope control.
     func searchScopeTabs(of segments: UISegmentedControl) -> [UInt32]?
     #endif
+}
+
+/// The nodes a navigation lifts out of their parents to paint over its tab
+/// container (LLP 1083.000 D4), as the core's walks and passes meet them.
+package protocol LiftedNodes: AnyObject {
+    /// The parent a lifted node, or a view in its place, is under in the authored tree.
+    func parent(of view: UIView) -> NodeView?
+    /// Whether `parent` lifted `node`, which `parent`'s children op then leaves where it is.
+    func holds(_ node: NodeView, under parent: NodeView) -> Bool
+    /// A children op on `parent`, before the presenter places it.
+    func children(_ parent: NodeView, _ ids: [UInt32], _ want: [NodeView])
+    /// The nodes `parent` lifted.
+    func lifted(from parent: NodeView) -> [NodeView]
+    /// The ids `parent` was last given, where it lifted nodes or holds panels.
+    func recordedIDs(of parent: NodeView) -> [UInt32]?
+    /// The lifted nodes at their parents' places, at the end of a batch.
+    func place()
+    /// `view`'s children in Tab's order: a lifted node on its side of the routes, as in the tree.
+    func focusChildren(of view: UIView) -> [UIView]
+    /// The mount's accessibility children while a lifted node reads before the routes.
+    func accessibilityElements(of view: UIView) -> [Any]?
+    /// The lifted nodes positioned `absolute` among `parent`'s children after `view`.
+    func absoluteNodes(after view: UIView, in parent: UIView) -> [NodeView]
+}
+
+/// A view that holds lifted nodes, which the focus search skips.
+package protocol HoldsLiftedNodes: UIView {}
+
+extension Presenter {
+    /// The view above `view` in a pass over the layout: a lifted node's
+    /// parent (LLP 1083.000 D4), else its superview.
+    package func layoutParent(of view: UIView) -> UIView? { navigation.lifted?.parent(of: view) ?? view.superview }
 }
 
 extension NavigationHosting {
@@ -325,9 +430,9 @@ package protocol ModalHosting: AnyObject {
 /// The slots are set before any presenter is made.
 package enum NavigationLink {
     /// A presenter's navigation.
-    package static var make: ((Presenter) -> any NavigationHosting)? = { NavigationHost(presenter: $0) }
+    package static var make: ((Presenter) -> any NavigationHosting)?
     /// A presenter's route modals.
-    package static var makeModals: ((Presenter) -> any ModalHosting)? = { ModalHost(presenter: $0) }
+    package static var makeModals: ((Presenter) -> any ModalHosting)?
 }
 
 /// Navigation where the composition links none: no stack, bar or tab is ever
@@ -429,8 +534,8 @@ package final class NoNavigation: NavigationHosting {
     package var covers: [UInt32: HostCover] { [:] }
     package var coversAnswerOwed: Bool { false }
     package var wantsWholeView: Bool { false }
-    /// Covers are navigation's, a native arrangement's hidden panes among them
-    /// (`NavigationHost.reportCovers`): without it none are reported.
+    /// Covers are navigation's; a native arrangement's hidden panes are the
+    /// core's (`ArrangementHost.reportHiddenPanes`).
     package func coversChanged() {}
     package func reportCovers() {}
     /// The document stays in the scrolling viewport: no native container takes the whole view.
@@ -465,12 +570,14 @@ package final class NoNavigation: NavigationHosting {
     package func scopes(tablist: NodeView) -> Bool { false }
     package func tabIntent(_ kind: UInt32, _ text: String) -> Bool { false }
     package func setAppDelegate(_ controller: AnyObject, _ delegate: AnyObject?) {}
+    package var lifted: (any LiftedNodes)? { nil }
     #if os(tvOS)
     package var menuGoesBack: Bool { false }
     package func menuBack() {}
     #endif
 
     #if EXACT_INSPECT && os(iOS)
+    package func inspectTitle(_ view: UIView) -> UInt32? { nil }
     package func inspectPlace(of node: NodeView) -> (() -> CGRect?)? { nil }
     package func inspectNode(in bar: UINavigationBar, at p: CGPoint) -> UInt32? { nil }
     #endif
@@ -484,6 +591,7 @@ package final class NoNavigation: NavigationHosting {
     package func barItem(ofTab index: Int) -> UITabBarItem? { nil }
     package func tabBarStands(for node: NodeView) -> Bool { false }
     package func observation() -> [String: Any] { ["linked": false] }
+    package func submitSearch(_ editor: UITextField) -> Bool { false }
     package func agentBack() -> String? { nil }
     package func activateChrome(_ node: NodeView, before: (CGPoint?) -> Bool) -> [String: Any]? { nil }
     package func drawnSearch(_ node: NodeView) -> UITextField? { nil }

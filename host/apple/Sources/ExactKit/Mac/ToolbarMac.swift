@@ -19,7 +19,7 @@
 #if os(macOS)
 import AppKit
 
-final class WindowToolbarHost: NSObject, NSToolbarItemValidation {
+package final class WindowToolbarHost: NSObject, NSToolbarItemValidation {
     unowned let presenter: Presenter
     private(set) weak var window: NSWindow?
     private(set) var toolbar: NSToolbar?
@@ -568,7 +568,7 @@ final class WindowToolbarHost: NSObject, NSToolbarItemValidation {
         if let said { presenter.session?.log("window header: \(said)") }
     }
 
-    func sync() {
+    package func sync() {
         guard !syncing else { return }
         let adopted = header?.segments
         syncing = true
@@ -852,7 +852,7 @@ final class WindowToolbarHost: NSObject, NSToolbarItemValidation {
         if let field = search.item, field.itemIdentifier == identifier { return field }
         return items.values.first { $0.itemIdentifier == identifier } ?? appItems.first { $0.itemIdentifier == identifier }
     }
-    func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
+    package func validateToolbarItem(_ item: NSToolbarItem) -> Bool {
         syncAccessibility()
         if item === backItem { return toolbar != nil && window?.toolbar === toolbar && presenter.navigation.canGoBack }
         if item === historyItem { return syncHistory() }

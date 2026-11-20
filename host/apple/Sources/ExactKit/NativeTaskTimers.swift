@@ -11,7 +11,7 @@ final class NativeTaskTimers {
         var row: NativeTimerWake
         let timer: Timer
         var pending = false
-        init(_ row: NativeTimerWake, _ timer: Timer) { self.row = row; self.timer = timer }
+        package init(_ row: NativeTimerWake, _ timer: Timer) { self.row = row; self.timer = timer }
     }
     private var entries: [UInt32: Entry] = [:]
     private var queue: [Delivery] = []
@@ -22,7 +22,7 @@ final class NativeTaskTimers {
     private let ready: () -> Void
     private(set) var rows: [NativeTimerWake] = []
 
-    init(now: @escaping () -> Double, date: @escaping () -> Date = Date.init, ready: @escaping () -> Void) {
+    package init(now: @escaping () -> Double, date: @escaping () -> Date = Date.init, ready: @escaping () -> Void) {
         self.now = now; self.date = date; self.ready = ready
     }
     deinit { for entry in entries.values { entry.timer.invalidate() } }

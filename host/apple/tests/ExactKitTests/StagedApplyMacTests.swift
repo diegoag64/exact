@@ -3,6 +3,7 @@ import AppKit
 import XCTest
 @testable import ExactCore
 @testable import ExactKit
+@testable import ExactAnimations
 @testable import ExactNativeViews
 @testable import ExactSurfaces
 

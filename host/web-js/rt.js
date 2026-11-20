@@ -54,7 +54,7 @@ export function useLinks(l) {
 // The runtime's other parts, each its own file, which import what they share from here.
 import { clock, time, armedAt, agentMode, every, advance, drive, unpark, fire, pauseTimers } from './clock.js';
 import { Resources, Mutations, lateReaders, lateIdle } from './resources.js';
-import { Views } from './tree.js';
+import { Views, viewId } from './tree.js';
 import { KeyEvent, Propagating } from './events.js';
 import { Pres, Present, Sh, Input, pressFeedback } from './pieces.js';
 import { Booting, start, finishTaskScopes } from './mount.js';
@@ -246,6 +246,30 @@ export function sig(v, t, name) {
   const g = () => read(n);
   g.n = n;
   return g;
+}
+// Each late slot's node and initializer, in the order the app's body made them
+const Late = [];
+/** A child's state used outside every region (LLP 1017 P4c): its signal now, for what is declared after it, and its
+ * value from `init` when the boot's commit starts (`startLate`). */
+export function late(init, t, name) {
+  const n = node(null, undefined);
+  n.t = t;
+  n.name = name;
+  const g = () => read(n);
+  g.n = n;
+  Late.push([n, init]);
+  return g;
+}
+/** Each late slot's first value, in order, as the boot's commit starts (mount). The runner starts them after the boot's
+ * settlement (`init_late_slots`); here the root's derives and resources settle as an initializer reads them, so it
+ * reads what that settlement gives, and what it asks lands with the commit's asks. A boot that builds afresh in a
+ * second commit starts them again, and a reader the first commit made sees the new value. */
+export function startLate() {
+  for (const [n, init] of Late) {
+    const v = init();
+    if (n.t && !conforms(v, n.t)) throw new Error(`a slot's initial value does not conform to its type: ${v}`);
+    write(n, v);
+  }
 }
 /** A string past MAX_STRING's UTF-8 bytes (runner `too_long`): one test, TextEncoder's U+FFFD for a lone surrogate
  * (LLP 1090 D6). */
@@ -844,6 +868,7 @@ export const DEVELOPMENT_STORE = null;
  * state's kind is "state" (persist.js); the durable store's (LLP 1018, `Store`: name → text, kept after a commit
  * stands) is "secret". */
 export const Kept = kind => `exact.${kind}.${DEVELOPMENT_STORE ? `@${DEVELOPMENT_STORE}/` : ''}`;
+if (DEVELOPMENT_STORE) globalThis.__exactSeedStored?.(Kept('state'));
 export const Store = {
   map: new Map(),
   writes: [],
@@ -960,9 +985,9 @@ export const inflight = { n: 0 };
 // A development build's only: the dev page's hold asks for it so, as a bundled page serves no rt.js; not on `exact`,
 // which says the runtime is up.
 if (DEVELOPMENT_STORE) globalThis.__exactPressFeedback = pressFeedback;
-// The elements the app marks `aria-busy="true"` (still loading), by test id else id.
+// The launch and agent ledger names busy elements by test ID or the view ID that `tree` uses.
 export const busy = () =>
-  [...document.querySelectorAll('[aria-busy="true"]')].map(el => el.getAttribute('data-testid') ?? el.id);
+  [...document.querySelectorAll('[aria-busy="true"]')].map(el => el.getAttribute('data-testid') ?? String(viewId(el)));
 export { gridValue } from './grid.js';
 export { Pc } from './lower.js';
 export { svgTransform, svgGeometry } from './svg-transform.js';
