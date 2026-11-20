@@ -1039,6 +1039,34 @@ export function stageGpuLibraries(libraries, jniLibs) {
   return libraries.length ? [`-PgpuModules=${libraries.map((library) => basename(library)).join(',')}`] : [];
 }
 
+/** The Khronos OpenXR loader a headset app (app.json `host.android.xr`, docs/quest.md) packages beside its GPU module,
+ * which opens it at run time: Maven Central's AAR at a pinned version and digest, cached under ~/.cache/exact. */
+export const OPENXR_LOADER = {
+  version: '1.1.63',
+  sha256: '622419d2f6741c3443a3beb4779af0764318edd01830de967f24c741ebcded73',
+};
+
+/** Copies the OpenXR loader for `abi` into `jniLibs`, fetching the pinned AAR once. */
+export function stageOpenxrLoader(jniLibs, abi, env = process.env) {
+  const { version, sha256 } = OPENXR_LOADER;
+  const cache = resolve(env.XDG_CACHE_HOME ?? resolve(homedir(), '.cache'), 'exact', 'openxr-loader', version);
+  const aar = resolve(cache, `openxr_loader_for_android-${version}.aar`);
+  const digest = (path) => createHash('sha256').update(readFileSync(path)).digest('hex');
+  if (!existsSync(aar) || digest(aar) !== sha256) {
+    mkdirSync(cache, { recursive: true });
+    const url = `https://repo1.maven.org/maven2/org/khronos/openxr/openxr_loader_for_android/${version}/openxr_loader_for_android-${version}.aar`;
+    const partial = `${aar}.partial`;
+    const fetched = spawnSync('curl', ['-fsSL', '-o', partial, url], { stdio: 'inherit' });
+    if (fetched.status !== 0) throw new Error(`the OpenXR loader did not download from ${url}`);
+    if (digest(partial) !== sha256) { rmSync(partial, { force: true }); throw new Error(`the OpenXR loader from ${url} is not the pinned one (sha256 ${sha256})`); }
+    renameSync(partial, aar);
+  }
+  const library = zipEntry(readFileSync(aar), `jni/${abi}/libopenxr_loader.so`);
+  if (!library) throw new Error(`the OpenXR loader ${version} has no ${abi} library`);
+  mkdirSync(jniLibs, { recursive: true });
+  writeFileSync(resolve(jniLibs, 'libopenxr_loader.so'), library);
+}
+
 /** The optional sound arm: a separate ELF, never linked into libexactcanvas. */
 export function soundLibraryCommand(library, env, target = ANDROID_TARGET) {
   const mixer = resolve(READER, '../apple/soundarm'), arm = resolve(READER, 'soundarm');
@@ -1117,6 +1145,8 @@ function assembleApk(app, env, profile, writeLocks, bundle, abis, dirs) {
             if (existsSync(path)) copyFileSync(path, resolve(out, file));
           }
         }
+        // A headset app opens the OpenXR loader from beside its GPU module (docs/quest.md).
+        if (app.manifest.host?.android?.xr === 'quest') stageOpenxrLoader(jniLibs, abi, env);
         const sound = stageSoundLibrary(jniLibs, toolchain, triple);
         const payload = receipt.linkedPlan ? [stageAndroidBake(receipt.linkedPlan, jniLibs, toolchain, triple, androidWidgets, image)] : [];
         for (const library of [canvas, ...modules.map(path => resolve(jniLibs, basename(path))), sound, ...payload]) {
