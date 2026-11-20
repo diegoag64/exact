@@ -419,6 +419,7 @@ device mid-hold neither presses again nor drops.
 | Move by tilting the device | `Stick::wasd().or_tilt(Tilt { max_degrees: 20.0, dead_zone: 2.0 })`, fed by the app's `startSensorInput(surface="world", sensor="gravity")` (LLP 1133.013 D6): full deflection at `max_degrees` from level, nothing within `dead_zone` degrees, nothing before the first sample or after the input ends (`exact_game::tilt_stick` is the map). Level is the first sample, or what the tick sets with `w.set_tilt_neutral("move", gravity)` from a posted reading, from the next tick (Beacons' `tilt x y z`) |
 | Read a component for many entity handles | `let rows = world.components::<Health>();` then `rows.get(entity)` or `rows.has(entity)`; resolves the column once, keeps reads live and leases only each returned row. Drop the handle before spawning, removing or restoring. Ordinary `get` and `has` work as before. |
 | Read a sensor every frame | `input.sensor(SensorKind::Gyroscope)`, the latest sample, which holds through ticks that receive none and is gone after the input ends; `input.sensor_samples(kind)`, this tick's own samples, every one the host delivered |
+| A headset's controllers | `input.xr().hand(XrHand::Right)`: `aim.ray()` and `grip` in the session's reference space (`Game::xr_stage(world, args).ray_to_world(origin, direction)` takes a ray into the world), `trigger`, `squeeze`, `stick`, `down(XrButton::Trigger)`; `input.xr_pressed(hand, button)` on the tick it went down. A native headset host delivers them each frame (docs/quest.md, "Controllers"); `Sim::xr(input)` in a test |
 | Sprint after holding a key | `.hold("sprint", &["ShiftLeft", "GamepadL1"], 0.2)`: `pressed` when held 200 ms, `held` until release; a shorter press fires nothing (Beacons) |
 | A double tap | `.double("roll", &["Space"], 0.25)`: `pressed` on a second press within 250 ms |
 | A short press distinct from a hold | `.tap("dash", &["ShiftLeft"])`: `pressed` and `released` together when a press of at most 200 ms (`Actions::TAP`; `tap_within` for another) lifts, so it fires late by design |
@@ -509,7 +510,8 @@ latched actions, and the contexts and bindings as last applied. So two worlds wh
 started at different times differ, as do two whose context or rebind has yet to apply,
 and a restore mid-hold continues the hold. A sensor input's samples wait in the queue a save holds;
 the latest sample of each sensor and the tilt neutrals are a fourth resource, `SensorState`, which
-exists only once a sample arrives or a neutral is set. `InputEvent`'s `player` is 0 from every host and means
+exists only once a sample arrives or a neutral is set. A headset's head and controllers as last
+reported are a fifth, `XrInput`, which exists only once a headset reports. `InputEvent`'s `player` is 0 from every host and means
 nothing yet.
 
 ### Movement and appearance

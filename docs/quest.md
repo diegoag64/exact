@@ -2,9 +2,10 @@
 
 A game can be built as a native Meta Quest 3 / 3S / Pro app: the Android APK
 starts immersive in the headset and the world draws in stereo from the
-headset's pose, through OpenXR and Vulkan. Like the WebXR spike
-([webxr.md](webxr.md)) this is viewing only: no controllers yet, and the HUD
-and menus (Contract) are not drawn in the headset. They keep running, unseen.
+headset's pose, through OpenXR and Vulkan. The controllers reach the world as
+input ("Controllers" below). The HUD and menus (Contract) are not drawn in
+the headset: they keep running, unseen, so a game draws what it needs there
+in its world.
 
 ## Opting in
 
@@ -19,8 +20,8 @@ and menus (Contract) are not drawn in the headset. They keep running, unseen.
   `LOCAL_FLOOR`.
 - `Game::xr_args(&mut args)` adjusts the canvas's arguments while the app
   runs in a headset (each bind, before the world sees it). Hexguard turns its
-  menu's attract diorama into level 1, playing, since the menus are not drawn
-  there. Without it the arguments are the app's.
+  menu's attract diorama into the level, played with the hands, since the
+  menus are not drawn there. Without it the arguments are the app's.
 
 ## What the build does
 
@@ -128,6 +129,113 @@ more than one layer (`InvalidTransientTextureLayerCount`), so they take real
 memory: at 1680×1760 a layer, 4x colour (RGBA8) and depth (Depth32Float)
 are 2 × 90 MiB = 180 MiB. Their contents are still discarded at the end of
 the pass, so on a tiler they cost memory, not bandwidth.
+
+## Controllers
+
+The headset's controllers are input like any other device: the host reads
+them, the canvas gets an event, the world's next tick reads it from `Input`.
+Nothing in a game calls OpenXR, so a run with hands replays and saves as any
+run does.
+
+**The host** (`gpu/src/openxr_input.rs`). With the session it makes one
+action set and attaches it: per hand an aim pose and a grip pose, the trigger
+and the grip button (each as its travel and as pressed), the thumbstick and
+its click, the two face buttons and the menu button. Bindings are suggested
+for `/interaction_profiles/oculus/touch_controller` (Quest 2, 3, 3S and Pro
+controllers answer to it) and for `/interaction_profiles/khr/simple_controller`
+(select as the trigger, menu, the two poses) as the fallback. Each frame,
+after `xrLocateViews`, it syncs the actions, locates both hands' poses and the
+head (the `VIEW` space) in the frame's reference space at the predicted
+display time, and delivers one `InputEvent::Xr` to the canvas before the
+world advances (`Module::input`), stamped with the last frame's time so the
+next tick takes it. A frame equal to the last sends nothing. Without focus
+(the system menu) the runtime reports every action inactive, which arrives as
+both hands inactive with nothing held. The log says which profile each hand
+took and when a hand comes and goes (`adb logcat -s exact-xr | grep
+controllers`).
+
+**The event** (`gpu/src/xr_input.rs`, `exact_gpu::XrInput`): the head's pose
+and whether it is tracked, and for each hand `active` (a controller is
+there), `tracked`, `aim` and `grip` poses (position in metres and a unit
+quaternion, in the session's reference space; a pose points along its −Z),
+`trigger` and `squeeze` in 0–1, `stick` (+x right, +y forward) and `buttons`,
+bits of `xr_input::button` (`TRIGGER`, `SQUEEZE`, `PRIMARY` A or X,
+`SECONDARY` B or Y, `MENU`, `STICK`).
+
+**The world** (`game/engine/src/input/xr.rs`):
+
+```rust
+fn tick(world: &mut World, input: &Input, args: &Args) {
+    let right = input.xr().hand(XrHand::Right);          // XrController
+    if right.active && right.tracked {
+        let stage = Self::xr_stage(world, args);
+        let (origin, direction) = right.aim.ray();       // reference space
+        let (o, d) = stage.ray_to_world(origin, direction);
+        // ... cast o + d·t into the world; place a hand at
+        // stage.to_world(right.grip.position)
+    }
+    if input.xr_pressed(XrHand::Right, XrButton::Trigger) { /* this tick only */ }
+    let turn = right.stick.x;                            // and right.trigger, right.squeeze
+}
+```
+
+`Input::xr()` is the latest state (`XrInput`: `head`, `head_tracked`,
+`hands`); `xr_pressed` and `xr_released` are the edges since the last tick;
+`XrController::down` is held. The state is also the world resource `XrInput`
+(saved and hashed, absent in a world no headset reported to), and
+`Sim::xr(input)` queues one in a test. Within a tick a later frame that
+pressed and released nothing replaces an earlier one, as a pad's sticks do.
+
+`XrStage` takes the reference space into the world and back (`to_world`,
+`to_reference`, `ray_to_world`, `rotation_to_world`), and moves under the
+hands: `dragged(from, to)` keeps the world point that was in one hand in it,
+`pinched([a0, b0], [a1, b1], bounds)` turns the world about +Y, sizes it and
+moves it so both held points stay in their hands. A game keeps the placement
+it arrives at in its own world and answers `Game::xr_stage` from it
+(Hexguard: `logic/src/xr.rs`).
+
+Drawing the hands is the game's: an entity whose transform is the stage's
+inverse (`position: stage.to_world(Vec3::ZERO)`, `rotation:
+stage.rotation_to_world(Quat::IDENTITY)`, `scale: 1 / stage.scale`) is the
+reference space in the world, and a child placed at a grip pose is in the
+hand. Poses reach the picture a tick late and interpolated, as every
+transform does; late latching (drawing a hand at the frame's own pose) is not
+done.
+
+### Driving the controllers without hands
+
+A debug stand-in, in any build, for hands nobody has (a headset on a desk, a
+scripted check with the eye capture below): the module looks about six times
+a second for a file named `xr-input` in the app's external files directory,
+takes its lines as a script and removes it. A hand the script posed or
+pressed stays the script's, held where it was left, until the script
+releases it; hands it never named stay the tracked ones. Each new file's
+steps queue after those still pending.
+
+    D=/sdcard/Android/data/<package>/files
+    adb shell "echo 'right point 0.25 1.25 -0.25  0 0.85 -0.9' > $D/xr-input"
+    adb shell "echo 'right click trigger' > $D/xr-input"
+    adb logcat -s exact-xr | grep xr-input      # `xr-input: 1 lines taken`, or what it refused
+
+One step a line (or between `;`); `#` starts a comment. Positions are metres
+in the reference space (the floor where the app started, +Y up, −Z ahead).
+
+| step | effect |
+|---|---|
+| `<hand> aim <ox oy oz> <dx dy dz>` | the hand (`left`, `right`) at the origin, pointing along the direction; its grip there too |
+| `<hand> point <ox oy oz> <tx ty tz>` | the same, pointing at a target point |
+| `<hand> grip <px py pz> <fx fy fz> [<ux uy uz>]` | the grip pose alone: its −Z along `f`, its +Y toward `u` |
+| `<hand> <button> down` / `up` | `trigger`, `squeeze`, `a` `x` `primary`, `b` `y` `secondary`, `menu`, `stick` |
+| `<hand> click <button>` | down, 8 frames, up, 8 frames |
+| `<hand> stick <x> <y>` | the thumbstick, each in −1..1 |
+| `head <px py pz> <fx fy fz>` | the head's pose as the canvas hears it (the eyes still draw from the tracked head, or from a capture's fixed pose) |
+| `<hand> release`, `head release`, `release` | back to tracking |
+| `wait <frames>` | let that many frames pass |
+| `message <text>` | post text to the canvas, as Contract's `postMessage` |
+
+A wrong line refuses the whole file, by line. `gpu/src/xr_input.rs`
+(`Injector`) holds the grammar and its tests; nothing runs until the file
+appears.
 
 ## Build, install, run
 
