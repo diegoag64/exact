@@ -208,6 +208,18 @@ pub fn render(
 /// `COPY_SRC` — BGRA is swizzled — waiting for the GPU. Anything else is
 /// refused by name.
 pub fn read(gpu: &Gpu, texture: &wgpu::Texture) -> Result<Pixels, String> {
+    let layers = texture.depth_or_array_layers();
+    if layers != 1 {
+        return Err(format!(
+            "a {:?} texture with {layers} layers is not one 2D layer",
+            texture.dimension()
+        ));
+    }
+    read_layer(gpu, texture, 0)
+}
+
+/// [`read`] of array layer `layer` of a 2D texture (a stereo frame's eye).
+pub fn read_layer(gpu: &Gpu, texture: &wgpu::Texture, layer: u32) -> Result<Pixels, String> {
     use wgpu::TextureFormat as F;
     let bgra = match texture.format() {
         F::Rgba8Unorm | F::Rgba8UnormSrgb => false,
@@ -215,9 +227,9 @@ pub fn read(gpu: &Gpu, texture: &wgpu::Texture) -> Result<Pixels, String> {
         other => return Err(format!("{other:?} is not an RGBA8 or BGRA8 format")),
     };
     let layers = texture.depth_or_array_layers();
-    if texture.dimension() != wgpu::TextureDimension::D2 || layers != 1 {
+    if texture.dimension() != wgpu::TextureDimension::D2 || layer >= layers {
         return Err(format!(
-            "a {:?} texture with {layers} layers is not one 2D layer",
+            "a {:?} texture with {layers} layers has no 2D layer {layer}",
             texture.dimension()
         ));
     }
@@ -232,7 +244,14 @@ pub fn read(gpu: &Gpu, texture: &wgpu::Texture) -> Result<Pixels, String> {
     });
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
-        texture.as_image_copy(),
+        wgpu::TexelCopyTextureInfo {
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            ..texture.as_image_copy()
+        },
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {

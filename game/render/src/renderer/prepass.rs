@@ -46,7 +46,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             }),
             timestamp_writes: timing::writes(frame.timestamps, 30),
             occlusion_query_set: None,
-            multiview_mask: None,
+            multiview_mask: self.view_mask(),
         });
         if frame.timestamps.is_some() {
             self.mark(30);

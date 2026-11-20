@@ -82,6 +82,9 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             }
         }
         self.pipelines.reap_specializations();
+        if let Some(stereo) = &self.stereo {
+            stereo.reap();
+        }
         self.cull.map_counts();
         if self.pipelines.cache.handle.is_some() {
             let work = self.residency_work().pipeline_creations;
@@ -220,7 +223,10 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         // Soft particles read the opaque depth: the translucent pass splits from
         // the opaque one (not under a scene copy, whose continuation draws them
         // hard).
-        let soft = self.quads.soft_drawn() && !needs.contains(crate::Needs::SCENE_COPY);
+        // A stereo frame draws them hard (`stereo.rs`).
+        let soft = self.quads.soft_drawn()
+            && !needs.contains(crate::Needs::SCENE_COPY)
+            && self.stereo_eyes.is_none();
         // A look frame counts its particle draws, which read the scene's depth
         // in a translucent pass of their own, as soft particles do
         // (quad_coverage.rs), on the path the live frame takes: into the HDR
@@ -235,7 +241,13 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         self.effects_retained |= soft || shafts;
         // A direct frame leaves the HDR attachments as they are, unused.
         let scene_copy = if direct {
-            self.prepare_direct(target.texture().size(), counting);
+            // The target's texture, but one layer a view (an eye's layer of
+            // an immersive swapchain is one view; a stereo frame's, both).
+            let extent = wgpu::Extent3d {
+                depth_or_array_layers: if self.stereo_eyes.is_some() { 2 } else { 1 },
+                ..target.texture().size()
+            };
+            self.prepare_direct(extent, counting);
             false
         } else {
             let scene_copy = self.prepare_targets(
@@ -309,6 +321,11 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         uniform[31] *= self.environment.ambient_scale();
         crate::water::write(&mut uniform, frame, self.water_effects);
         self.queue.write_buffer(&self.uniform, 0, bytes(&uniform));
+        if let Some(eyes) = &self.stereo_eyes {
+            let at = (crate::stereo::EYE_WORDS * 4) as u64;
+            self.queue
+                .write_buffer(&self.uniform, at, bytes(&crate::stereo::eye_words(eyes)));
+        }
         self.prepare_cull(
             frame,
             cascades.as_ref(),
@@ -713,13 +730,14 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             self.bloom = None;
             self.ssao = None;
             self.water.targets_replaced();
-            self.targets = Targets::with_retention(
+            self.targets = Targets::with_layers(
                 &self.device,
                 capacity,
                 &self.pipelines.tone_layout,
                 &self.uniform,
                 retained,
                 self.pipelines.samples,
+                self.targets.layers,
             );
             self.texture_creations += if self.pipelines.samples == 1 { 2 } else { 3 };
         }
@@ -908,6 +926,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         }
         stats.texture_creations = self.texture_creations;
         stats.direct_frames = self.direct_frames;
+        stats.stereo_frames = self.stereo_frames;
         if H::ENABLED {
             let needs = state.needs;
             let metrics = self.hook_metrics.as_mut().unwrap();

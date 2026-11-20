@@ -123,6 +123,11 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     xr_left: bool,
 }
 impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, P, ASSETS, H> {
+    /// The renderer's counts for the last frame drawn (draws, instances,
+    /// cumulative direct and stereo frames).
+    pub fn frame_stats(&self) -> crate::Stats {
+        self.perf.stats
+    }
     /// Bake-owned development capability; production modules refuse live edits.
     #[doc(hidden)]
     pub fn development_edits(mut self, allowed: bool) -> Self {
@@ -620,7 +625,35 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
             &mut unused,
             first,
             format,
-            Some(views),
+            Some(xr::Immersive::Eyes(views)),
+        );
+        self.still = !wants;
+        self.perf.rendering = false;
+        Some(wants)
+    }
+    fn render_xr_stereo(
+        &mut self,
+        frame: &Frame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stereo: &exact_gpu::XrStereo,
+        format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        let target = stereo.array_view(format);
+        self.perf.measure_frame = false;
+        self.perf.live = !frame.seekable;
+        self.perf.rendering = true;
+        // Both eyes in one multiview pass where the device has it, else each
+        // on its own (`xr::encode_stereo`); either submits its own commands.
+        let mut unused = device.create_command_encoder(&Default::default());
+        let wants = self.render_frame(
+            frame,
+            device,
+            queue,
+            &mut unused,
+            &target,
+            format,
+            Some(xr::Immersive::Stereo(stereo)),
         );
         self.still = !wants;
         self.perf.rendering = false;

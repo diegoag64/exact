@@ -125,6 +125,8 @@ pub(crate) struct Targets {
     pub tone_bind: wgpu::BindGroup,
     pub retained: bool,
     pub samples: u32,
+    /// Array layers: two for a stereo frame's (`stereo.rs`), else one.
+    pub layers: u32,
 }
 
 impl Targets {
@@ -136,8 +138,22 @@ impl Targets {
         retained: bool,
         samples: u32,
     ) -> Self {
-        let texture =
-            |format, sample_count, usage| attachment(device, size, format, sample_count, usage);
+        Self::with_layers(device, size, layout, uniform, retained, samples, 1)
+    }
+    /// [`Self::with_retention`] of `layers` array layers, each viewed whole
+    /// (a stereo frame's: `D2Array` views of both eyes).
+    pub fn with_layers(
+        device: &wgpu::Device,
+        size: (u32, u32),
+        layout: &wgpu::BindGroupLayout,
+        uniform: &wgpu::Buffer,
+        retained: bool,
+        samples: u32,
+        layers: u32,
+    ) -> Self {
+        let texture = |format, sample_count, usage| {
+            attachment(device, size, format, sample_count, usage, layers)
+        };
         let depth = texture(
             wgpu::TextureFormat::Depth32Float,
             samples,
@@ -187,6 +203,7 @@ impl Targets {
             size,
             retained,
             samples,
+            layers,
             color,
             depth,
             resolved,
@@ -200,6 +217,7 @@ impl Targets {
         Self {
             size: self.size,
             samples: self.samples,
+            layers: self.layers,
             retained: true,
             color: if self.samples == 1 {
                 self.resolved.clone()
@@ -210,6 +228,7 @@ impl Targets {
                     wgpu::TextureFormat::Rgba16Float,
                     self.samples,
                     wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    self.layers,
                 )
             },
             depth: attachment(
@@ -218,6 +237,7 @@ impl Targets {
                 wgpu::TextureFormat::Depth32Float,
                 self.samples,
                 wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                self.layers,
             ),
             resolved: self.resolved.clone(),
             tone_bind: self.tone_bind.clone(),
@@ -231,14 +251,21 @@ fn attachment(
     format: wgpu::TextureFormat,
     sample_count: u32,
     usage: wgpu::TextureUsages,
+    layers: u32,
 ) -> wgpu::TextureView {
+    // wgpu makes transient attachments of one layer only.
+    let usage = if layers > 1 {
+        usage - wgpu::TextureUsages::TRANSIENT_ATTACHMENT
+    } else {
+        usage
+    };
     device
         .create_texture(&wgpu::TextureDescriptor {
             label: Some("game offscreen"),
             size: wgpu::Extent3d {
                 width: size.0,
                 height: size.1,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: layers,
             },
             mip_level_count: 1,
             sample_count,
@@ -281,7 +308,8 @@ impl DirectTargets {
                     dimension: wgpu::TextureDimension::D2,
                     format,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        | if !retained {
+                        // wgpu makes transient attachments of one layer only.
+                        | if !retained && size.depth_or_array_layers == 1 {
                             transient_usage()
                         } else if sampled {
                             wgpu::TextureUsages::TEXTURE_BINDING

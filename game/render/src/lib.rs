@@ -430,6 +430,8 @@ pub struct Stats {
     /// Cumulative frames drawn straight into the target, with no HDR image or
     /// tone pass (`Renderer::set_direct`).
     pub direct_frames: u64,
+    /// Cumulative stereo frames drawn in one multiview pass (`stereo.rs`).
+    pub stereo_frames: u64,
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
