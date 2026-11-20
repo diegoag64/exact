@@ -73,7 +73,7 @@ pub use tier::{set_thread_tier, set_tier, tier, GpuTier};
 mod storage;
 mod uniform;
 mod xr;
-pub use xr::{XrEye, XrScratch, XrView};
+pub use xr::{fov_projection, pose_view, XrEye, XrScratch, XrStereo, XrView};
 #[cfg(windows)]
 mod window;
 pub use uniform::FrameUniform;
@@ -348,6 +348,23 @@ pub trait Surface {
         _format: wgpu::TextureFormat,
     ) -> Option<bool> {
         None
+    }
+    /// One stereo frame (a native headset's, OpenXR): advance once, then draw
+    /// both eyes into `stereo.target`'s two array layers (of `format`). The
+    /// default draws each layer through [`Surface::render_xr`]; a surface
+    /// that draws both in one multiview pass overrides it. The surface
+    /// records and submits its own commands, as `render_xr`'s. None when
+    /// this surface draws no immersive frames.
+    fn render_xr_stereo(
+        &mut self,
+        frame: &Frame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stereo: &XrStereo,
+        format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        let views = stereo.eye_views(format);
+        self.render_xr(frame, device, queue, &views, format)
     }
     /// Whether the last render completed the current picture, qualifying its
     /// `presented` record. Native presentation follows [`Surface::frame_presentable`].
@@ -1483,6 +1500,35 @@ pub use device::{
 };
 
 pub mod android;
+/// Whether this process draws into a native headset: an OpenXR session
+/// made with the device (the `openxr` feature on Android, `docs/quest.md`).
+pub fn headset() -> bool {
+    #[cfg(all(target_os = "android", feature = "openxr"))]
+    return openxr::active();
+    #[cfg(not(all(target_os = "android", feature = "openxr")))]
+    false
+}
+/// A native headset session (OpenXR on Android; `docs/quest.md`).
+#[cfg(all(target_os = "android", feature = "openxr"))]
+pub mod openxr;
+/// The module's Android initialization for a headset session, which
+/// [`module!`] defines: with the `openxr` feature on Android, a
+/// `gpu_android_init` that keeps the Java VM and Context for the session.
+#[cfg(all(target_os = "android", feature = "openxr"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __openxr_android_init {
+    () => {
+        $crate::android_init!(|android| $crate::openxr::android_init(android));
+    };
+}
+/// Nothing without a headset session.
+#[cfg(not(all(target_os = "android", feature = "openxr")))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __openxr_android_init {
+    () => {};
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fixture;
 #[cfg(not(target_arch = "wasm32"))]

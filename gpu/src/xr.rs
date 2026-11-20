@@ -37,6 +37,104 @@ pub struct XrEye {
     pub projection: [f32; 16],
 }
 
+/// Both eyes of one stereo frame in a two-layer array target (OpenXR's
+/// `arraySize = 2` swapchain image): layer 0 the left eye, layer 1 the right.
+/// A surface may draw both layers in one pass (multiview) through
+/// [`crate::Surface::render_xr_stereo`]; the default draws each layer through
+/// [`crate::Surface::render_xr`].
+pub struct XrStereo {
+    /// The frame's colour target: `D2` with two array layers, `size` pixels,
+    /// `RENDER_ATTACHMENT` usage.
+    pub target: wgpu::Texture,
+    /// Each layer's width and height in pixels.
+    pub size: (u32, u32),
+    /// Reference space → eye, column-major, per layer.
+    pub views: [[f32; 16]; 2],
+    /// Eye → clip, column-major, 0–1 depth (not reversed), per layer.
+    pub projections: [[f32; 16]; 2],
+}
+
+impl XrStereo {
+    /// One [`XrView`] per layer, each a `D2` view of its array layer in
+    /// `format`: what the per-eye path draws into.
+    pub fn eye_views(&self, format: wgpu::TextureFormat) -> [XrView; 2] {
+        [0u32, 1].map(|layer| XrView {
+            target: self.target.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("exact xr eye"),
+                format: Some(format),
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer,
+                array_layer_count: Some(1),
+                ..Default::default()
+            }),
+            size: self.size,
+            view: self.views[layer as usize],
+            projection: self.projections[layer as usize],
+        })
+    }
+
+    /// The whole target as one `D2Array` view of both layers in `format`,
+    /// what a multiview pass renders into.
+    pub fn array_view(&self, format: wgpu::TextureFormat) -> wgpu::TextureView {
+        self.target.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("exact xr stereo"),
+            format: Some(format),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            base_array_layer: 0,
+            array_layer_count: Some(2),
+            ..Default::default()
+        })
+    }
+}
+
+/// Eye → clip (column-major, 0–1 depth, right-handed, looking down −Z)
+/// from a field of view's angles in radians, `[left, right, up, down]`
+/// (left and down negative, as OpenXR's `XrFovf`), and the near and far
+/// planes.
+pub fn fov_projection(angles: [f32; 4], near: f32, far: f32) -> [f32; 16] {
+    let [l, r, u, d] = angles.map(f32::tan);
+    let (w, h) = (r - l, u - d);
+    [
+        2.0 / w,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2.0 / h,
+        0.0,
+        0.0,
+        (r + l) / w,
+        (u + d) / h,
+        far / (near - far),
+        -1.0,
+        0.0,
+        0.0,
+        near * far / (near - far),
+        0.0,
+    ]
+}
+
+/// Reference space → eye (column-major): the inverse of an eye's pose, its
+/// orientation a unit quaternion `[x, y, z, w]` and its position in metres.
+pub fn pose_view(orientation: [f32; 4], position: [f32; 3]) -> [f32; 16] {
+    let [x, y, z, w] = orientation;
+    // Rows of the pose's rotation.
+    let r = [
+        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
+        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
+        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+    ];
+    let p = position;
+    // The inverse is Rᵀ with −Rᵀp; column j of Rᵀ is row j of R.
+    let t = [0, 1, 2].map(|i| -(r[0][i] * p[0] + r[1][i] * p[1] + r[2][i] * p[2]));
+    [
+        r[0][0], r[0][1], r[0][2], 0.0, //
+        r[1][0], r[1][1], r[1][2], 0.0, //
+        r[2][0], r[2][1], r[2][2], 0.0, //
+        t[0], t[1], t[2], 1.0,
+    ]
+}
+
 /// An eye's own texture when it owns only part of the session's, kept
 /// across frames while its size and format hold.
 #[derive(Default)]
@@ -68,6 +166,61 @@ impl Module {
             .config
             .as_ref()
             .map(crate::view_format)
+    }
+
+    /// Draw one stereo frame of canvas `id` into `stereo`'s two layers (in
+    /// `format`) and submit it: the surface ticks once and draws both eyes
+    /// ([`crate::Surface::render_xr_stereo`]). As [`Module::render_xr`]
+    /// otherwise: whether another frame is wanted, None on failure.
+    pub fn render_xr_stereo(
+        &mut self,
+        id: u32,
+        now_ms: f64,
+        format: wgpu::TextureFormat,
+        stereo: &XrStereo,
+    ) -> Option<bool> {
+        if let Some(error) = self.refused_instance(id) {
+            return self.fail(error);
+        }
+        self.check_device();
+        self.settle(id);
+        let timing = self.timing(id, now_ms);
+        let (seekable, period_ms) = (self.seekable, self.period_ms);
+        let Some(gpu) = self.gpu.as_ref() else {
+            return self.fail("no device");
+        };
+        let Some(inst) = self.instances.get_mut(&id) else {
+            return self.fail("no such canvas");
+        };
+        if !inst.bound {
+            return Some(false);
+        }
+        inst.surface.immersive(Some(format));
+        let frame = Frame {
+            width: stereo.size.0.max(1) as f32,
+            height: stereo.size.1.max(1) as f32,
+            scale: 1.0,
+            now_ms,
+            seekable,
+            period_ms,
+            children_generation: inst.children_generation,
+            shader_generation: shaders::shader_generation(),
+            headroom: 1.0,
+        };
+        inst.surface.timing(&timing);
+        let wants = inst
+            .surface
+            .render_xr_stereo(&frame, &gpu.device, &gpu.queue, stereo, format);
+        inst.drain();
+        if let Some(crate::SurfaceError(e)) = inst.surface.take_error() {
+            return self.fail(e);
+        }
+        let Some(wants) = wants else {
+            return self.fail("this canvas draws no immersive frames");
+        };
+        inst.surface.submitted();
+        inst.dirty = true;
+        Some(wants)
     }
 
     /// Draw one immersive frame of canvas `id` into `eyes` (in `format`) and
@@ -210,5 +363,44 @@ impl Module {
         // The page's canvas shows its last frame until the session ends.
         inst.dirty = true;
         Some(wants)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `m` (column-major) applied to a point, divided through.
+    fn project(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+        let v = [p[0], p[1], p[2], 1.0];
+        let out: Vec<f32> = (0..4)
+            .map(|row| (0..4).map(|col| m[col * 4 + row] * v[col]).sum())
+            .collect();
+        [out[0] / out[3], out[1] / out[3], out[2] / out[3]]
+    }
+
+    #[test]
+    fn a_fov_projection_maps_the_frustum_edges_and_depth() {
+        let (l, r, u, d) = (-0.9f32, 0.7f32, 0.8f32, -0.85f32);
+        let m = fov_projection([l, r, u, d], 0.1, 50.0);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(close(project(&m, [r.tan() * 2.0, 0.0, -2.0])[0], 1.0));
+        assert!(close(project(&m, [l.tan() * 2.0, 0.0, -2.0])[0], -1.0));
+        assert!(close(project(&m, [0.0, u.tan() * 3.0, -3.0])[1], 1.0));
+        assert!(close(project(&m, [0.0, d.tan() * 3.0, -3.0])[1], -1.0));
+        assert!(close(project(&m, [0.0, 0.0, -0.1])[2], 0.0));
+        assert!(close(project(&m, [0.0, 0.0, -50.0])[2], 1.0));
+    }
+
+    #[test]
+    fn a_pose_view_takes_the_eye_to_the_origin_looking_down_minus_z() {
+        // Turned 90° left about +Y (looking down −X), standing at (1, 1.6, 2).
+        let half = std::f32::consts::FRAC_PI_4;
+        let m = pose_view([0.0, half.sin(), 0.0, half.cos()], [1.0, 1.6, 2.0]);
+        let eye = project(&m, [1.0, 1.6, 2.0]);
+        assert!(eye.iter().all(|c| c.abs() < 1e-5), "{eye:?}");
+        // A point a metre down −X from the eye is a metre ahead (−Z).
+        let ahead = project(&m, [0.0, 1.6, 2.0]);
+        assert!((ahead[2] + 1.0).abs() < 1e-5 && ahead[0].abs() < 1e-5, "{ahead:?}");
     }
 }
