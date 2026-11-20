@@ -36,6 +36,7 @@ mod occlusion;
 mod outline;
 mod perf;
 mod pipeline;
+pub mod profile;
 mod placed;
 #[cfg(test)]
 mod quad_tests;

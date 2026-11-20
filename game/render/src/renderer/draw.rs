@@ -273,6 +273,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             &self.targets,
             frame.water.map(|_| crate::water::from_above(frame)),
             shafts,
+            direct,
         );
         let cascades = self.prepare_effects(frame);
         let map = frame.environment_map.and_then(|m| {
@@ -519,13 +520,19 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
     /// 32,000-cube frame).
     fn direct_frame<H: crate::Hooks>(&self, frame: &FrameInput<'_>, soft: bool) -> bool {
         let blends = self.quads.draws.iter().any(|d| !self.quads.opaque(d));
-        self.allow_direct
+        // The immersive profile draws its water surface with a direct
+        // pipeline, and lets what blends blend after the tone curve: a tiler
+        // then keeps the frame, its samples and their resolve in tile memory.
+        let immersive = self.immersive;
+        (self.allow_direct || immersive)
             && !H::ENABLED
             && frame.environment.bloom.is_none()
             && frame.ambient_occlusion.is_none()
-            && frame.water.is_none()
+            && (frame.water.is_none()
+                || (immersive && !crate::water::shafts(frame, self.water_effects)))
             && !soft
             && (!blends
+                || immersive
                 || (frame.environment.tone_mapping == exact_game::ToneMapping::None
                     && self.pipelines.format().is_srgb()))
     }
@@ -824,6 +831,11 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         }
         let (poses, indices) = (&self.models.poses, &self.models.pose_indices);
         let words = &self.attachment_words;
+        let bias = if self.immersive {
+            crate::profile::LOD_BIAS
+        } else {
+            1.
+        };
         let distance = |e: &crate::lod::Lod| {
             let position = attachment_matrix(words, e.slot).map_or_else(
                 || {
@@ -832,7 +844,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 },
                 |m| m.w_axis.truncate(),
             );
-            position.distance(frame.camera_position)
+            position.distance(frame.camera_position) * bias
         };
         self.levels.select(distance);
         if let Some(probe) = &mut self.probe {

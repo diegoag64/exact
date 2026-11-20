@@ -21,6 +21,10 @@ pub struct XrStage {
     pub yaw: f32,
     /// Where `center` stands in the reference space, metres.
     pub position: Vec3,
+    /// World units across the placed scene about `center` (the tabletop's
+    /// `size`), zero when unknown. A headset frame fits the sun's single
+    /// shadow layer to it, the same for both eyes and every frame.
+    pub extent: f32,
 }
 
 impl Default for XrStage {
@@ -30,6 +34,7 @@ impl Default for XrStage {
             scale: 1.0,
             yaw: 0.0,
             position: Vec3::ZERO,
+            extent: 0.0,
         }
     }
 }
@@ -44,6 +49,7 @@ impl XrStage {
             scale: if size > 0.0 { metres / size } else { 1.0 },
             yaw: 0.0,
             position: Vec3::new(0.0, height, -distance),
+            extent: if size > 0.0 && size.is_finite() { size } else { 0.0 },
         }
     }
 
@@ -98,6 +104,7 @@ mod tests {
             scale: 0.05,
             yaw: 0.4,
             position: Vec3::new(0.1, 0.85, -0.9),
+            extent: 0.0,
         };
         let reference_view = Mat4::look_at_rh(
             Vec3::new(0.03, 1.6, 0.0),
