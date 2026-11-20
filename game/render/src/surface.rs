@@ -778,6 +778,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
                 | InputEvent::Pointer { phase: Q::Down, .. }
                 | InputEvent::Control { phase: Q::Down, .. }
         ) || matches!(event, InputEvent::Pad { buttons, .. } if buttons.iter().any(|b| *b >= 0.5))
+            || matches!(event, InputEvent::Xr { input, .. } if input.hands.iter().any(|h| h.buttons != 0))
         {
             self.presentation.unlock();
         }
