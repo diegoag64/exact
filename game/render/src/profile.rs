@@ -51,7 +51,7 @@ use exact_game::{ShadowBox, XrStage};
 /// Width and height of the sun's single shadow layer.
 pub const SHADOW_RESOLUTION: u32 = 1024;
 /// A `ModelLod` level is chosen at this many times the eye's distance.
-pub const LOD_BIAS: f32 = 2.5;
+pub const LOD_BIAS: f32 = 3.0;
 /// Local lights drawn at most, the nearest first.
 pub const MAX_LIGHTS: usize = 8;
 /// Largest local shadow layer.
