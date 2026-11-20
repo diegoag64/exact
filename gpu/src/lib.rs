@@ -72,6 +72,8 @@ pub use tier::{set_thread_tier, set_tier, tier, GpuTier};
 #[cfg(not(target_arch = "wasm32"))]
 mod storage;
 mod uniform;
+mod xr;
+pub use xr::{XrEye, XrScratch, XrView};
 #[cfg(windows)]
 mod window;
 pub use uniform::FrameUniform;
@@ -326,6 +328,23 @@ pub trait Surface {
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
     ) -> bool;
+    /// One immersive (WebXR) frame: advance once, then draw each of `views`
+    /// from its eye into its target (of `format`). Unlike [`Surface::render`]
+    /// the surface records and submits its own commands, one submission per
+    /// eye, so that each eye's `queue` writes land between them; the
+    /// session's textures are lent only until the host's callback returns.
+    /// Whether another frame is wanted; None (the default) when this surface
+    /// draws no immersive frames.
+    fn render_xr(
+        &mut self,
+        _frame: &Frame,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _views: &[XrView],
+        _format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        None
+    }
     /// Whether the last render completed the current picture, qualifying its
     /// `presented` record. Native presentation follows [`Surface::frame_presentable`].
     fn frame_ready(&self) -> bool {

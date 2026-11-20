@@ -143,6 +143,13 @@ pub trait Game: 'static {
     fn samples(_args: &Self::Args) -> crate::SceneSamples {
         Self::SAMPLES
     }
+    /// Where the world stands in an immersive (WebXR) session, read each
+    /// immersive frame: the headset's eyes replace the world's camera. Only a
+    /// game whose app.json sets `game.xr` offers a session. Never saved or
+    /// hashed; the default puts world metres on the session's floor.
+    fn xr_stage(_world: &World, _args: &Self::Args) -> crate::XrStage {
+        crate::XrStage::default()
+    }
     /// One fixed step, called after inputs and before transform propagation.
     fn tick(world: &mut World, input: &Input, args: &Self::Args);
     /// Rebuild presentation-only state (`#[derive(Presentation)]` components) from

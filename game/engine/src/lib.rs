@@ -42,6 +42,8 @@ mod storage;
 mod tween;
 mod values;
 mod world;
+mod xr;
+pub use xr::XrStage;
 
 pub use animation::{Animation, Animator, Blend, Cmp, Condition, Ik, Play, SocketFollow, State};
 pub use args::{Args, ArgumentKind};

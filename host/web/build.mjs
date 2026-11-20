@@ -772,6 +772,8 @@ if (gpu.built) {
   // A game's world surfaces, by name, as its GPU build declared them (`.shells/surfaces.json`): a browser without
   // WebGPU shows the refusal page over these and no other canvas (gpu-refusal.js, LLP 1139.003 D1).
   if (game) writeFileSync(resolve(stage, 'index.html'), markWorlds(readFileSync(resolve(stage, 'index.html'), 'utf8'), worldSurfaces(app.dir)));
+  // A game that offers immersive sessions (app.json `game.xr`): gpu-glue.js loads xr-glue.js for it.
+  if (game && app.manifest.game?.xr === true) writeFileSync(resolve(stage, 'index.html'), readFileSync(resolve(stage, 'index.html'), 'utf8').replace(/<html\b/, '<html data-exact-xr="immersive-vr"'));
 }
 // @ref LLP 1024 D3/D5 — the app's module table, beside the page only when the
 // app has modules (the GPU gate): its web executor under `modules/`, fetched

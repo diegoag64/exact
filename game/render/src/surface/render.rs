@@ -388,6 +388,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
+        xr: Option<&[exact_gpu::XrView]>,
     ) -> bool {
         let period = if H::ENABLED && H::ALLOWANCE > 0 && !frame.seekable {
             FramePeriod::new(
@@ -715,17 +716,23 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             .quads
             .children(&renderer.device, &renderer.queue, &self.placed);
         let direct_frames = renderer.direct_frames;
-        let encoded = renderer.encode_hooked(
-            encoder,
-            target,
-            frame.pixels(),
-            &input,
-            &mut self.hooks,
-            Some(sim.world()),
-            hook_time,
-            &self.hook_poses,
-            measure.then_some((&mut self.perf, frame.seekable)),
-        );
+        let encoded = if let Some(views) = xr {
+            // Immersive: each eye from the headset, placed by the game's stage.
+            let stage = G::xr_stage(sim.world(), sim.args());
+            super::xr::encode_eyes(renderer, device, queue, &mut input, stage, views, sim.world(), &self.hook_poses)
+        } else {
+            renderer.encode_hooked(
+                encoder,
+                target,
+                frame.pixels(),
+                &input,
+                &mut self.hooks,
+                Some(sim.world()),
+                hook_time,
+                &self.hook_poses,
+                measure.then_some((&mut self.perf, frame.seekable)),
+            )
+        };
         if let Some(end) = hook_time.deadline.map(|_| Stamp::now()) {
             if let Some(prepare) = renderer
                 .hook_metrics

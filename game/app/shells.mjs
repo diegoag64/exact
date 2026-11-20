@@ -314,6 +314,7 @@ fn main() {
   }
   if (app.game.audio !== undefined && typeof app.game.audio !== "boolean") throw new Error("game.audio must be a boolean");
   if (app.game.assets !== undefined && typeof app.game.assets !== "boolean") throw new Error("game.assets must be a boolean");
+  if (app.game.xr !== undefined && typeof app.game.xr !== "boolean") throw new Error("game.xr must be a boolean");
   // Resolve validates manifest syntax; Rust checks this path's exported type
   // when compiling the generated GPU shell, including macro/cfg exports.
   // An absent art directory must not be a Cargo watch: missing paths are always

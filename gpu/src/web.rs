@@ -480,6 +480,135 @@ pub fn error() -> String {
     with(|m| m.take_error()).unwrap_or_default()
 }
 
+/// Immersive (WebXR) state: the session's textures as wgpu wraps them, by
+/// the browser's object, and the eyes' own textures (`crate::XrScratch`).
+#[derive(Default)]
+struct Xr {
+    textures: Vec<(JsValue, wgpu::Texture)>,
+    scratch: crate::XrScratch,
+}
+
+thread_local! {
+    static XR: RefCell<Xr> = RefCell::new(Xr::default());
+}
+
+/// Floats per eye in [`xr_render`]'s `eyes`: the texture's width, height,
+/// array layers and usage bits, the eye's layer and viewport (x, y, width,
+/// height), then its view and projection matrices, column-major.
+pub const XR_EYE_FLOATS: usize = 9 + 32;
+
+fn xr_format(name: &str) -> Option<wgpu::TextureFormat> {
+    use wgpu::TextureFormat as F;
+    Some(match name {
+        "bgra8unorm" => F::Bgra8Unorm,
+        "bgra8unorm-srgb" => F::Bgra8UnormSrgb,
+        "rgba8unorm" => F::Rgba8Unorm,
+        "rgba8unorm-srgb" => F::Rgba8UnormSrgb,
+        "rgba16float" => F::Rgba16Float,
+        "rgb10a2unorm" => F::Rgb10a2Unorm,
+        _ => return None,
+    })
+}
+
+/// The module's `GPUDevice`, for the page's `XRGPUBinding`; null without one.
+pub fn xr_device() -> JsValue {
+    with(|m| {
+        m.gpu()
+            .and_then(|g| g.device.as_webgpu())
+            .map(|d| JsValue::from(d.clone()))
+    })
+    .flatten()
+    .unwrap_or(JsValue::NULL)
+}
+
+/// Draw one immersive frame of canvas `id` into the session's `textures`
+/// (`GPUTexture`s, one per eye, the same object for eyes that share one),
+/// described by `eyes` ([`XR_EYE_FLOATS`] each), in `format` (a
+/// `GPUTextureFormat`). Submitted before it returns. 1 = wants another, 0 =
+/// done, 2 = failed ([`error`]), 3 = no device.
+pub fn xr_render(id: u32, now_ms: f64, format: &str, textures: Vec<JsValue>, eyes: &[f32]) -> u32 {
+    use wasm_bindgen::JsCast;
+    let fail = |message: String| {
+        ERROR.with(|s| *s.borrow_mut() = message);
+        2
+    };
+    let Some(format) = xr_format(format) else {
+        return fail(format!("immersive frame: unsupported format {format}"));
+    };
+    if textures.is_empty() || eyes.len() != textures.len() * XR_EYE_FLOATS {
+        return fail("immersive frame: eyes and textures disagree".into());
+    }
+    XR.with(|xr| {
+        let mut xr = xr.borrow_mut();
+        let xr = &mut *xr;
+        with(|m| {
+            let Some(gpu) = m.gpu() else {
+                return 3;
+            };
+            let mut list = Vec::with_capacity(textures.len());
+            for (handle, e) in textures.iter().zip(eyes.chunks_exact(XR_EYE_FLOATS)) {
+                let [width, height, layers, usage] = [e[0], e[1], e[2], e[3]].map(|v| v as u32);
+                let found = xr.textures.iter().find(|(h, t)| {
+                    h == handle
+                        && t.width() == width
+                        && t.height() == height
+                        && t.depth_or_array_layers() == layers
+                        && t.format() == format
+                });
+                let texture = match found {
+                    Some((_, t)) => t.clone(),
+                    None => {
+                        let texture = gpu.device.create_texture_from_webgpu_handle(
+                            handle.clone().unchecked_into(),
+                            &wgpu::TextureDescriptor {
+                                label: Some("exact xr session"),
+                                size: wgpu::Extent3d {
+                                    width,
+                                    height,
+                                    depth_or_array_layers: layers.max(1),
+                                },
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format,
+                                usage: wgpu::TextureUsages::from_bits_truncate(usage),
+                                view_formats: &[],
+                            },
+                            None,
+                        );
+                        // A session lends a few textures: forget old ones past a handful.
+                        if xr.textures.len() >= 8 {
+                            xr.textures.remove(0);
+                        }
+                        xr.textures.push((handle.clone(), texture.clone()));
+                        texture
+                    }
+                };
+                let matrix = |at: usize| -> [f32; 16] { e[at..at + 16].try_into().unwrap() };
+                list.push(crate::XrEye {
+                    texture,
+                    layer: e[4] as u32,
+                    viewport: [e[5], e[6], e[7], e[8]].map(|v| v.max(0.) as u32),
+                    view: matrix(9),
+                    projection: matrix(25),
+                });
+            }
+            match m.render_xr(id, now_ms, format, &list, &mut xr.scratch) {
+                Some(true) => 1,
+                Some(false) => 0,
+                None if m.gpu().is_none() => 3,
+                None => 2,
+            }
+        })
+        .unwrap_or(2)
+    })
+}
+
+/// The session ended: let go of its textures.
+pub fn xr_end() {
+    XR.with(|xr| *xr.borrow_mut() = Xr::default());
+}
+
 /// The exports for one app's registry, wasm-bindgen (see LLP 1009 D2).
 #[macro_export]
 macro_rules! module {
@@ -779,6 +908,30 @@ macro_rules! module {
         #[::wasm_bindgen::prelude::wasm_bindgen]
         pub fn gpu_error() -> String {
             $crate::web::error()
+        }
+
+        /// The device, for the page's immersive session (`XRGPUBinding`).
+        #[::wasm_bindgen::prelude::wasm_bindgen]
+        pub fn gpu_xr_device() -> ::wasm_bindgen::JsValue {
+            $crate::web::xr_device()
+        }
+
+        /// One immersive frame into the session's textures ([`$crate::web::xr_render`]).
+        #[::wasm_bindgen::prelude::wasm_bindgen]
+        pub fn gpu_xr_render(
+            id: u32,
+            now_ms: f64,
+            format: &str,
+            textures: Vec<::wasm_bindgen::JsValue>,
+            eyes: &[f32],
+        ) -> u32 {
+            $crate::web::xr_render(id, now_ms, format, textures, eyes)
+        }
+
+        /// The immersive session ended.
+        #[::wasm_bindgen::prelude::wasm_bindgen]
+        pub fn gpu_xr_end() {
+            $crate::web::xr_end()
         }
     };
 }

@@ -4,6 +4,7 @@ mod look;
 pub(crate) mod performance;
 mod render;
 mod textures;
+mod xr;
 
 use crate::{
     perf::{Perf, Stamp},
@@ -570,7 +571,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         let timing = crate::perf::PipelineTiming::start(self.perf.measure_frame);
         self.perf.live = !frame.seekable;
         self.perf.rendering = true;
-        let wants = self.render_frame(frame, device, queue, encoder, target, format);
+        let wants = self.render_frame(frame, device, queue, encoder, target, format, None);
         // Natively the module draws an incomplete frame again (gpu/src/frame.rs);
         // the web's host draws only what the surface asks for.
         self.still = !wants && (cfg!(target_arch = "wasm32") || self.frame_ready);
@@ -586,6 +587,26 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         drop(timing);
         self.perf.keep_pipeline_time(frame.seekable);
         wants
+    }
+    fn render_xr(
+        &mut self,
+        frame: &Frame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        views: &[exact_gpu::XrView],
+        format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        let first = &views.first()?.target;
+        self.perf.measure_frame = false;
+        self.perf.live = !frame.seekable;
+        self.perf.rendering = true;
+        // Each eye records and submits its own commands (`xr::encode_eyes`).
+        let mut unused = device.create_command_encoder(&Default::default());
+        let wants =
+            self.render_frame(frame, device, queue, &mut unused, first, format, Some(views));
+        self.still = !wants;
+        self.perf.rendering = false;
+        Some(wants)
     }
     fn frame_ready(&self) -> bool {
         self.frame_ready

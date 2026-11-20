@@ -164,6 +164,7 @@
       "properties": {
         "audio": { "type": "boolean" },
         "assets": { "type": "boolean" },
+        "xr": { "type": "boolean", "description": "Offer an immersive WebXR session on the web (an Enter VR button where the browser has WebXR on WebGPU): the headset's eyes draw the world, placed by Game::xr_stage." },
         "crate": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-logic$" },
         "look": {
           "type": "object",
