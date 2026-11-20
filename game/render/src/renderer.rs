@@ -4,6 +4,8 @@ mod local;
 mod passes;
 pub(crate) use passes::Bound;
 mod prepass;
+mod stereo;
+pub(crate) use stereo::StereoSet;
 pub(crate) mod probe;
 pub(crate) mod shadow_cache;
 use crate::buffers::{bytes, Buffer, Targets};
@@ -129,6 +131,8 @@ pub struct RendererWithAssets<const ASSETS: bool> {
     pub(crate) allow_direct: bool,
     // Frames drawn direct since construction (`Stats::direct_frames`).
     pub(crate) direct_frames: u64,
+    // Stereo frames drawn in one pass since construction (`Stats::stereo_frames`).
+    pub(crate) stereo_frames: u64,
     counts: Stats,
     shadows: Option<ShadowMaps>,
     bloom: Option<BloomTargets>,
@@ -148,6 +152,10 @@ pub struct RendererWithAssets<const ASSETS: bool> {
     look_levels: Option<Vec<(u32, Option<u8>)>>,
     // The look frames' shadow-texel pipeline, its layout and its counter.
     shadow_texels: Option<(wgpu::ComputePipeline, wgpu::BindGroupLayout, wgpu::Buffer)>,
+    /// A stereo frame's pipelines and attachments, made at the first.
+    stereo: Option<Box<StereoSet>>,
+    /// The eyes of the stereo frame being encoded: its frame pass is multiview.
+    pub(crate) stereo_eyes: Option<[crate::stereo::Eye; 2]>,
 }
 
 // Use the uploaded affine records and the same presence test as transform.wgsl.
@@ -267,7 +275,8 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         let pipelines = Pipelines::configured(device, format, samples, depth_prepass);
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("game frame"),
-            size: (frame::FLOATS * 4) as u64,
+            // Room for a stereo frame's eyes after `Frame` (`stereo.rs`).
+            size: (crate::stereo::UNIFORM_FLOATS * 4) as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -439,6 +448,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             direct_retained: false,
             allow_direct: samples == 1 || cfg!(any(target_os = "android", target_os = "ios")),
             direct_frames: 0,
+            stereo_frames: 0,
             shadows: None,
             bloom: None,
             ssao: None,
@@ -453,6 +463,8 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             probe_built: Default::default(),
             look_levels: None,
             shadow_texels: None,
+            stereo: None,
+            stereo_eyes: None,
             counts: Stats {
                 draws: 1,
                 triangles: 1,

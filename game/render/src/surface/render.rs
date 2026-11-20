@@ -390,7 +390,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
-        xr: Option<&[exact_gpu::XrView]>,
+        xr: Option<super::xr::Immersive<'_>>,
     ) -> bool {
         let period = if H::ENABLED && H::ALLOWANCE > 0 && !frame.seekable {
             FramePeriod::new(
@@ -718,19 +718,32 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             .quads
             .children(&renderer.device, &renderer.queue, &self.placed);
         let direct_frames = renderer.direct_frames;
-        let encoded = if let Some(views) = xr {
+        let encoded = if let Some(xr) = xr {
             // Immersive: each eye from the headset, placed by the game's stage.
             let stage = G::xr_stage(sim.world(), sim.args());
-            super::xr::encode_eyes(
-                renderer,
-                device,
-                queue,
-                &mut input,
-                stage,
-                views,
-                sim.world(),
-                &self.hook_poses,
-            )
+            match xr {
+                super::xr::Immersive::Eyes(views) => super::xr::encode_eyes(
+                    renderer,
+                    device,
+                    queue,
+                    &mut input,
+                    stage,
+                    views,
+                    sim.world(),
+                    &self.hook_poses,
+                ),
+                super::xr::Immersive::Stereo(stereo) => super::xr::encode_stereo(
+                    renderer,
+                    device,
+                    queue,
+                    &mut input,
+                    stage,
+                    stereo,
+                    format,
+                    sim.world(),
+                    &self.hook_poses,
+                ),
+            }
         } else {
             renderer.encode_hooked(
                 encoder,

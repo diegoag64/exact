@@ -349,11 +349,12 @@ pub trait Surface {
     ) -> Option<bool> {
         None
     }
-    /// One stereo frame (a native headset's, OpenXR): advance once, then draw
-    /// both eyes into `stereo.target`'s two array layers (of `format`). The
-    /// default draws each layer through [`Surface::render_xr`]; a surface
-    /// that draws both in one multiview pass overrides it. The surface
-    /// records and submits its own commands, as `render_xr`'s. None when
+    /// One stereo frame (OpenXR on a headset): advance once, then draw both
+    /// eyes of `stereo` into its two-layer array target (of `format`). The
+    /// surface records and submits its own commands, as in
+    /// [`Surface::render_xr`]. The default draws each eye on its own through
+    /// `render_xr`, into a view of its layer; a surface that draws both in one
+    /// multiview pass (`wgpu::Features::MULTIVIEW`) overrides it. None when
     /// this surface draws no immersive frames.
     fn render_xr_stereo(
         &mut self,

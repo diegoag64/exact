@@ -123,6 +123,30 @@ pub fn device_with_requirements(
     .map_err(|error| error.to_string())
 }
 
+/// This machine's device with `extra` features granted too, where its
+/// adapter has them (a stereo test's `MULTIVIEW` and `MULTISAMPLE_ARRAY`),
+/// and the multiview view count the adapter allows.
+pub fn device_with(extra: wgpu::Features) -> Result<Gpu, String> {
+    let instance = wgpu::Instance::default();
+    let adapter = block_on(instance.request_adapter(&Default::default()))
+        .map_err(|error| error.to_string())?;
+    let mut required_limits = crate::requested_limits(adapter.limits());
+    required_limits.max_multiview_view_count = adapter.limits().max_multiview_view_count;
+    let (device, queue) = block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("exact fixture"),
+        required_limits,
+        required_features: adapter.features() & (crate::requested_features() | extra),
+        ..Default::default()
+    }))
+    .map_err(|error| error.to_string())?;
+    Ok(Gpu {
+        instance,
+        adapter,
+        device,
+        queue,
+    })
+}
+
 /// This machine's device without the `withheld` features: what a device that
 /// lacks them draws (full-precision shading, say), beside `device`'s.
 pub fn device_without(withheld: wgpu::Features) -> Result<Gpu, String> {
@@ -184,6 +208,18 @@ pub fn render(
 /// `COPY_SRC` — BGRA is swizzled — waiting for the GPU. Anything else is
 /// refused by name.
 pub fn read(gpu: &Gpu, texture: &wgpu::Texture) -> Result<Pixels, String> {
+    let layers = texture.depth_or_array_layers();
+    if layers != 1 {
+        return Err(format!(
+            "a {:?} texture with {layers} layers is not one 2D layer",
+            texture.dimension()
+        ));
+    }
+    read_layer(gpu, texture, 0)
+}
+
+/// [`read`] of array layer `layer` of a 2D texture (a stereo frame's eye).
+pub fn read_layer(gpu: &Gpu, texture: &wgpu::Texture, layer: u32) -> Result<Pixels, String> {
     use wgpu::TextureFormat as F;
     let bgra = match texture.format() {
         F::Rgba8Unorm | F::Rgba8UnormSrgb => false,
@@ -191,9 +227,9 @@ pub fn read(gpu: &Gpu, texture: &wgpu::Texture) -> Result<Pixels, String> {
         other => return Err(format!("{other:?} is not an RGBA8 or BGRA8 format")),
     };
     let layers = texture.depth_or_array_layers();
-    if texture.dimension() != wgpu::TextureDimension::D2 || layers != 1 {
+    if texture.dimension() != wgpu::TextureDimension::D2 || layer >= layers {
         return Err(format!(
-            "a {:?} texture with {layers} layers is not one 2D layer",
+            "a {:?} texture with {layers} layers has no 2D layer {layer}",
             texture.dimension()
         ));
     }
@@ -208,7 +244,14 @@ pub fn read(gpu: &Gpu, texture: &wgpu::Texture) -> Result<Pixels, String> {
     });
     let mut encoder = gpu.device.create_command_encoder(&Default::default());
     encoder.copy_texture_to_buffer(
-        texture.as_image_copy(),
+        wgpu::TexelCopyTextureInfo {
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            ..texture.as_image_copy()
+        },
         wgpu::TexelCopyBufferInfo {
             buffer: &buffer,
             layout: wgpu::TexelCopyBufferLayout {

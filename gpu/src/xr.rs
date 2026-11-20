@@ -67,7 +67,7 @@ impl XrStereo {
                 array_layer_count: Some(1),
                 ..Default::default()
             }),
-            size: self.size,
+            size: (self.size.0.max(1), self.size.1.max(1)),
             view: self.views[layer as usize],
             projection: self.projections[layer as usize],
         })
@@ -84,6 +84,12 @@ impl XrStereo {
             array_layer_count: Some(2),
             ..Default::default()
         })
+    }
+
+    /// [`XrStereo::eye_views`] as a `Vec`, the slice
+    /// [`crate::Surface::render_xr`] takes.
+    pub fn layer_views(&self, format: wgpu::TextureFormat) -> Vec<XrView> {
+        self.eye_views(format).into()
     }
 }
 
@@ -169,9 +175,10 @@ impl Module {
     }
 
     /// Draw one stereo frame of canvas `id` into `stereo`'s two layers (in
-    /// `format`) and submit it: the surface ticks once and draws both eyes
-    /// ([`crate::Surface::render_xr_stereo`]). As [`Module::render_xr`]
-    /// otherwise: whether another frame is wanted, None on failure.
+    /// `format`) and submit it: the surface ticks once and draws both eyes,
+    /// in one multiview pass where it and the device can
+    /// ([`crate::Surface::render_xr_stereo`]). Whether the surface wants
+    /// another frame; None on failure ([`Module::error`] says why).
     pub fn render_xr_stereo(
         &mut self,
         id: u32,
@@ -181,6 +188,9 @@ impl Module {
     ) -> Option<bool> {
         if let Some(error) = self.refused_instance(id) {
             return self.fail(error);
+        }
+        if stereo.target.depth_or_array_layers() < 2 {
+            return self.fail("a stereo frame's target has fewer than two layers");
         }
         self.check_device();
         self.settle(id);

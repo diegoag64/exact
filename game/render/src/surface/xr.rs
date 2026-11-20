@@ -1,4 +1,8 @@
-//! Immersive (WebXR) frames: the world ticked once, drawn once per eye.
+//! Immersive frames: the world ticked once, drawn into both eyes. A stereo
+//! frame (`XrStereo`, a headset's two-layer swapchain) draws both in one
+//! multiview pass where the device has it (`encode_stereo`, `crate::stereo`);
+//! otherwise, and for WebXR's per-eye textures, each eye draws on its own
+//! (`encode_eyes`).
 //!
 //! Each eye is encoded and submitted on its own: the renderer writes its
 //! frame uniforms, culling and light lists through the queue, and a queue
@@ -8,7 +12,16 @@
 //! perf timing.
 use super::*;
 use exact_game::{Mat4, XrStage};
-use exact_gpu::{wgpu, XrView};
+use exact_gpu::{wgpu, XrStereo, XrView};
+
+/// What an immersive frame draws into.
+#[derive(Clone, Copy)]
+pub(super) enum Immersive<'a> {
+    /// Each eye its own target.
+    Eyes(&'a [XrView]),
+    /// Both eyes in the layers of one target.
+    Stereo(&'a XrStereo),
+}
 
 impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, P, ASSETS, H> {
     /// The renderer is about to be made for another format (an immersive
@@ -86,4 +99,45 @@ pub(super) fn encode_eyes<const ASSETS: bool>(
         renderer.submitted();
     }
     Ok(stats)
+}
+
+/// Both eyes of `stereo` in one multiview pass and one submission, the
+/// frame's shared work done once; each eye on its own (`encode_eyes`, into
+/// views of its layer) where the renderer cannot draw this frame in one pass.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn encode_stereo<const ASSETS: bool>(
+    renderer: &mut crate::renderer::RendererWithAssets<ASSETS>,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    input: &mut crate::FrameInput<'_>,
+    stage: XrStage,
+    stereo: &XrStereo,
+    format: wgpu::TextureFormat,
+    world: &World,
+    poses: &crate::hooks::Poses,
+) -> Result<crate::Stats, crate::RenderError> {
+    let eyes = [0, 1].map(|i| {
+        let (view, proj, camera) = stage.eye(
+            Mat4::from_cols_array(&stereo.views[i]),
+            Mat4::from_cols_array(&stereo.projections[i]),
+        );
+        crate::StereoEye { view, proj, camera }
+    });
+    let target = stereo.array_view(format);
+    let size = (stereo.size.0.max(1), stereo.size.1.max(1));
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("exact xr stereo"),
+    });
+    match renderer.encode_stereo(&mut encoder, &target, size, input, eyes, Some(world), poses)? {
+        Some(stats) => {
+            queue.submit([encoder.finish()]);
+            renderer.submitted();
+            Ok(stats)
+        }
+        None => {
+            drop(encoder);
+            let views = stereo.layer_views(format);
+            encode_eyes(renderer, device, queue, input, stage, &views, world, poses)
+        }
+    }
 }

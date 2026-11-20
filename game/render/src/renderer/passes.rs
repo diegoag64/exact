@@ -381,7 +381,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 timing::writes(frame.timestamps, 3)
             },
             occlusion_query_set: self.probe_queries(Stage::Forward),
-            multiview_mask: None,
+            multiview_mask: self.view_mask(),
         });
         if state.direct {
             state.draws += self.draw_depth_prepass(&mut pass, state.size, true);
@@ -573,7 +573,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 timing::writes(frame.timestamps, timing::TRANSLUCENT)
             },
             occlusion_query_set: self.probe_queries(Stage::Translucent),
-            multiview_mask: None,
+            multiview_mask: self.view_mask(),
         });
         self.probe_stage(Stage::Translucent);
         self.scene_viewport(&mut pass, state.size, false);
@@ -643,7 +643,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 timing::writes(frame.timestamps, 20)
             },
             occlusion_query_set: self.probe_queries(Stage::Translucent),
-            multiview_mask: None,
+            multiview_mask: self.view_mask(),
         });
         self.probe_stage(Stage::Translucent);
         self.scene_viewport(&mut pass, state.size, false);
@@ -738,7 +738,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 timing::writes(frame.timestamps, 15)
             },
             occlusion_query_set: None,
-            multiview_mask: None,
+            multiview_mask: self.view_mask(),
         });
         viewport(&mut pass, state.size);
         pass.set_pipeline(&self.pipelines.tone[usize::from(self.bloom.is_some())]);

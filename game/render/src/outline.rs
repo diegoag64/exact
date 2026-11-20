@@ -98,7 +98,19 @@ pub(crate) struct Pipelines {
 }
 impl Pipelines {
     pub fn new(d: &wgpu::Device, p: &pipeline::Pipelines) -> Self {
-        let layout = d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        Self::with_layout(d, p, None)
+    }
+    /// The hull pipelines of a stereo pipeline set (`stereo.rs`), binding the
+    /// hulls this renderer's single-view set made.
+    pub fn stereo(&self, d: &wgpu::Device, p: &pipeline::Pipelines) -> Self {
+        Self::with_layout(d, p, Some(&self.layout))
+    }
+    fn with_layout(
+        d: &wgpu::Device,
+        p: &pipeline::Pipelines,
+        layout: Option<&wgpu::BindGroupLayout>,
+    ) -> Self {
+        let layout = layout.cloned().unwrap_or_else(|| d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("game outline"),
             entries: &[0].map(|binding| wgpu::BindGroupLayoutEntry {
                 binding,
@@ -110,10 +122,14 @@ impl Pipelines {
                 },
                 count: None,
             }),
-        });
+        }));
+        let source = pipeline::outline_source();
         let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("game outline"),
-            source: wgpu::ShaderSource::Wgsl(pipeline::outline_source().into()),
+            source: wgpu::ShaderSource::Wgsl(match p.multiview {
+                Some(_) => crate::stereo::multiview_source(&source).into(),
+                None => source.into(),
+            }),
         });
         let pipeline_layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("game outline"),
@@ -227,7 +243,7 @@ fn hull_pipeline(
                 count: p.samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: p.multiview,
             cache: p.cache.handle.as_ref(),
         })
     })
