@@ -238,6 +238,8 @@ struct Headset {
     running: bool,
     focused: bool,
     exiting: bool,
+    /// The last frame had no valid head orientation.
+    untracked: bool,
     /// The canvas drawn into the headset: the first the host renders.
     canvas: Option<u32>,
     /// Host clock − headset clock, milliseconds, fixed at the first frame.
@@ -549,6 +551,7 @@ fn make(
         running: false,
         focused: false,
         exiting: false,
+        untracked: false,
         canvas: None,
         clock_offset: None,
         perf: Perf::default(),
@@ -948,13 +951,31 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
     }
     headset.space().map_err(|e| format!("space: {e}"))?;
     let space = headset.space.as_ref().unwrap();
-    let (_, views) = headset
+    let (located, views) = headset
         .session
         .locate_views(xr::ViewConfigurationType::PRIMARY_STEREO, time, space)
         .map_err(|e| format!("views: {e}"))?;
     if views.len() < 2 {
         let _ = headset.stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &[]);
         return Err(format!("{} views", views.len()));
+    }
+    // Tracking lost (a headset nobody wears, a dark room): the compositor
+    // refuses a layer without a valid orientation, so the frame shows
+    // nothing and the world waits.
+    if !located.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+        headset
+            .stream
+            .end(time, xr::EnvironmentBlendMode::OPAQUE, &[])
+            .map_err(|e| format!("end: {e}"))?;
+        if !headset.untracked {
+            log(true, "tracking lost: frames show nothing until the head is tracked again");
+        }
+        headset.untracked = true;
+        headset.perf.frame(wait_ms, 0.0, 0.0, false);
+        return Ok(());
+    }
+    if std::mem::take(&mut headset.untracked) {
+        log(false, "tracking again");
     }
     let swapchain = headset.swapchain.as_mut().unwrap();
     let image = swapchain
