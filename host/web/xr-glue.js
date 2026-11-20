@@ -62,6 +62,17 @@ export async function offer(host) {
   return state;
 }
 
+// A WebGPU session's projections are 0–1 depth (the WebXR-WebGPU binding);
+// one that maps the near plane to −1 is WebGL's, remapped here: z' = (z + w) / 2.
+function clipDepth(matrix, near, state) {
+  const p = matrix, ndcNear = p[11] !== 0 ? (p[14] - near * p[10]) / near : 0;
+  if (!(ndcNear < -0.5)) return p;
+  if (!state.glDepth) { state.glDepth = true; console.warn("exact xr: the session's projections are -1..1 depth; remapping to 0..1"); }
+  const q = Float32Array.from(p);
+  for (let c = 0; c < 4; c++) q[c * 4 + 2] = 0.5 * p[c * 4 + 2] + 0.5 * p[c * 4 + 3];
+  return q;
+}
+
 async function start(host, state, button) {
   const module = host.module();
   const device = module?.gpu_xr_device?.();
@@ -115,7 +126,7 @@ async function start(host, state, button) {
         eyes.set([texture.width, texture.height, texture.depthOrArrayLayers, texture.usage,
           descriptor.baseArrayLayer ?? 0, vp.x, vp.y, vp.width, vp.height], i * EYE_FLOATS);
         eyes.set(view.transform.inverse.matrix, i * EYE_FLOATS + 9);
-        eyes.set(view.projectionMatrix, i * EYE_FLOATS + 25);
+        eyes.set(clipDepth(view.projectionMatrix, session.renderState.depthNear ?? 0.1, state), i * EYE_FLOATS + 25);
       }
       const r = gpu.gpu_xr_render(entry.id, host.clock(time), format, textures, eyes);
       state.frames++; state.view = entry.view; state.last = r;
