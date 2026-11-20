@@ -374,6 +374,13 @@ impl Perf {
             self.stats.draws, self.stats.instances, self.stats.triangles, self.stats.direct_frames
         )
         .unwrap();
+        let s = &self.stats;
+        write!(
+            out,
+            ",\"passes\":{},\"pipelines\":{},\"commands\":{},\"shadowDraws\":{},\"cascades\":{},\"samples\":{},\"viewEncodeMs\":{}",
+            s.passes, s.pipelines, s.commands, s.shadow_draws, s.cascades, s.samples, s.encode_ms
+        )
+        .unwrap();
         write!(
             out,
             ",\"lights\":{{\"drawn\":{},\"dropped\":{}}}",

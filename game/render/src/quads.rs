@@ -1076,6 +1076,7 @@ impl Quads {
                 };
                 if let Some((bind, pipelines)) = soft {
                     let textured = usize::from(look != NO_LOOK);
+                    crate::counters::pipeline();
                     pass.set_pipeline(&pipelines[2 * textured + usize::from(additive)]);
                     if look != NO_LOOK {
                         let texture = &textures[&self.looks[look as usize].value.texture];
@@ -1085,11 +1086,13 @@ impl Quads {
                 } else if look == NO_LOOK {
                     let pipelines: &[wgpu::RenderPipeline; 2] =
                         pick(direct, &self.particle_pipelines, &self.direct.particles);
+                    crate::counters::pipeline();
                     pass.set_pipeline(&pipelines[usize::from(additive)]);
                 } else {
                     let texture = &textures[&self.looks[look as usize].value.texture];
                     let pipelines: &[wgpu::RenderPipeline; 2] =
                         pick(direct, &self.textured_pipelines, &self.direct.textured);
+                    crate::counters::pipeline();
                     pass.set_pipeline(&pipelines[usize::from(additive)]);
                     pass.set_bind_group(1, texture.sprite_bind.as_ref().unwrap(), &[]);
                 }
@@ -1115,6 +1118,7 @@ impl Quads {
                 };
                 let pipelines: &[wgpu::RenderPipeline; 3] =
                     pick(direct, &self.sprite_pipelines, &self.direct.sprites);
+                crate::counters::pipeline();
                 pass.set_pipeline(&pipelines[variant]);
                 pass.set_bind_group(1, textures[&s.texture].sprite_bind.as_ref().unwrap(), &[]);
                 pass.set_vertex_buffer(0, self.sprite_arena.as_ref().unwrap().buffer.raw.slice(..));
@@ -1122,6 +1126,7 @@ impl Quads {
             }
             #[cfg(not(target_arch = "wasm32"))]
             Kind::Child(i) => {
+                crate::counters::pipeline();
                 pass.set_pipeline(if direct {
                     self.direct.child.as_ref().unwrap()
                 } else {
@@ -1140,6 +1145,7 @@ impl Quads {
     }
     /// Draw `index`, as `bind` bound it.
     pub fn submit(&self, pass: &mut wgpu::RenderPass<'_>, index: usize) {
+        crate::counters::commands(1);
         pass.draw(0..6, self.draws[index].range.clone());
     }
     pub fn opaque(&self, draw: &Draw) -> bool {

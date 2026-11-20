@@ -41,6 +41,16 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
     /// for a format other than the page's needs the textures the page's had;
     /// so does the page's after the session.
     pub(super) fn immersive_format(&mut self, format: Option<wgpu::TextureFormat>) {
+        // The immersive profile may draw at other scene samples than the
+        // page's rung: the renderer is made again, as for another format.
+        if let (Some(sim), Some(made)) = (&self.sim, self.samples) {
+            let rung = super::render::frame_rung(self.rung, format.is_some(), G::quality(sim.args()));
+            let wanted = crate::quality::samples(rung, G::samples(sim.args()));
+            if self.render.is_some() && made != wanted {
+                self.redeliver_textures();
+                self.format = None;
+            }
+        }
         match format {
             Some(format) if self.xr_format != Some(format) => {
                 self.xr_format = Some(format);
@@ -84,7 +94,7 @@ pub(super) fn encode_eyes<const ASSETS: bool>(
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("exact xr eye"),
         });
-        stats = renderer.encode_hooked(
+        let eye_stats = renderer.encode_hooked(
             &mut encoder,
             &eye.target,
             eye.size,
@@ -95,6 +105,7 @@ pub(super) fn encode_eyes<const ASSETS: bool>(
             poses,
             None,
         )?;
+        stats.add(&eye_stats);
         queue.submit([encoder.finish()]);
         renderer.submitted();
     }

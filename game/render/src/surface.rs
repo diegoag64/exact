@@ -613,6 +613,10 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         format: wgpu::TextureFormat,
     ) -> Option<bool> {
         let first = &views.first()?.target;
+        // A host that draws only immersive frames need not announce them.
+        if self.xr_format.is_none() {
+            self.immersive_format(Some(format));
+        }
         self.perf.measure_frame = false;
         self.perf.live = !frame.seekable;
         self.perf.rendering = true;

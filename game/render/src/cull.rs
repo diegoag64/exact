@@ -678,9 +678,12 @@ impl Cull {
                 })
             })
         });
+        crate::counters::pass();
         let mut pass = encoder.begin_compute_pass(&Default::default());
+        crate::counters::pipeline();
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bind, &[]);
+        crate::counters::commands(1);
         pass.dispatch_workgroups(self.chunks.min(65535), self.chunks.div_ceil(65535), 1);
         Some(out)
     }
@@ -713,6 +716,7 @@ impl Cull {
         .into_iter()
         .enumerate()
         {
+            crate::counters::pass();
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("game cull"),
                 timestamp_writes: timestamps
@@ -725,8 +729,10 @@ impl Cull {
                     })
                     .filter(|_| stage != 1),
             });
+            crate::counters::pipeline();
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind, &[]);
+            crate::counters::commands(1);
             pass.dispatch_workgroups(size.0, size.1, 1);
         }
         true

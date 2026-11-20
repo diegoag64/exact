@@ -27,6 +27,8 @@ pub(super) struct Resolved {
     pub times: [Option<f64>; 6],
     /// Engine draws beyond the retained per-batch count.
     pub draws: u32,
+    /// Of `draws`, the sun shadow cascades' caster groups.
+    pub shadow_draws: u32,
     pub hull_instances: u64,
     pub hull_triangles: u64,
 }
@@ -115,6 +117,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             self.hook_metrics = Some(Box::default());
         }
         let mut ran_hook_stage = false;
+        let began = crate::counters::begin();
         let result = self.encode_frame(
             encoder,
             target,
@@ -134,7 +137,14 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 self.probe.is_none(),
             );
         }
-        result
+        result.map(|mut stats| {
+            let counts = crate::counters::take();
+            stats.passes = counts.passes;
+            stats.pipelines = counts.pipelines;
+            stats.commands = counts.commands;
+            stats.encode_ms = began.elapsed_ms();
+            stats
+        })
     }
 
     // Order: skinning → hook compute → culling → shadows → forward (opaque, hook
@@ -275,6 +285,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             &self.targets,
             frame.water.map(|_| crate::water::from_above(frame)),
             shafts,
+            direct,
         );
         let cascades = self.prepare_effects(frame);
         let map = frame.environment_map.and_then(|m| {
@@ -412,6 +423,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             direct,
             times,
             draws: 0,
+            shadow_draws: 0,
             hull_instances: 0,
             hull_triangles: 0,
         };
@@ -449,7 +461,8 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             self.mark(timing::CULL);
         }
         self.encode_local_culls(encoder);
-        state.draws += self.encode_shadows(encoder, frame, hooks.materials(), cached_shadows);
+        state.shadow_draws = self.encode_shadows(encoder, frame, hooks.materials(), cached_shadows);
+        state.draws += state.shadow_draws;
         state.draws += self.encode_local_shadows(encoder, hooks.materials(), frame.timestamps);
         state.draws += self.encode_depth_prepass(encoder, frame, state.size, state.direct);
         self.encode_forward(encoder, target, &mut state, frame, hooks, &view)?;
@@ -524,13 +537,19 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
     /// 32,000-cube frame).
     fn direct_frame<H: crate::Hooks>(&self, frame: &FrameInput<'_>, soft: bool) -> bool {
         let blends = self.quads.draws.iter().any(|d| !self.quads.opaque(d));
-        self.allow_direct
+        // The immersive profile draws its water surface with a direct
+        // pipeline, and lets what blends blend after the tone curve: a tiler
+        // then keeps the frame, its samples and their resolve in tile memory.
+        let immersive = self.immersive;
+        (self.allow_direct || immersive)
             && !H::ENABLED
             && frame.environment.bloom.is_none()
             && frame.ambient_occlusion.is_none()
-            && frame.water.is_none()
+            && (frame.water.is_none()
+                || (immersive && !crate::water::shafts(frame, self.water_effects)))
             && !soft
             && (!blends
+                || immersive
                 || (frame.environment.tone_mapping == exact_game::ToneMapping::None
                     && self.pipelines.format().is_srgb()))
     }
@@ -830,6 +849,11 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         }
         let (poses, indices) = (&self.models.poses, &self.models.pose_indices);
         let words = &self.attachment_words;
+        let bias = if self.immersive {
+            crate::profile::LOD_BIAS
+        } else {
+            1.
+        };
         let distance = |e: &crate::lod::Lod| {
             let position = attachment_matrix(words, e.slot).map_or_else(
                 || {
@@ -838,7 +862,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 },
                 |m| m.w_axis.truncate(),
             );
-            position.distance(frame.camera_position)
+            position.distance(frame.camera_position) * bias
         };
         self.levels.select(distance);
         if let Some(probe) = &mut self.probe {
@@ -927,6 +951,9 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         stats.texture_creations = self.texture_creations;
         stats.direct_frames = self.direct_frames;
         stats.stereo_frames = self.stereo_frames;
+        stats.shadow_draws = state.shadow_draws;
+        stats.cascades = self.shadows.as_ref().map_or(0, |s| s.count);
+        stats.samples = self.pipelines.samples;
         if H::ENABLED {
             let needs = state.needs;
             let metrics = self.hook_metrics.as_mut().unwrap();

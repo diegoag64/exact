@@ -206,6 +206,11 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
     pub fn sim(&self) -> Option<&Sim<G>> {
         self.sim.as_ref()
     }
+    /// The last drawn frame's renderer work; an immersive frame's is both
+    /// eyes' together (`Stats::add`).
+    pub fn stats(&self) -> crate::Stats {
+        self.perf.stats
+    }
     /// Read presentation diagnostics owned by this canvas's render hooks.
     pub fn render_hooks(&self) -> &H {
         &self.hooks
@@ -257,9 +262,10 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
                     device,
                     queue,
                     format,
-                    *self
-                        .samples
-                        .insert(crate::quality::samples(self.rung, G::samples(sim.args()))),
+                    *self.samples.insert(crate::quality::samples(
+                        frame_rung(self.rung, self.xr_format.is_some(), G::quality(sim.args())),
+                        G::samples(sim.args()),
+                    )),
                     G::DEPTH_PREPASS,
                 )
                 .with_matte_models(G::MATTE_MODELS),
@@ -516,9 +522,10 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
                     device,
                     queue,
                     format,
-                    *self
-                        .samples
-                        .insert(crate::quality::samples(self.rung, G::samples(sim.args()))),
+                    *self.samples.insert(crate::quality::samples(
+                        frame_rung(self.rung, xr.is_some(), G::quality(sim.args())),
+                        G::samples(sim.args()),
+                    )),
                     G::DEPTH_PREPASS,
                 )
                 .with_matte_models(G::MATTE_MODELS),
@@ -671,10 +678,13 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             trace.pointer = pointer;
         }
         let mut input = feed.frame_pixels(sim.world(), sim.alpha(), (frame.width, frame.height));
-        if let Some(rung) = self.rung {
+        if let Some(rung) = frame_rung(self.rung, xr.is_some(), G::quality(sim.args())) {
             let authored = sim.world().try_resource::<exact_game::Shadows>().is_some();
-            rung.clamp(&mut input, authored);
+            // The immersive profile fits the sun's shadow to the game's stage.
+            let stage = rung.xr.then(|| G::xr_stage(sim.world(), sim.args()));
+            rung.clamp_staged(&mut input, authored, stage.as_ref());
             renderer.set_water_effects(rung.water_effects());
+            renderer.set_immersive(rung.xr);
         }
         // Every pixel the renderer stores has alpha one: each clear of the
         // output stores one, opaque draws write one, and every blend composes
@@ -984,4 +994,20 @@ pub(super) fn append_trace(
     events.push(']');
     out.push_str(",\"traceEvents\":");
     out.push_str(&events);
+}
+
+/// The rung a frame draws at: the resolved one, the immersive profile's for
+/// an immersive frame (resolved here if no binding did yet).
+pub(super) fn frame_rung(
+    rung: Option<crate::quality::Rung>,
+    immersive: bool,
+    asked: exact_game::Quality,
+) -> Option<crate::quality::Rung> {
+    if !immersive {
+        return rung;
+    }
+    Some(
+        rung.unwrap_or_else(|| crate::quality::Rung::resolve(asked, exact_gpu::tier()))
+            .immersive(),
+    )
 }

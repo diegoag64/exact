@@ -201,6 +201,7 @@ impl Ssao {
         .into_iter()
         .enumerate()
         {
+            crate::counters::pass();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("game SSAO"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -227,8 +228,10 @@ impl Ssao {
                 size
             };
             crate::renderer::viewport(&mut pass, at);
+            crate::counters::pipeline();
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, bind, &[]);
+            crate::counters::commands(1);
             pass.draw(0..3, 0..1);
         }
     }

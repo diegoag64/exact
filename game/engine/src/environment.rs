@@ -333,6 +333,13 @@ pub enum Quality {
     Mid,
     /// Everything the game asks for.
     High,
+    /// The immersive profile on every frame (`exact_game_render::profile`):
+    /// what a headset draws, one sun cascade fitted to `Game::xr_stage`, no
+    /// bloom, a lean water surface, tonemapped straight into the target, and
+    /// models' coarse levels of detail sooner. An immersive frame takes it
+    /// whatever the rung; this asks for it on a flat screen, to measure or
+    /// look at a headset's picture on a desktop.
+    Xr,
 }
 
 /// Height fog, or near/far fog along the camera's forward axis.

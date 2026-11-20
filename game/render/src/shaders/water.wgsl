@@ -64,5 +64,12 @@ struct WaterFragment {
     let clip = frame.view_proj * vec4(hit, 1.0);
     let z = clamp(clip.z / clip.w, 0.0, 0.9999999);
     let split = frame.water.w;
-    return WaterFragment(vec4(finite_hdr(color), alpha), split + z * (1.0 - split));
+    let depth = split + z * (1.0 - split);
+    if DIRECT {
+        // A direct frame (the immersive profile): tonemap the unpremultiplied
+        // colour and premultiply again, so the blend mixes display values.
+        let shown = tonemap(finite_hdr(color) / max(alpha, 1.0e-4)).rgb * alpha;
+        return WaterFragment(vec4(shown, alpha), depth);
+    }
+    return WaterFragment(vec4(finite_hdr(color), alpha), depth);
 }

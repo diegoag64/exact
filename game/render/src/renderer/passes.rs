@@ -83,6 +83,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             let mesh = &self.meshes[self.batches[self.cull.groups[group].batch].mesh.0];
             bound.scene(pass, &self.scene_binds[self.current], 0);
             bound.flush(pass);
+            crate::counters::commands(1);
             pass.draw_indexed(
                 mesh.indices.clone(),
                 mesh.base_vertex,
@@ -105,6 +106,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         if self.cull.direct {
             let mesh = &self.meshes[self.batches[self.cull.groups[group].batch].mesh.0];
             bound.scene(pass, &self.scene_binds[self.current], 0);
+            crate::counters::commands(1);
             pass.draw_indexed(
                 mesh.indices.clone(),
                 0,
@@ -113,6 +115,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         } else {
             let (region, _) = self.cull.draw(0, group);
             bound.scene(pass, &self.culled_binds[self.current], region);
+            crate::counters::commands(1);
             pass.draw_indexed_indirect(&self.cull.indirect.raw, self.cull.hull_draw(group));
         }
     }
@@ -137,6 +140,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 && timing::encoder_stamp(&self.device, encoder, frame.timestamps, i as u32, false);
             if let Some(cache) = cache {
                 if cache.dirty && self.probe.is_none() {
+                    crate::counters::pass();
                     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                         label: Some("game static sun casters"),
                         color_attachments: &[],
@@ -176,6 +180,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 self.probe_note(|| Drew::Summary("cached sun casters"));
             }
             let copied = cache.is_some_and(|c| c.copy(encoder, shadows.view.texture(), i));
+            crate::counters::pass();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("game sun shadow"),
                 color_attachments: &[],
@@ -225,6 +230,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
     /// (occlusion.rs).
     pub(super) fn encode_occluders(&self, encoder: &mut wgpu::CommandEncoder) {
         let occlusion = self.occlusion.as_ref().unwrap();
+        crate::counters::pass();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("game occluders"),
             color_attachments: &[],
@@ -240,6 +246,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             occlusion_query_set: None,
             multiview_mask: None,
         });
+        crate::counters::pipeline();
         pass.set_pipeline(occlusion.occluder());
         pass.set_vertex_buffer(0, self.vertices.raw.slice(..));
         pass.set_index_buffer(self.indices.raw.slice(..), wgpu::IndexFormat::Uint32);
@@ -320,6 +327,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         // A direct frame draws into the target, through its own MSAA attachment at
         // 4x, which resolves into the target after the frame's last pass.
         let direct = state.direct.then(|| self.direct_attachments());
+        crate::counters::pass();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("game forward"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -479,12 +487,14 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         state.hull_instances += hulls.instances;
         state.hull_triangles += hulls.triangles;
         if frame::has_sky(frame, self.sky_ready) {
+            crate::counters::pipeline();
             pass.set_pipeline(if state.direct {
                 self.pipelines.sky_direct(&self.device)
             } else {
                 &self.pipelines.sky
             });
             pass.set_bind_group(0, &self.scene_binds[self.current], &[0]);
+            crate::counters::commands(1);
             pass.draw(0..3, 0..1);
             self.probe_note(|| Drew::Fixed("sky"));
             state.draws += 1;
@@ -505,7 +515,12 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             // A background hook may have left its own viewport and scissor.
             self.scene_viewport(&mut pass, state.size, false);
             let above = crate::water::from_above(frame);
-            (self.water).draw_surface(&mut pass, &self.scene_binds[self.current], above);
+            (self.water).draw_surface(
+                &mut pass,
+                &self.scene_binds[self.current],
+                above,
+                state.direct,
+            );
             self.probe_note(|| Drew::Fixed("water surface"));
             state.draws += 1;
         }
@@ -546,6 +561,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             (d.color.as_ref().unwrap_or(target), &d.depth)
         });
         let resolved = direct.map_or(&self.targets.resolved, |_| target);
+        crate::counters::pass();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("game translucent"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -609,6 +625,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 self.targets.color.texture().size(),
             );
         }
+        crate::counters::pass();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("game surface + translucent"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -719,6 +736,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             }
             state.draws += passes;
         }
+        crate::counters::pass();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("game ACES"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -741,6 +759,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             multiview_mask: self.view_mask(),
         });
         viewport(&mut pass, state.size);
+        crate::counters::pipeline();
         pass.set_pipeline(&self.pipelines.tone[usize::from(self.bloom.is_some())]);
         if let Some(bloom) = &self.bloom {
             pass.set_bind_group(1, &bloom.binds[0], &[0]);
@@ -752,6 +771,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 .map_or(&self.targets.tone_bind, |t| t.tone(&self.targets.tone_bind)),
             &[],
         );
+        crate::counters::commands(1);
         pass.draw(0..3, 0..1);
         Ok(())
     }
@@ -793,6 +813,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 let mirrored = self.slot_mirrored(self.slot_list[slot as usize], frame);
                 let key = model_frame.blended(material, mirrored);
                 self.probe_variant(key);
+                crate::counters::pipeline();
                 pass.set_pipeline(self.pipelines.model_variant(&self.device, key, false));
                 pass.set_bind_group(0, &self.scene_binds[self.current], &[0]);
                 pass.set_bind_group(1, &self.shadow_sample, &[]);
@@ -805,6 +826,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                     variant: None,
                     mirrored,
                 });
+                crate::counters::commands(1);
                 pass.draw_indexed(mesh.indices.clone(), mesh.base_vertex, slot..slot + 1);
                 Probe::end(pass, began);
             } else {
@@ -857,6 +879,9 @@ impl<'a> Bound<'a> {
     }
     /// Issue the held draws.
     pub fn flush(&mut self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.run.is_some() {
+            crate::counters::commands(1);
+        }
         match self.run.take() {
             Some((buffer, offset, 1)) => pass.draw_indexed_indirect(buffer, offset),
             Some((buffer, offset, count)) => {
@@ -875,6 +900,7 @@ impl<'a> Bound<'a> {
         const ARGS: u64 = size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64;
         if !self.merge || std::mem::take(&mut self.single) {
             self.flush(pass);
+            crate::counters::commands(1);
             pass.draw_indexed_indirect(buffer, offset);
             return;
         }
@@ -894,6 +920,7 @@ impl<'a> Bound<'a> {
     ) {
         if self.pipeline != Some(pipeline) {
             self.flush(pass);
+            crate::counters::pipeline();
             pass.set_pipeline(pipeline);
             self.pipeline = Some(pipeline);
         }

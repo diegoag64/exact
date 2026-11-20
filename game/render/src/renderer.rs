@@ -139,6 +139,8 @@ pub struct RendererWithAssets<const ASSETS: bool> {
     ssao: Option<crate::ssao::Ssao>,
     pub(crate) water: crate::water::Passes,
     water_effects: crate::WaterEffects,
+    /// The immersive profile (`crate::profile`, `set_immersive`).
+    pub(crate) immersive: bool,
     texture_creations: u64,
     hook_binding: Option<crate::hooks::FrameBinding>,
     custom_bindings: Option<crate::hooks::MaterialBindings>,
@@ -228,6 +230,14 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
     /// a present-time choice that leaves the saved resource as it is.
     pub fn set_water_effects(&mut self, effects: crate::WaterEffects) {
         self.water_effects = effects;
+    }
+
+    /// Draw frames under the immersive profile (`crate::profile`): direct
+    /// whenever nothing after the forward pass reads an HDR image, water
+    /// included and blends after the tone curve, and models' coarse levels
+    /// of detail at `profile::LOD_BIAS` times the eye's distance.
+    pub fn set_immersive(&mut self, on: bool) {
+        self.immersive = on;
     }
 
     /// Select diffuse-only lighting before preparing any models. Default: physical.
@@ -454,6 +464,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             ssao: None,
             water: Default::default(),
             water_effects: Default::default(),
+            immersive: false,
             texture_creations: if samples == 1 { 3 } else { 4 },
             hook_binding: None,
             custom_bindings: None,
