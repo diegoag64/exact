@@ -257,7 +257,10 @@ fn surface_pipeline(
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("game water surface"),
-        source: wgpu::ShaderSource::Wgsl(crate::pipeline::water_source().into()),
+        source: wgpu::ShaderSource::Wgsl(match pipelines.multiview {
+            Some(_) => crate::stereo::multiview_source(&crate::pipeline::water_source()).into(),
+            None => crate::pipeline::water_source().into(),
+        }),
     });
     // Premultiplied: opaque from below, the sky's reflection over the floor from above.
     let over = wgpu::BlendComponent {
@@ -270,7 +273,8 @@ fn surface_pipeline(
         dst_factor: wgpu::BlendFactor::One,
         operation: wgpu::BlendOperation::Add,
     };
-    crate::pipeline::make_pipeline(
+    crate::pipeline::make_pipeline_views(
+        pipelines.multiview,
         device,
         pipelines.cache.handle.as_ref(),
         &shader,

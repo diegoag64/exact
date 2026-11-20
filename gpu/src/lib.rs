@@ -73,7 +73,7 @@ pub use tier::{set_thread_tier, set_tier, tier, GpuTier};
 mod storage;
 mod uniform;
 mod xr;
-pub use xr::{XrEye, XrScratch, XrView};
+pub use xr::{XrEye, XrScratch, XrStereo, XrView};
 #[cfg(windows)]
 mod window;
 pub use uniform::FrameUniform;
@@ -348,6 +348,24 @@ pub trait Surface {
         _format: wgpu::TextureFormat,
     ) -> Option<bool> {
         None
+    }
+    /// One stereo frame (OpenXR on a headset): advance once, then draw both
+    /// eyes of `stereo` into its two-layer array target (of `format`). The
+    /// surface records and submits its own commands, as in
+    /// [`Surface::render_xr`]. The default draws each eye on its own through
+    /// `render_xr`, into a view of its layer; a surface that draws both in one
+    /// multiview pass (`wgpu::Features::MULTIVIEW`) overrides it. None when
+    /// this surface draws no immersive frames.
+    fn render_xr_stereo(
+        &mut self,
+        frame: &Frame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stereo: &XrStereo,
+        format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        let views = stereo.layer_views(format);
+        self.render_xr(frame, device, queue, &views, format)
     }
     /// Whether the last render completed the current picture, qualifying its
     /// `presented` record. Native presentation follows [`Surface::frame_presentable`].

@@ -45,6 +45,8 @@ mod shadows;
 pub mod shapes;
 mod skinning;
 mod ssao;
+mod stereo;
+pub use stereo::{shared_camera, Eye as StereoEye};
 mod surface;
 pub mod tells;
 mod timing;

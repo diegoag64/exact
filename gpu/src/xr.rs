@@ -22,6 +22,56 @@ pub struct XrView {
     pub projection: [f32; 16],
 }
 
+/// Both eyes of one stereo frame in a two-layer array target: layer 0 the
+/// left eye, layer 1 the right (OpenXR's view order). A host whose swapchain
+/// is an array of two layers (a Quest's) lends it whole, so a surface can draw
+/// both eyes in one multiview pass ([`crate::Surface::render_xr_stereo`]).
+pub struct XrStereo {
+    /// `D2` texture of two array layers, in the swapchain's format, with
+    /// `RENDER_ATTACHMENT` usage.
+    pub target: wgpu::Texture,
+    /// Width and height in pixels of each layer.
+    pub size: (u32, u32),
+    /// Reference space → eye, column-major, per layer.
+    pub views: [[f32; 16]; 2],
+    /// Eye → clip, column-major, 0–1 depth, per layer.
+    pub projections: [[f32; 16]; 2],
+}
+
+impl XrStereo {
+    /// The whole target as one `D2Array` view of both layers: a multiview
+    /// pass's colour attachment.
+    pub fn array_view(&self, format: wgpu::TextureFormat) -> wgpu::TextureView {
+        self.target.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("exact xr stereo"),
+            format: Some(format),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            base_array_layer: 0,
+            array_layer_count: Some(2),
+            ..Default::default()
+        })
+    }
+    /// Each eye on its own: a `D2` view of its layer and its matrices, as
+    /// [`crate::Surface::render_xr`] draws them.
+    pub fn layer_views(&self, format: wgpu::TextureFormat) -> Vec<XrView> {
+        (0..2)
+            .map(|layer| XrView {
+                target: self.target.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("exact xr eye"),
+                    format: Some(format),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: layer as u32,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                }),
+                size: (self.size.0.max(1), self.size.1.max(1)),
+                view: self.views[layer],
+                projection: self.projections[layer],
+            })
+            .collect()
+    }
+}
+
 /// One eye as the host lends it: the session's texture, the array layer and
 /// region of it this eye owns, and its matrices.
 pub struct XrEye {
@@ -68,6 +118,65 @@ impl Module {
             .config
             .as_ref()
             .map(crate::view_format)
+    }
+
+    /// Draw one stereo frame of canvas `id` into `stereo`'s two layers (in
+    /// `format`) and submit it: the surface ticks once and draws both eyes,
+    /// in one multiview pass where it and the device can
+    /// ([`crate::Surface::render_xr_stereo`]). Whether the surface wants
+    /// another frame; None on failure ([`Module::error`] says why).
+    pub fn render_xr_stereo(
+        &mut self,
+        id: u32,
+        now_ms: f64,
+        format: wgpu::TextureFormat,
+        stereo: &XrStereo,
+    ) -> Option<bool> {
+        if let Some(error) = self.refused_instance(id) {
+            return self.fail(error);
+        }
+        if stereo.target.depth_or_array_layers() < 2 {
+            return self.fail("a stereo frame's target has fewer than two layers");
+        }
+        self.check_device();
+        self.settle(id);
+        let timing = self.timing(id, now_ms);
+        let (seekable, period_ms) = (self.seekable, self.period_ms);
+        let Some(gpu) = self.gpu.as_ref() else {
+            return self.fail("no device");
+        };
+        let Some(inst) = self.instances.get_mut(&id) else {
+            return self.fail("no such canvas");
+        };
+        if !inst.bound {
+            return Some(false);
+        }
+        inst.surface.immersive(Some(format));
+        let frame = Frame {
+            width: stereo.size.0.max(1) as f32,
+            height: stereo.size.1.max(1) as f32,
+            scale: 1.0,
+            now_ms,
+            seekable,
+            period_ms,
+            children_generation: inst.children_generation,
+            shader_generation: shaders::shader_generation(),
+            headroom: 1.0,
+        };
+        inst.surface.timing(&timing);
+        let wants = inst
+            .surface
+            .render_xr_stereo(&frame, &gpu.device, &gpu.queue, stereo, format);
+        inst.drain();
+        if let Some(crate::SurfaceError(e)) = inst.surface.take_error() {
+            return self.fail(e);
+        }
+        let Some(wants) = wants else {
+            return self.fail("this canvas draws no immersive frames");
+        };
+        inst.surface.submitted();
+        inst.dirty = true;
+        Some(wants)
     }
 
     /// Draw one immersive frame of canvas `id` into `eyes` (in `format`) and

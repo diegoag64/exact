@@ -280,7 +280,7 @@ impl Quads {
             &[Some(&self.layout), texture, soft_layout, Some(&*layout)],
             usize::from(additive) + 2,
             entry,
-            (samples, direct.then_some(self.format)),
+            (samples, direct.then_some(self.format), None),
         ));
     }
 }

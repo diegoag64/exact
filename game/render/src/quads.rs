@@ -113,9 +113,34 @@ impl Direct {
         count
     }
 }
+/// A stereo frame's quad pipelines, while the renderer's own are in use
+/// (`Quads::swap_views`).
+#[derive(Default)]
+pub(crate) struct QuadViews {
+    multiview: Option<std::num::NonZeroU32>,
+    direct: Direct,
+    sprite_shader: Option<wgpu::ShaderModule>,
+    particle_shader: Option<wgpu::ShaderModule>,
+    textured: Option<[wgpu::RenderPipeline; 2]>,
+    particles: Option<[wgpu::RenderPipeline; 2]>,
+    sprites: Option<[wgpu::RenderPipeline; 3]>,
+    #[cfg(not(target_arch = "wasm32"))]
+    child: Option<wgpu::RenderPipeline>,
+}
+impl QuadViews {
+    pub fn stereo() -> Self {
+        Self {
+            multiview: Some(crate::stereo::MASK),
+            ..Default::default()
+        }
+    }
+}
 pub(crate) struct Quads {
     cache: Option<wgpu::PipelineCache>,
     samples: u32,
+    /// The views its frame-pass pipelines draw: a stereo frame's while one
+    /// is swapped in (`swap_views`).
+    multiview: Option<std::num::NonZeroU32>,
     /// The renderer's output format, which direct pipelines draw in.
     format: wgpu::TextureFormat,
     direct: Direct,
@@ -228,6 +253,7 @@ impl Quads {
         let mut result = Self {
             cache: cache.cloned(),
             samples,
+            multiview: None,
             format,
             direct: Direct::default(),
             sprite_shader: None,
@@ -420,7 +446,7 @@ impl Quads {
                 &shader,
                 &[&self.layout, texture],
                 i,
-                (self.samples, None),
+                (self.samples, None, self.multiview),
             )
         }));
     }
@@ -437,7 +463,7 @@ impl Quads {
             &shader,
             &[&self.layout, self.texture_layout.as_ref().unwrap()],
             4,
-            (self.samples, None),
+            (self.samples, None, self.multiview),
         ));
     }
     pub fn prepare(&mut self, d: &wgpu::Device, q: &wgpu::Queue) {
@@ -489,33 +515,10 @@ impl Quads {
         self.order.reserve(entries.saturating_sub(self.order.len()));
         self.draws.reserve(entries.saturating_sub(self.draws.len()));
         if !self.looks.is_empty() && self.textured_pipelines.is_none() {
-            self.texture_layout(d);
-            let shader = self.sprite_shader(d);
-            let texture = self.texture_layout.as_ref().unwrap();
-            // Textured particles: straight alpha or additive, like dots.
-            self.textured_pipelines = Some(std::array::from_fn(|i| {
-                pipeline(
-                    d,
-                    self.cache.as_ref(),
-                    &shader,
-                    &[&self.layout, texture],
-                    i + 2,
-                    (self.samples, None),
-                )
-            }));
+            self.make_textured(d);
         }
         if particles > 0 && self.particle_pipelines.is_none() {
-            let shader = self.particle_shader(d);
-            self.particle_pipelines = Some(std::array::from_fn(|i| {
-                pipeline(
-                    d,
-                    self.cache.as_ref(),
-                    &shader,
-                    &[&self.layout],
-                    i + 2,
-                    (self.samples, None),
-                )
-            }));
+            self.make_particles(d);
         }
         if self.wants_soft() && self.soft_pipelines.is_none() {
             self.texture_layout(d);
@@ -565,7 +568,7 @@ impl Quads {
                     &[Some(&self.layout), group, Some(&soft)],
                     i % 2 + 2,
                     "quad_soft_fs",
-                    (self.samples, None),
+                    (self.samples, None, None),
                 )
             }));
             self.soft_uniform = Some(d.create_buffer(&wgpu::BufferDescriptor {
@@ -578,18 +581,88 @@ impl Quads {
         }
     }
     fn sprite_shader(&mut self, d: &wgpu::Device) -> wgpu::ShaderModule {
+        let views = self.multiview;
         self.sprite_shader
-            .get_or_insert_with(|| module(d, crate::pipeline::quad_module("sprite", "plain", 1)))
+            .get_or_insert_with(|| plain_module(d, "sprite", views))
             .clone()
     }
     fn particle_shader(&mut self, d: &wgpu::Device) -> wgpu::ShaderModule {
+        let views = self.multiview;
         self.particle_shader
-            .get_or_insert_with(|| module(d, crate::pipeline::quad_module("particle", "plain", 1)))
+            .get_or_insert_with(|| plain_module(d, "particle", views))
             .clone()
+    }
+    /// Swap in (or back out) a stereo frame's quad pipelines (`stereo.rs`):
+    /// what draws in the frame pass. The stereo set makes the HDR pipelines
+    /// this set has made; direct ones are made at their first frame as
+    /// always. Soft particles and a look frame's counters stay single-view:
+    /// a stereo frame draws no soft particles and counts nothing.
+    pub fn swap_views(&mut self, d: &wgpu::Device, views: &mut QuadViews) {
+        let had = (
+            self.textured_pipelines.is_some(),
+            self.particle_pipelines.is_some(),
+            self.sprite_pipelines.is_some(),
+        );
+        #[cfg(not(target_arch = "wasm32"))]
+        let had_child = self.child_pipeline.is_some();
+        std::mem::swap(&mut self.multiview, &mut views.multiview);
+        std::mem::swap(&mut self.direct, &mut views.direct);
+        std::mem::swap(&mut self.sprite_shader, &mut views.sprite_shader);
+        std::mem::swap(&mut self.particle_shader, &mut views.particle_shader);
+        std::mem::swap(&mut self.textured_pipelines, &mut views.textured);
+        std::mem::swap(&mut self.particle_pipelines, &mut views.particles);
+        std::mem::swap(&mut self.sprite_pipelines, &mut views.sprites);
+        #[cfg(not(target_arch = "wasm32"))]
+        std::mem::swap(&mut self.child_pipeline, &mut views.child);
+        if self.multiview.is_none() {
+            return;
+        }
+        if had.0 && self.textured_pipelines.is_none() {
+            self.make_textured(d);
+        }
+        if had.1 && self.particle_pipelines.is_none() {
+            self.make_particles(d);
+        }
+        if had.2 {
+            self.prepare_sprites(d);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if had_child {
+            self.prepare_children(d);
+        }
+    }
+    fn make_textured(&mut self, d: &wgpu::Device) {
+        self.texture_layout(d);
+        let shader = self.sprite_shader(d);
+        let texture = self.texture_layout.as_ref().unwrap();
+        // Textured particles: straight alpha or additive, like dots.
+        self.textured_pipelines = Some(std::array::from_fn(|i| {
+            pipeline(
+                d,
+                self.cache.as_ref(),
+                &shader,
+                &[&self.layout, texture],
+                i + 2,
+                (self.samples, None, self.multiview),
+            )
+        }));
+    }
+    fn make_particles(&mut self, d: &wgpu::Device) {
+        let shader = self.particle_shader(d);
+        self.particle_pipelines = Some(std::array::from_fn(|i| {
+            pipeline(
+                d,
+                self.cache.as_ref(),
+                &shader,
+                &[&self.layout],
+                i + 2,
+                (self.samples, None, self.multiview),
+            )
+        }));
     }
     /// Make the direct pipelines this frame's draws use (after `order`).
     pub fn prepare_direct(&mut self, d: &wgpu::Device) {
-        let target = (self.samples, Some(self.format));
+        let target = (self.samples, Some(self.format), self.multiview);
         for i in 0..self.draws.len() {
             match self.draws[i].kind {
                 Kind::Particle(_, NO_LOOK, _, _) | Kind::Primitive(_)
@@ -1230,6 +1303,19 @@ fn quad(p: Vec3, x: Vec3, y: Vec3, c: [f32; 4], uv: [f32; 4], mode: f32, cutoff:
         ],
     }
 }
+/// A plain quad module (`base` `particle` or `sprite`), multiview for a
+/// stereo set.
+fn plain_module(
+    d: &wgpu::Device,
+    base: &str,
+    views: Option<std::num::NonZeroU32>,
+) -> wgpu::ShaderModule {
+    let source = crate::pipeline::quad_module(base, "plain", 1);
+    match views {
+        Some(_) => module(d, &crate::stereo::multiview_source(source)),
+        None => module(d, source),
+    }
+}
 fn module(d: &wgpu::Device, source: &str) -> wgpu::ShaderModule {
     d.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("game quad"),
@@ -1242,7 +1328,11 @@ fn pipeline(
     shader: &wgpu::ShaderModule,
     layouts: &[&wgpu::BindGroupLayout],
     mode: usize,
-    target: (u32, Option<wgpu::TextureFormat>),
+    target: (
+        u32,
+        Option<wgpu::TextureFormat>,
+        Option<std::num::NonZeroU32>,
+    ),
 ) -> wgpu::RenderPipeline {
     let layouts: Vec<_> = layouts.iter().map(|l| Some(*l)).collect();
     pipeline_entry(d, cache, shader, &layouts, mode, "quad_fs", target)
@@ -1254,7 +1344,11 @@ fn pipeline_entry(
     layouts: &[Option<&wgpu::BindGroupLayout>],
     mode: usize,
     fragment: &str,
-    (samples, direct): (u32, Option<wgpu::TextureFormat>),
+    (samples, direct, multiview): (
+        u32,
+        Option<wgpu::TextureFormat>,
+        Option<std::num::NonZeroU32>,
+    ),
 ) -> wgpu::RenderPipeline {
     let layout = d.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("game quad"),
@@ -1329,7 +1423,7 @@ fn pipeline_entry(
                 count: samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: multiview,
             cache,
         })
     })
