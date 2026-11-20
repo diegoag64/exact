@@ -367,6 +367,13 @@ pub trait Surface {
         let views = stereo.eye_views(format);
         self.render_xr(frame, device, queue, &views, format)
     }
+    /// How the last stereo frame was drawn, for a host's log: `multiview` (both
+    /// eyes in one pass) or `per-eye`, then `direct` (tonemapped straight into
+    /// the target) or `hdr`, then the scene's samples (`multiview-direct-4x`).
+    /// The default draws each eye on its own.
+    fn xr_stereo_mode(&self) -> &'static str {
+        "per-eye"
+    }
     /// Whether the last render completed the current picture, qualifying its
     /// `presented` record. Native presentation follows [`Surface::frame_presentable`].
     fn frame_ready(&self) -> bool {

@@ -51,8 +51,12 @@ Android):
 2. Making the device (`gpu_prepare`, at boot): OpenXR instance and system,
    then `XR_KHR_vulkan_enable2`: the runtime makes the `VkInstance` (with the
    extensions wgpu-hal wants) and the `VkDevice` (wgpu-hal's extensions and
-   features for the granted wgpu features, `MULTIVIEW` included where the GPU
-   has it, Vulkan 1.1, queue family 0 / index 0 as wgpu-hal opens). wgpu wraps
+   features for the granted wgpu features, Vulkan 1.1, queue family 0 /
+   index 0 as wgpu-hal opens). Where the GPU has them, the device also gets
+   `MULTIVIEW` with `max_multiview_view_count = 2` (wgpu's default limit is
+   0, which refuses a two-view pass) and `MULTISAMPLE_ARRAY`, for single-pass
+   stereo at 4x; the log line `device … multiview … multisample array …`
+   says what was granted. wgpu wraps
    both (`Instance::from_raw`, `expose_adapter`, `device_from_raw`,
    `create_adapter_from_hal`, `create_device_from_hal`), and the session is
    made on that device. With no loader or runtime (a phone) the device is made
@@ -97,9 +101,30 @@ fn render_xr_stereo(&mut self, frame: &Frame, device: &wgpu::Device, queue: &wgp
 ```
 
 The default draws each layer through `Surface::render_xr` (the WebXR per-eye
-path: one encode and submit per eye) using `XrStereo::eye_views`. A
-single-pass (multiview) renderer overrides it and draws `XrStereo::array_view`
-in one pass; the device has `wgpu::Features::MULTIVIEW` where the GPU does.
+path: one encode and submit per eye) using `XrStereo::eye_views`. The game
+renderer (`game/render/src/surface/xr.rs`, `encode_stereo`) overrides it and
+draws `XrStereo::array_view` in one multiview pass (`game/render/src/stereo.rs`):
+the frame's shared work (skinning, cull, the sun's shadow, light lists, levels
+of detail, translucent order) once on a camera whose frustum holds both eyes',
+the forward and translucent passes with `@builtin(view_index)`. Without
+`MULTIVIEW` (or `MULTISAMPLE_ARRAY` at 4x) it falls back to per eye.
+`Surface::xr_stereo_mode` says which ran (`multiview-direct-4x`, …).
+
+Every immersive frame takes the immersive quality profile
+(`game/render/src/profile.rs`): direct frames (shaded and tonemapped straight
+into the eye's sRGB layer, no HDR image or tone pass), 4x MSAA resolved at
+the end of the pass, one 1024² sun shadow layer fit to `XrStage::extent` and
+cached for what stands still, no bloom, ambient occlusion, caustics or water
+shafts, at most 8 local lights, and models' coarse levels at 3× the eye's
+distance. Stereo frames also skip render hooks and soft particles.
+
+The MSAA attachments: on the per-eye path they are single-layer and
+`TRANSIENT_ATTACHMENT` (lazily allocated memory on Adreno, never in DRAM). A
+multiview frame's are two-layer, and wgpu 30 refuses transient textures of
+more than one layer (`InvalidTransientTextureLayerCount`), so they take real
+memory: at 1680×1760 a layer, 4x colour (RGBA8) and depth (Depth32Float)
+are 2 × 90 MiB = 180 MiB. Their contents are still discarded at the end of
+the pass, so on a tiler they cost memory, not bandwidth.
 
 ## Build, install, run
 
@@ -124,9 +149,11 @@ Unknown Sources.
 
 - `adb logcat -s exact-xr` (the module's lines): the runtime, the device, the
   swapchain, every session state, `first frame submitted`, and once a second
-  `perf fps=… cpu_ms=… encode_ms=… worst_ms=… wait_ms=… skipped=…`
-  (`cpu_ms` from `xrBeginFrame` to `xrEndFrame`, `encode_ms` the canvas's
-  stereo draw, `wait_ms` the time in `xrWaitFrame`).
+  `perf mode=… fps=… cpu_ms=… encode_ms=… worst_ms=… wait_ms=… skipped=…`
+  (`mode` how the canvas drew its stereo frames, `multiview-direct-4x` or
+  `per-eye-…`, and `stereo frames draw …` when it changes; `cpu_ms` from
+  `xrBeginFrame` to `xrEndFrame`, `encode_ms` the canvas's stereo draw,
+  `wait_ms` the time in `xrWaitFrame`).
 - `adb logcat -s VrApi` adds Meta's own per-second line (`FPS=…`, `Prd`,
   GPU and CPU levels, `GPU%`, stale frames).
 - `adb exec-out screencap -p > frame.png` captures the compositor's view (one

@@ -121,6 +121,8 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     /// A session that drew in another format ended: the next renderer made
     /// for a new format delivers its textures again.
     xr_left: bool,
+    /// How the last stereo frame drew (`Surface::xr_stereo_mode`).
+    xr_mode: &'static str,
 }
 impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, P, ASSETS, H> {
     /// The renderer's counts for the last frame drawn (draws, instances,
@@ -650,6 +652,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         // Both eyes in one multiview pass where the device has it, else each
         // on its own (`xr::encode_stereo`); either submits its own commands.
         let mut unused = device.create_command_encoder(&Default::default());
+        let before = (self.perf.stats.stereo_frames, self.perf.stats.direct_frames);
         let wants = self.render_frame(
             frame,
             device,
@@ -659,9 +662,18 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
             format,
             Some(xr::Immersive::Stereo(stereo)),
         );
+        let after = &self.perf.stats;
+        self.xr_mode = xr::stereo_mode(
+            after.stereo_frames > before.0,
+            after.direct_frames > before.1,
+            after.samples,
+        );
         self.still = !wants;
         self.perf.rendering = false;
         Some(wants)
+    }
+    fn xr_stereo_mode(&self) -> &'static str {
+        self.xr_mode
     }
     fn immersive(&mut self, format: Option<wgpu::TextureFormat>) {
         self.immersive_format(format);

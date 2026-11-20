@@ -164,6 +164,14 @@ impl Module {
         }
     }
 
+    /// How canvas `id` drew its last stereo frame
+    /// ([`crate::Surface::xr_stereo_mode`]); `none` for no such canvas.
+    pub fn xr_stereo_mode(&self, id: u32) -> &'static str {
+        self.instances
+            .get(&id)
+            .map_or("none", |inst| inst.surface.xr_stereo_mode())
+    }
+
     /// The format canvas `id` draws its page frames in: an immersive layer in
     /// the same format keeps the surface's renderer as it is.
     pub fn render_format(&self, id: u32) -> Option<wgpu::TextureFormat> {

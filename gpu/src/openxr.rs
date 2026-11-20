@@ -186,10 +186,18 @@ struct Perf {
     encode_ms: f64,
     wait_ms: f64,
     worst_ms: f64,
+    /// How the last frame drew (`Module::xr_stereo_mode`).
+    mode: &'static str,
 }
 
 impl Perf {
-    fn frame(&mut self, wait_ms: f64, cpu_ms: f64, encode_ms: f64, rendered: bool) {
+    fn frame(&mut self, wait_ms: f64, cpu_ms: f64, encode_ms: f64, rendered: bool, mode: Option<&'static str>) {
+        if let Some(mode) = mode {
+            if mode != self.mode {
+                log(false, &format!("stereo frames draw {mode}"));
+            }
+            self.mode = mode;
+        }
         let now = Instant::now();
         let since = *self.since.get_or_insert(now);
         if rendered {
@@ -208,7 +216,8 @@ impl Perf {
             log(
                 false,
                 &format!(
-                    "perf fps={:.1} cpu_ms={:.2} encode_ms={:.2} worst_ms={:.2} wait_ms={:.2} skipped={}",
+                    "perf mode={} fps={:.1} cpu_ms={:.2} encode_ms={:.2} worst_ms={:.2} wait_ms={:.2} skipped={}",
+                    if self.mode.is_empty() { "none" } else { self.mode },
                     f64::from(self.frames) / elapsed,
                     self.cpu_ms / n,
                     self.encode_ms / n,
@@ -219,6 +228,7 @@ impl Perf {
             );
             *self = Perf {
                 since: Some(now),
+                mode: self.mode,
                 ..Default::default()
             };
         }
@@ -439,11 +449,18 @@ fn make(
         requirements,
     );
     let mut features = grant.features;
-    // For a single-pass stereo renderer (multiview).
-    if exposed.features.contains(wgpu::Features::MULTIVIEW) {
+    let mut limits = grant.limits;
+    // For a single-pass stereo renderer: multiview of both eyes (wgpu's
+    // default view count is 0, so two are asked for), and multisampled
+    // two-layer attachments for its 4x frames.
+    let views = exposed.capabilities.limits.max_multiview_view_count;
+    if exposed.features.contains(wgpu::Features::MULTIVIEW) && views >= 2 {
         features |= wgpu::Features::MULTIVIEW;
+        limits.max_multiview_view_count = 2;
+        if exposed.features.contains(wgpu::Features::MULTISAMPLE_ARRAY) {
+            features |= wgpu::Features::MULTISAMPLE_ARRAY;
+        }
     }
-    let limits = grant.limits;
     let memory_hints = wgpu::MemoryHints::MemoryUsage;
     let device_extensions = exposed.adapter.required_device_extensions(features);
     let mut device_features = exposed
@@ -499,7 +516,7 @@ fn make(
             &wgpu::DeviceDescriptor {
                 label: Some("exact xr"),
                 required_features: features,
-                required_limits: limits,
+                required_limits: limits.clone(),
                 memory_hints,
                 ..Default::default()
             },
@@ -509,11 +526,13 @@ fn make(
     log(
         false,
         &format!(
-            "device {} (Vulkan {}.{}), multiview {}",
+            "device {} (Vulkan {}.{}), multiview {} (views {} of {views}), multisample array {}",
             adapter.get_info().name,
             vk::api_version_major(api),
             vk::api_version_minor(api),
-            features.contains(wgpu::Features::MULTIVIEW)
+            features.contains(wgpu::Features::MULTIVIEW),
+            limits.max_multiview_view_count,
+            features.contains(wgpu::Features::MULTISAMPLE_ARRAY)
         ),
     );
 
@@ -942,7 +961,7 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
             .stream
             .end(time, xr::EnvironmentBlendMode::OPAQUE, &[])
             .map_err(|e| format!("end: {e}"))?;
-        headset.perf.frame(wait_ms, 0.0, 0.0, false);
+        headset.perf.frame(wait_ms, 0.0, 0.0, false, None);
         return Ok(());
     }
     if let Err(e) = headset.swapchain(module, id) {
@@ -971,7 +990,7 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
             log(true, "tracking lost: frames show nothing until the head is tracked again");
         }
         headset.untracked = true;
-        headset.perf.frame(wait_ms, 0.0, 0.0, false);
+        headset.perf.frame(wait_ms, 0.0, 0.0, false, None);
         return Ok(());
     }
     if std::mem::take(&mut headset.untracked) {
@@ -1064,7 +1083,8 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
         log(false, "first frame submitted");
     }
     let cpu_ms = started.elapsed().as_secs_f64() * 1e3;
-    headset.perf.frame(wait_ms, cpu_ms, encode_ms, true);
+    let mode = module.xr_stereo_mode(id);
+    headset.perf.frame(wait_ms, cpu_ms, encode_ms, true, Some(mode));
     let _ = (&headset.vk_instance, headset.hal_device_ready);
     Ok(())
 }

@@ -308,7 +308,10 @@ impl DirectTargets {
                     dimension: wgpu::TextureDimension::D2,
                     format,
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                        // wgpu makes transient attachments of one layer only.
+                        // wgpu makes transient attachments of one layer only
+                        // (`InvalidTransientTextureLayerCount`): a stereo
+                        // frame's two-layer ones take real memory, 180 MiB at
+                        // 4x for a Quest 3's 1680×1760 eyes.
                         | if !retained && size.depth_or_array_layers == 1 {
                             transient_usage()
                         } else if sampled {

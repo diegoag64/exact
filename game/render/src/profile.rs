@@ -43,7 +43,10 @@
 //! leave the encoding to the hardware) and single-sampled — the profile's MSAA
 //! attachment is its own, transient, and resolves into them. Its
 //! Vulkan device should grant `TRANSIENT_ATTACHMENT` usage (lazily allocated
-//! memory) so the samples never take memory at all. Fixed foveation and the
+//! memory) so the samples never take memory at all. That holds for the
+//! per-eye path's single-layer attachments; a multiview stereo frame's are
+//! two-layer, which wgpu refuses as transient, so they take real memory
+//! (`buffers.rs`, `DirectTargets`) though their contents are discarded. Fixed foveation and the
 //! swapchain's size (Meta's recommended 1680×1760 at 1.0, fewer pixels for
 //! headroom) are the host's.
 use exact_game::{ShadowBox, XrStage};

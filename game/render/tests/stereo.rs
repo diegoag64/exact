@@ -1,5 +1,8 @@
 //! Stereo frames (`XrStereo`): both eyes drawn in one multiview pass match
-//! each eye drawn on its own, layer for layer.
+//! each eye drawn on its own, layer for layer. Every immersive frame draws
+//! under the immersive profile (`profile.rs`): direct (tonemapped into the
+//! eye's layer, no HDR image) at the game's samples, and with a stage of
+//! known extent one cached sun shadow layer fit to it.
 #![cfg(not(target_arch = "wasm32"))]
 use exact_game::*;
 use exact_game_render::WorldSurface;
@@ -9,6 +12,8 @@ use exact_gpu::{fixture, wgpu, Frame, Surface, XrStereo};
 struct Settings {
     water: bool,
     one_sample: bool,
+    /// A stage of known extent: the profile's fixed, cached shadow layer.
+    staged: bool,
 }
 struct Diorama;
 impl Game for Diorama {
@@ -92,8 +97,23 @@ impl Game for Diorama {
         ));
         w.spawn((Transform::at(0., 2., 6.), Camera::default()));
     }
+    fn xr_stage(_: &World, a: &Settings) -> XrStage {
+        // World metres where they are (the eyes below are in world units),
+        // with the scene's extent known.
+        XrStage {
+            extent: if a.staged { 8.0 } else { 0.0 },
+            ..Default::default()
+        }
+    }
     fn tick(_: &mut World, _: &Input, _: &Settings) {}
 }
+
+const CASES: [(bool, bool, bool); 4] = [
+    (false, false, false),
+    (true, false, false),
+    (false, true, false),
+    (false, false, true),
+];
 
 /// An off-centre perspective onto 0–1 depth from tangents on each side.
 fn frustum(left: f32, right: f32, down: f32, up: f32, near: f32, far: f32) -> Mat4 {
@@ -206,15 +226,19 @@ fn one_multiview_pass_draws_what_each_eye_draws_on_its_own() {
         return;
     }
     let size = (320, 288);
-    for (water, one_sample) in [(false, false), (true, false), (false, true)] {
+    for (water, one_sample, staged) in CASES {
         let case = format!(
-            "{}{}",
+            "{}{}{}",
             if water { "water" } else { "land" },
-            if one_sample { "-1x" } else { "-4x" }
+            if one_sample { "-1x" } else { "-4x" },
+            if staged { "-staged" } else { "" }
         );
         let mut surface = WorldSurface::<Diorama>::default();
         surface
-            .bind(&[Value::Bool(water), Value::Bool(one_sample)], None)
+            .bind(
+                &[Value::Bool(water), Value::Bool(one_sample), Value::Bool(staged)],
+                None,
+            )
             .unwrap();
         let stereo = stereo_target(&gpu, size);
         let read = |s: &XrStereo| [0, 1].map(|l| fixture::read_layer(&gpu, &s.target, l).unwrap());
@@ -240,16 +264,32 @@ fn one_multiview_pass_draws_what_each_eye_draws_on_its_own() {
             surface.frame_stats().instances > 7,
             "{case}: the fountain's dots draw"
         );
-        let before = surface.frame_stats().stereo_frames;
+        let before = surface.frame_stats();
         surface
             .render_xr_stereo(&frame(size), &gpu.device, &gpu.queue, &stereo, FORMAT)
             .unwrap();
         surface.submitted();
         assert!(surface.error().is_none(), "{:?}", surface.error());
+        let stats = surface.frame_stats();
         assert_eq!(
-            surface.frame_stats().stereo_frames,
-            before + 1,
+            stats.stereo_frames,
+            before.stereo_frames + 1,
             "{case}: drawn in one multiview pass"
+        );
+        // The immersive profile: tonemapped straight into the layers, at
+        // the game's samples, with one sun shadow layer.
+        assert_eq!(
+            stats.direct_frames,
+            before.direct_frames + 1,
+            "{case}: a direct frame"
+        );
+        assert_eq!(stats.samples, if one_sample { 1 } else { 4 }, "{case}");
+        assert_eq!(stats.cascades, 1, "{case}: one shadow layer");
+        let mode = surface.xr_stereo_mode();
+        assert_eq!(
+            mode,
+            if one_sample { "multiview-direct-1x" } else { "multiview-direct-4x" },
+            "{case}"
         );
         let both = read(&stereo);
         let again = per_eye(&mut surface);
@@ -289,10 +329,13 @@ fn stereo_frame_cost() {
         return;
     };
     let size = (1680, 1760);
-    for (water, one_sample) in [(false, false), (true, false), (false, true)] {
+    for (water, one_sample, staged) in CASES {
         let mut surface = WorldSurface::<Diorama>::default();
         surface
-            .bind(&[Value::Bool(water), Value::Bool(one_sample)], None)
+            .bind(
+                &[Value::Bool(water), Value::Bool(one_sample), Value::Bool(staged)],
+                None,
+            )
             .unwrap();
         let stereo = stereo_target(&gpu, size);
         let views = stereo.layer_views(FORMAT);
@@ -313,7 +356,8 @@ fn stereo_frame_cost() {
                 if i >= 10 {
                     times.push((cpu, total));
                 }
-                draws = surface.frame_stats().draws * if multiview { 1 } else { 2 };
+                // A per-eye frame's stats are both eyes' summed (`encode_eyes`).
+                draws = surface.frame_stats().draws;
             }
             times.sort_by(|a, b| a.0.total_cmp(&b.0));
             let median = times[times.len() / 2];
@@ -322,7 +366,7 @@ fn stereo_frame_cost() {
         let ((eye_cpu, eye_total), eye_draws) = run(false);
         let ((mv_cpu, mv_total), mv_draws) = run(true);
         eprintln!(
-            "water={water} 1x={one_sample} {}x{} per eye: per-eye {eye_draws} draws, {eye_cpu:.2} ms CPU \
+            "water={water} 1x={one_sample} staged={staged} {}x{} per eye: per-eye {eye_draws} draws, {eye_cpu:.2} ms CPU \
              ({eye_total:.2} ms with GPU); multiview {mv_draws} draws, {mv_cpu:.2} ms CPU ({mv_total:.2} ms with GPU)",
             size.0, size.1
         );

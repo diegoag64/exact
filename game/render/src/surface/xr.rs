@@ -152,3 +152,17 @@ pub(super) fn encode_stereo<const ASSETS: bool>(
         }
     }
 }
+
+/// A stereo frame's mode for a host's log (`Surface::xr_stereo_mode`).
+pub(super) fn stereo_mode(multiview: bool, direct: bool, samples: u32) -> &'static str {
+    match (multiview, direct, samples > 1) {
+        (true, true, true) => "multiview-direct-4x",
+        (true, true, false) => "multiview-direct-1x",
+        (true, false, true) => "multiview-hdr-4x",
+        (true, false, false) => "multiview-hdr-1x",
+        (false, true, true) => "per-eye-direct-4x",
+        (false, true, false) => "per-eye-direct-1x",
+        (false, false, true) => "per-eye-hdr-4x",
+        (false, false, false) => "per-eye-hdr-1x",
+    }
+}
