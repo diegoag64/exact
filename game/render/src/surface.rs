@@ -116,6 +116,11 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     /// Texture uploads off the presenting thread, under the live clock.
     #[cfg(not(target_arch = "wasm32"))]
     uploads: Option<crate::models::Uploads>,
+    /// The format an immersive session draws in, while one does (`xr`).
+    xr_format: Option<wgpu::TextureFormat>,
+    /// A session that drew in another format ended: the next renderer made
+    /// for a new format delivers its textures again.
+    xr_left: bool,
 }
 impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, P, ASSETS, H> {
     /// Bake-owned development capability; production modules refuse live edits.
@@ -473,6 +478,12 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
     ) {
         // A host prepares before it renders: the renderer this makes is timed
         // under the host's clock, and its time counts in the next drawn frame.
+        // In an immersive session the renderer is the session's format's.
+        let format = self.xr_format.unwrap_or(format);
+        // Back from a session in another format: its renderer is made again.
+        if std::mem::take(&mut self.xr_left) && self.format.is_some_and(|f| f != format) {
+            self.redeliver_textures();
+        }
         if self.perf.rendering {
             return self.prepare_now(device, queue, format);
         }
@@ -602,11 +613,21 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         self.perf.rendering = true;
         // Each eye records and submits its own commands (`xr::encode_eyes`).
         let mut unused = device.create_command_encoder(&Default::default());
-        let wants =
-            self.render_frame(frame, device, queue, &mut unused, first, format, Some(views));
+        let wants = self.render_frame(
+            frame,
+            device,
+            queue,
+            &mut unused,
+            first,
+            format,
+            Some(views),
+        );
         self.still = !wants;
         self.perf.rendering = false;
         Some(wants)
+    }
+    fn immersive(&mut self, format: Option<wgpu::TextureFormat>) {
+        self.immersive_format(format);
     }
     fn frame_ready(&self) -> bool {
         self.frame_ready

@@ -328,6 +328,10 @@ pub trait Surface {
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
     ) -> bool;
+    /// An immersive session draws this surface in `format` (Some), or ended
+    /// (None): until it ends, a surface preparing for the page's format
+    /// (asset delivery) prepares for the session's instead.
+    fn immersive(&mut self, _format: Option<wgpu::TextureFormat>) {}
     /// One immersive (WebXR) frame: advance once, then draw each of `views`
     /// from its eye into its target (of `format`). Unlike [`Surface::render`]
     /// the surface records and submits its own commands, one submission per

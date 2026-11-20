@@ -6,8 +6,45 @@
 //! one submission would both draw from the second eye. The render hooks are
 //! left out (a game's post passes assume one flat camera), and so is the
 //! perf timing.
-use exact_game::{Mat4, World, XrStage};
+use super::*;
+use exact_game::{Mat4, XrStage};
 use exact_gpu::{wgpu, XrView};
+
+impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, P, ASSETS, H> {
+    /// The renderer is about to be made for another format (an immersive
+    /// session's, or the page's again after one): the textures the old one
+    /// held are delivered again, as after a lost device.
+    pub(super) fn redeliver_textures(&mut self) {
+        if ASSETS {
+            if let Some(sim) = &mut self.sim {
+                sim.invalidate_device_assets();
+            }
+        }
+        self.assets_dirty = true;
+        self.dirty = true;
+    }
+
+    /// A session draws in `format` (Some) or ended (None). A renderer made
+    /// for a format other than the page's needs the textures the page's had;
+    /// so does the page's after the session.
+    pub(super) fn immersive_format(&mut self, format: Option<wgpu::TextureFormat>) {
+        match format {
+            Some(format) if self.xr_format != Some(format) => {
+                self.xr_format = Some(format);
+                if self.format.is_some_and(|f| f != format) {
+                    self.redeliver_textures();
+                }
+            }
+            Some(_) => {}
+            None => {
+                if let Some(format) = self.xr_format.take() {
+                    self.xr_left = self.format == Some(format);
+                    self.dirty = true;
+                }
+            }
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_eyes<const ASSETS: bool>(

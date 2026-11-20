@@ -510,6 +510,25 @@ fn xr_format(name: &str) -> Option<wgpu::TextureFormat> {
     })
 }
 
+/// The `GPUTextureFormat` canvas `id` draws its page frames in, if known:
+/// the format to ask an immersive layer for first.
+pub fn xr_format_of(id: u32) -> Option<String> {
+    use wgpu::TextureFormat as F;
+    let format = with(|m| m.render_format(id)).flatten()?;
+    Some(
+        match format {
+            F::Bgra8Unorm => "bgra8unorm",
+            F::Bgra8UnormSrgb => "bgra8unorm-srgb",
+            F::Rgba8Unorm => "rgba8unorm",
+            F::Rgba8UnormSrgb => "rgba8unorm-srgb",
+            F::Rgba16Float => "rgba16float",
+            F::Rgb10a2Unorm => "rgb10a2unorm",
+            _ => return None,
+        }
+        .into(),
+    )
+}
+
 /// The module's `GPUDevice`, for the page's `XRGPUBinding`; null without one.
 pub fn xr_device() -> JsValue {
     with(|m| {
@@ -607,6 +626,7 @@ pub fn xr_render(id: u32, now_ms: f64, format: &str, textures: Vec<JsValue>, eye
 /// The session ended: let go of its textures.
 pub fn xr_end() {
     XR.with(|xr| *xr.borrow_mut() = Xr::default());
+    with(|m| m.end_xr());
 }
 
 /// The exports for one app's registry, wasm-bindgen (see LLP 1009 D2).
@@ -926,6 +946,12 @@ macro_rules! module {
             eyes: &[f32],
         ) -> u32 {
             $crate::web::xr_render(id, now_ms, format, textures, eyes)
+        }
+
+        /// The format a canvas draws its page frames in, for its immersive layer.
+        #[::wasm_bindgen::prelude::wasm_bindgen]
+        pub fn gpu_xr_format(id: u32) -> Option<String> {
+            $crate::web::xr_format_of(id)
         }
 
         /// The immersive session ended.

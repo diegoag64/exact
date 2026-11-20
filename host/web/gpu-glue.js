@@ -110,8 +110,8 @@ let recoveryTimer, recoveryFailures = 0, recoveryErrorLogged = false, recoveryTe
 let terminalDevice = false;
 let tierCode = 0; // the GPU tier this page told its modules (gpu-tier.js `TIERS`)
 let raf = null;
-// xr-glue.js when the page offers immersive sessions, and its session state once offered.
-let xr = null, immersive = null;
+// xr-glue.js when the page offers immersive sessions; its session state is `api.immersive`.
+let xr = null;
 let finishReady;
 const ready = new Promise((resolve) => { finishReady = resolve; });
 
@@ -215,7 +215,7 @@ let hidden = document.hidden;
 function lifecycle(code) {
   if (trapped()) return;
   // An immersive session may hide the page; its world keeps drawing in the headset.
-  if (code === 0 && immersive?.active) return;
+  if (code === 0 && exact.gpu?.immersive?.active) return;
   if (code === 0 || code === 1) hidden = code === 0;
   const deliver = () => { for (const entry of surfaces.values()) if (entry.id) gpu?.gpu_lifecycle(entry.id, code); };
   if (recoveringDevice) recoveringDevice.then(deliver); else deliver();
@@ -531,7 +531,7 @@ function frame(now) {
   raf = null;
   if (trapped()) return;
   // In an immersive session the session's frames draw the world (xr-glue.js).
-  if (immersive?.active) return;
+  if (exact.gpu?.immersive?.active) return;
   if (hidden && !exact.now) return;
   const at = frameAt = pace(now);
   frameRaw = now; frameGeneration++;
@@ -1397,7 +1397,7 @@ async function swap(version) {
 }
 // A game that opted in to immersive sessions (app.json `game.xr`): its adapter
 // must be XR compatible before the module asks for one (xr-glue.js).
-if (artifact === null && document.documentElement.hasAttribute("data-exact-xr")) {
+if (artifact === null && document.documentElement?.hasAttribute?.("data-exact-xr")) {
   try { xr = await import("./xr-glue.js"); xr.shimAdapter(); }
   catch (error) { console.error("exact xr:", error); xr = null; }
 }
@@ -1454,4 +1454,4 @@ if (xr && loaded) xr.offer({
     schedule();
   },
   lost: () => recoverDevice(),
-}).then(state => { immersive = state; if (state) api.immersive = state; }, error => console.error("exact xr:", error));
+}).then(state => { if (state) api.immersive = state; }, error => console.error("exact xr:", error));

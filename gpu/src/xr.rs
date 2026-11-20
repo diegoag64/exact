@@ -52,6 +52,24 @@ impl XrEye {
 }
 
 impl Module {
+    /// The immersive session ended: every surface prepares for its page again.
+    pub fn end_xr(&mut self) {
+        for inst in self.instances.values_mut() {
+            inst.surface.immersive(None);
+            inst.dirty = true;
+        }
+    }
+
+    /// The format canvas `id` draws its page frames in: an immersive layer in
+    /// the same format keeps the surface's renderer as it is.
+    pub fn render_format(&self, id: u32) -> Option<wgpu::TextureFormat> {
+        self.instances
+            .get(&id)?
+            .config
+            .as_ref()
+            .map(crate::view_format)
+    }
+
     /// Draw one immersive frame of canvas `id` into `eyes` (in `format`) and
     /// submit it. The surface ticks once and draws each eye; its commands are
     /// submitted before this returns, while the session's textures are lent.
@@ -85,29 +103,31 @@ impl Module {
         if !inst.bound {
             return Some(false);
         }
-        inst.surface
-            .prepare_assets(&gpu.device, &gpu.queue, format);
+        // The surface prepares its assets in `render_xr`, in `format`.
+        inst.surface.immersive(Some(format));
         let (width, height) = (eyes[0].viewport[2].max(1), eyes[0].viewport[3].max(1));
         // An eye that owns part of its texture draws into its own, copied in after.
         let parts = eyes.iter().filter(|e| !e.whole()).count();
-        scratch.textures.retain(|t| {
-            t.format() == format && t.width() == width && t.height() == height
-        });
+        scratch
+            .textures
+            .retain(|t| t.format() == format && t.width() == width && t.height() == height);
         while scratch.textures.len() < parts {
-            scratch.textures.push(gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("exact xr eye"),
-                size: wgpu::Extent3d {
-                    width,
-                    height,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            }));
+            scratch
+                .textures
+                .push(gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("exact xr eye"),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                }));
         }
         let mut own = scratch.textures.iter();
         let mut copies = Vec::new();

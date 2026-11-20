@@ -110,12 +110,18 @@ mod tests {
             * Mat4::from_scale(Vec3::splat(stage.scale))
             * Mat4::from_translation(-stage.center);
         let (view, proj, camera) = stage.eye(reference_view, projection);
-        for p in [Vec3::new(3.0, 0.0, -2.0), Vec3::new(10.0, 2.0, 4.0), Vec3::new(-7.0, 1.0, 9.0)] {
+        for p in [
+            Vec3::new(3.0, 0.0, -2.0),
+            Vec3::new(10.0, 2.0, 4.0),
+            Vec3::new(-7.0, 1.0, 9.0),
+        ] {
             let expected = (projection * reference_view * placement).project_point3(p);
             let got = (proj * view).project_point3(p);
             assert!((expected - got).length() < 1e-4, "{expected} {got}");
         }
-        let eye = placement.inverse().transform_point3(Vec3::new(0.03, 1.6, 0.0));
+        let eye = placement
+            .inverse()
+            .transform_point3(Vec3::new(0.03, 1.6, 0.0));
         assert!((camera - eye).length() < 1e-3, "{camera} {eye}");
         // Rigid: the view keeps world lengths.
         let d = view.transform_vector3(Vec3::X).length();

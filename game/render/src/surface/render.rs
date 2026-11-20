@@ -67,6 +67,8 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Default
             held_back: false,
             #[cfg(not(target_arch = "wasm32"))]
             uploads: None,
+            xr_format: None,
+            xr_left: false,
         }
     }
 }
@@ -719,7 +721,16 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         let encoded = if let Some(views) = xr {
             // Immersive: each eye from the headset, placed by the game's stage.
             let stage = G::xr_stage(sim.world(), sim.args());
-            super::xr::encode_eyes(renderer, device, queue, &mut input, stage, views, sim.world(), &self.hook_poses)
+            super::xr::encode_eyes(
+                renderer,
+                device,
+                queue,
+                &mut input,
+                stage,
+                views,
+                sim.world(),
+                &self.hook_poses,
+            )
         } else {
             renderer.encode_hooked(
                 encoder,

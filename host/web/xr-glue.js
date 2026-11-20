@@ -79,11 +79,22 @@ async function start(host, state, button) {
       space = (await session.requestReferenceSpace("local")).getOffsetReferenceSpace(new XRRigidTransform({ x: 0, y: -1.6, z: 0 }));
     }
     const binding = new XRGPUBinding(session, device);
-    const format = binding.getPreferredColorFormat();
-    let layer;
+    // The canvas's own format first: the world's renderer then stays as it is
+    // (another format remakes it, and its textures are delivered again).
     // COPY_DST lets an eye that owns half a texture (side by side) be copied in.
-    try { layer = binding.createProjectionLayer({ colorFormat: format, textureUsage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST }); }
-    catch { layer = binding.createProjectionLayer({ colorFormat: format }); }
+    const own = module.gpu_xr_format?.(host.target()?.id ?? 0), preferred = binding.getPreferredColorFormat();
+    const usage = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST;
+    let layer, format;
+    for (const [colorFormat, textureUsage] of [[own, usage], [preferred, usage], [preferred, undefined]]) {
+      if (!colorFormat) continue;
+      try {
+        layer = binding.createProjectionLayer(textureUsage ? { colorFormat, textureUsage } : { colorFormat });
+        format = colorFormat;
+        break;
+      } catch (error) { state.error = String(error?.message ?? error); }
+    }
+    if (!layer) throw new Error(`no projection layer: ${state.error}`);
+    state.format = format; state.error = null;
     session.updateRenderState({ layers: [layer], depthNear: 0.05, depthFar: 200 });
     state.active = true;
     button.textContent = "Exit VR";
@@ -107,7 +118,7 @@ async function start(host, state, button) {
         eyes.set(view.projectionMatrix, i * EYE_FLOATS + 25);
       }
       const r = gpu.gpu_xr_render(entry.id, host.clock(time), format, textures, eyes);
-      state.frames++;
+      state.frames++; state.view = entry.view; state.last = r;
       if (r === 2) {
         const message = gpu.gpu_error();
         if (message !== state.error) console.error("exact xr:", message);
