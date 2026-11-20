@@ -131,6 +131,7 @@ android {
     // immersive categories on the launcher activity, so Horizon OS starts it in the headset.
     val questApplication = """
         |        <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s|questpro" />
+        |        <meta-data android:name="dev.exact.xr" android:value="quest" />
         |        <activity android:name=".MainActivity">
         |            <intent-filter>
         |                <action android:name="android.intent.action.MAIN" />

@@ -688,6 +688,10 @@ open class ExactActivity : Activity() {
         requests.destroy()
         release()
         super.onDestroy()
+        // A headset app (docs/quest.md) quit from the headset: its OpenXR instance and session belong to the process,
+        // and the module makes them once, so a relaunch in the same process would find no session and hang on the
+        // runtime's loading screen. End the process with the activity, as native Quest apps do.
+        if (isFinishing && Immersive.headset(this)) android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     /** This activity's view reads the host from now on. One that read it before and is not destroyed yet (it
