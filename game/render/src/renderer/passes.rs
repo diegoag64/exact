@@ -868,7 +868,8 @@ impl<'a> Bound<'a> {
     /// A run that merges, unless a look frame's probe brackets each draw.
     pub fn merging(merge: bool) -> Self {
         Self {
-            merge,
+            // A headset's debug switch (`docs/quest.md`): one indirect draw a group.
+            merge: merge && !exact_gpu::debug_switch("no-merge"),
             ..Self::default()
         }
     }

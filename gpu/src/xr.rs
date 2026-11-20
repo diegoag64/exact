@@ -172,6 +172,12 @@ impl Module {
             .map_or("none", |inst| inst.surface.xr_stereo_mode())
     }
 
+    /// Where canvas `id`'s immersive subject stands in the reference space
+    /// ([`crate::Surface::xr_focus`]).
+    pub fn xr_focus(&self, id: u32) -> Option<[f32; 3]> {
+        self.instances.get(&id)?.surface.xr_focus()
+    }
+
     /// The format canvas `id` draws its page frames in: an immersive layer in
     /// the same format keeps the surface's renderer as it is.
     pub fn render_format(&self, id: u32) -> Option<wgpu::TextureFormat> {

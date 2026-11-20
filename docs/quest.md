@@ -59,7 +59,10 @@ Android):
    says what was granted. wgpu wraps
    both (`Instance::from_raw`, `expose_adapter`, `device_from_raw`,
    `create_adapter_from_hal`, `create_device_from_hal`), and the session is
-   made on that device. With no loader or runtime (a phone) the device is made
+   made on that device. The wgpu instance is made with the module's instance
+   flags and no backend of its own, then given the runtime's adapter: not
+   with `wgpu::Instance::from_hal`, whose instance takes wgpu-core's default
+   flags (see "What the headset drew white" below). With no loader or runtime (a phone) the device is made
    as always and the app draws to its window; the log says so.
 3. Each frame the host renders (`gpu_render`), the first canvas it asks for
    draws into the headset instead of its window: events are polled
@@ -158,3 +161,110 @@ Unknown Sources.
   GPU and CPU levels, `GPU%`, stale frames).
 - `adb exec-out screencap -p > frame.png` captures the compositor's view (one
   eye's distorted image, both eyes side by side on some builds).
+
+## Seeing what the headset shows (eye capture)
+
+A debug capture of what the app itself draws, in any build (release
+included), without Meta's capture service (which uploads to the account):
+the module looks about twice a second for a file named `capture` in the app's
+external files directory, and when it appears the next drawn stereo frame's
+two swapchain layers are read back and written beside it as PNGs (8-bit RGB,
+uncompressed, about 9 MB an eye at 1680×1760). Nothing happens, and nothing
+is read back, until the file appears. The image is the layer the app hands
+the compositor, before lens distortion and reprojection: what each eye sees,
+undistorted.
+
+    D=/sdcard/Android/data/<package>/files      # e.g. com.exact.hexguard
+    adb shell "echo head > $D/capture"          # the next frame from the tracked head
+    adb shell "echo stage > $D/capture"         # from a fixed pose looking at the stage
+    adb shell "echo 'stage 0.8 30 -20' > $D/capture"   # distance m, pitch ° down, yaw °
+    adb logcat -s exact-xr | grep capture       # `capture <n> (…): <left> <right>`
+    adb pull $D/eye-1-left.png; adb pull $D/eye-1-right.png
+
+- `head` (or an empty file) waits for a tracked head: a headset nobody wears
+  shows nothing, so it waits until someone does.
+- `stage [distance [pitch [yaw]]]` replaces the head for that one frame with
+  a fixed pose: looking at the stage's centre (`XrStage::position`, which the
+  canvas reports through `Surface::xr_focus`) from `distance` metres (0.6),
+  `pitch` degrees down (40), turned `yaw` degrees about +Y (0: from the
+  player's side), eyes 64 mm apart, each eye's field of view as the runtime
+  reports it. It draws whether or not the head is tracked, so it works with
+  nobody wearing the headset, as long as the session runs (the proximity
+  sensor pauses it: `adb shell am broadcast -a
+  com.oculus.vrpowermanager.prox_close` keeps it running for a while). The
+  compositor shows that one frame too, so someone wearing the headset sees a
+  one-frame jump.
+- Captures are numbered from 1 in each process (`eye-<n>-left.png`,
+  `eye-<n>-right.png`) and overwrite an earlier process's of the same number.
+  The module removes the trigger after reading it; where it cannot, the same
+  file is not taken twice (write it again to take another).
+- Three seconds into a session (the 216th stereo frame) the canvas also logs
+  its world once, under the `exact` tag: `xr state: args [...] tick=…
+  entities=… assets loaded=… pending=… failed=… prepared=… models=…
+  resident_models=…; last frame mode=… draws=… instances=… triangles=…;
+  stage …; journal: …` (the last journal lines), so a state problem shows in
+  the log without a picture.
+
+`gpu/src/xr_capture.rs` holds what needs no headset (the trigger's grammar,
+the fixed pose, the PNG writer, with their tests); `gpu/src/openxr.rs`
+(`Capture`) polls, reads back and writes.
+
+### Debug switches
+
+A file `xr-debug` in the same directory holds whitespace-separated switches
+the module reads once, when it makes the device (relaunch the app after
+changing it; `adb shell rm $D/xr-debug` turns them all off). The log names
+them (`debug switches: …`) and the `device …` line says what was granted.
+They exist to bisect a picture that is wrong on the headset only:
+
+| switch | effect |
+|---|---|
+| `no-multiview` | no `MULTIVIEW`: stereo frames draw each eye on its own |
+| `no-first-instance` | no `INDIRECT_FIRST_INSTANCE`: culled draws select their list by a dynamic offset |
+| `no-indirect` | the game renderer draws every list directly (`Cull::direct`): no GPU cull, no indirect draws, finest levels only |
+| `no-merge` | each culled group is its own `draw_indexed_indirect` (no multi-draw runs) |
+| `cull-pass-all` | the GPU cull keeps everything in every view (its frustum test passes all) |
+| `vk13` | the runtime makes the Vulkan instance at 1.3 rather than 1.1 |
+
+`exact_gpu::debug_switch(name)` reads them anywhere in the module.
+With the state line the canvas also logs `xr cull: …`, the GPU cull's
+indirect arguments for this frame read back (instances per view, the first
+groups' `[index count, instances, first index, base vertex, first
+instance]`) and whether each compacted camera slot is one of its group's.
+
+## What the headset drew white (November 2026)
+
+Hexguard on a Quest 3 showed only the sea, the sky and the white foam hexes
+at the waterline: no tiles, keep, portal, props or towers, though the world
+was level 1 with every asset loaded and the renderer counted 650 instances
+a frame. What was missing was everything the game renderer draws through
+its GPU cull (opaque models and primitives); what drew was what it draws
+directly (the sky, the water's surface, translucent models such as the
+foam).
+
+The captures and switches above narrowed it: `no-indirect` drew the whole
+island; `no-multiview`, `no-first-instance`, `no-merge` (and both
+together), `cull-pass-all` and `vk13` did not; the cull's own output read
+back correct (468 camera instances, sane `[index count, instances, first
+index, base vertex, first instance]`, every compacted slot its group's);
+the compacted lists drawn by direct draws showed the island; and indirect
+draws from arguments the host wrote drew nothing either. So every indirect
+draw was dropped after it left the renderer.
+
+The cause: `wgpu::Instance::from_hal` (wgpu-core 30's
+`Instance::from_hal_instance`) gives the instance `InstanceFlags::default()`,
+which includes `VALIDATION_INDIRECT_CALL`, and `create_device_from_hal`
+takes its flags from the instance. Every other host makes its instance with
+`device::instance_flags()`, which leaves that validation out (the game
+renderer writes its own arguments, valid by construction). On the headset
+wgpu's validation pass ran before every render pass and rewrote each culled
+draw as an empty one. The fix makes the headset's wgpu instance with the
+module's flags (`gpu/src/openxr.rs`, `make`).
+
+With the island drawn, Hexguard's level 1 (the headset demo, seven towers,
+the first wave) is GPU-bound on a Quest 3 under the immersive profile's
+multiview direct 4x frames: VrApi `App=` 13–17 ms at GPU level 4 and
+`GPU%=0.97`, so 48–62 Hz depending on the view (`no-indirect`, which draws
+every finest level unculled, measured 62 Hz with the headset where it then lay). The earlier
+72 Hz at 4–6 ms was a frame that drew no opaque geometry; holding 72 Hz is
+work still to do.

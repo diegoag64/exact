@@ -123,6 +123,8 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     xr_left: bool,
     /// How the last stereo frame drew (`Surface::xr_stereo_mode`).
     xr_mode: &'static str,
+    /// Stereo frames drawn, for the one-time state line (`xr_state_line`).
+    xr_frames: u64,
 }
 impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, P, ASSETS, H> {
     /// The renderer's counts for the last frame drawn (draws, instances,
@@ -670,10 +672,41 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         );
         self.still = !wants;
         self.perf.rendering = false;
+        self.xr_frames += 1;
+        // A second before the state line, read back what the GPU cull keeps.
+        if self.xr_frames + 72 <= xr::XR_STATE_FRAME && self.xr_frames < xr::XR_STATE_FRAME {
+            if let Some((renderer, _)) = &mut self.render {
+                if self.xr_frames + 72 == xr::XR_STATE_FRAME {
+                    renderer.count_culled(true);
+                }
+                // Finish a read the last frame started.
+                let _ = renderer.culled();
+            }
+        }
+        // Once, three seconds in (assets delivered, the world running): what
+        // the headset's world holds, so a state problem shows in the log
+        // without a picture.
+        if self.xr_frames == xr::XR_STATE_FRAME {
+            eprintln!("{}", self.xr_state_line());
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some((renderer, _)) = &self.render {
+                eprintln!(
+                    "xr cull: {}",
+                    renderer.cull.debug_read(&renderer.device, &renderer.queue, &renderer.slot_list)
+                );
+            }
+            if let Some((renderer, _)) = &mut self.render {
+                renderer.count_culled(false);
+            }
+        }
         Some(wants)
     }
     fn xr_stereo_mode(&self) -> &'static str {
         self.xr_mode
+    }
+    fn xr_focus(&self) -> Option<[f32; 3]> {
+        let sim = self.sim.as_ref()?;
+        Some(G::xr_stage(sim.world(), sim.args()).position.to_array())
     }
     fn immersive(&mut self, format: Option<wgpu::TextureFormat>) {
         self.immersive_format(format);

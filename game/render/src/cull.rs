@@ -194,7 +194,9 @@ impl Cull {
             })
         };
         let storage = |label| Buffer::new(device, 256, wgpu::BufferUsages::STORAGE, label);
-        let indirect_execution = indirect_execution(device);
+        // A headset's debug switch (`docs/quest.md`) draws each list directly.
+        let indirect_execution =
+            indirect_execution(device) && !exact_gpu::debug_switch("no-indirect");
         let (test, scan, scatter) = (
             pipeline(&test_layout, "test"),
             pipeline(&list_layout, "scan"),
@@ -366,6 +368,90 @@ impl Cull {
         counts.last
     }
 
+    /// A headset's debug line (`docs/quest.md`): this frame's camera draws as
+    /// the cull wrote them, read back now (the device waited on): each group's
+    /// `[index count, instances, first index, base vertex, first instance]`,
+    /// the first few, and the instance totals per view. Blocking: once only.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn debug_read(&self, device: &wgpu::Device, queue: &wgpu::Queue, slot_list: &[u32]) -> String {
+        if self.direct || self.groups.is_empty() {
+            return "no indirect draws".into();
+        }
+        let read_words = |buffer: &wgpu::Buffer, bytes: u64| -> Option<Vec<u32>> {
+            let bytes = bytes.min(buffer.size()) & !3;
+            let read = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("game cull debug read"),
+                size: bytes.max(4),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(buffer, 0, &read, 0, bytes);
+            queue.submit([encoder.finish()]);
+            let (tx, rx) = std::sync::mpsc::channel();
+            read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                let _ = tx.send(r.is_ok());
+            });
+            let _ = device.poll(wgpu::PollType::wait_indefinitely());
+            if rx.recv() != Ok(true) {
+                return None;
+            }
+            let data = read.slice(..).get_mapped_range().ok()?;
+            let words = data
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|w| u32::from_ne_bytes(*w))
+                .collect();
+            drop(data);
+            read.unmap();
+            Some(words)
+        };
+        let Some(words) = read_words(&self.indirect.raw, u64::from(VIEWS) * self.groups.len() as u64 * 20) else {
+            return "read back failed".into();
+        };
+        // The camera's compacted lists: each kept slot must be one of its group's.
+        let compacted = read_words(&self.compacted.raw, self.compacted.raw.size()).unwrap_or_default();
+        let mut members = (0usize, 0usize);
+        let mut samples = Vec::new();
+        for (g, group) in self.groups.iter().enumerate() {
+            let count = words[g * 5 + 1] as usize;
+            let start = self.regions[g] as usize;
+            let own = &slot_list[(group.range.start as usize).min(slot_list.len())..(group.range.end as usize).min(slot_list.len())];
+            for at in start..start + count {
+                let value = compacted.get(at).copied().unwrap_or(u32::MAX);
+                members.1 += 1;
+                members.0 += usize::from(own.contains(&value));
+                if samples.len() < 6 {
+                    samples.push(format!("g{g}:{value:#x}/{:#x}", own.first().copied().unwrap_or(0)));
+                }
+            }
+        }
+        let groups = self.groups.len();
+        let mut totals = vec![0u64; self.views as usize];
+        for (v, total) in totals.iter_mut().enumerate() {
+            for g in 0..groups {
+                *total += u64::from(words[(v * groups + g) * 5 + 1]);
+            }
+        }
+        let first: Vec<String> = (0..groups.min(6))
+            .map(|g| format!("{:?}", &words[g * 5..g * 5 + 5]))
+            .collect();
+        format!(
+            "groups={groups} views={} first_instance={} instances per view {totals:?}; camera draws {}; \
+             compacted camera slots in their group {}/{} ({})",
+            self.views,
+            self.first_instance,
+            first.join(" "),
+            members.0,
+            members.1,
+            samples.join(" ")
+        )
+    }
+    /// The last instance totals read back (`culled`), without polling.
+    pub fn last_counts(&self) -> Option<[u64; VIEWS as usize]> {
+        self.counts.as_ref().and_then(|c| c.last)
+    }
     /// Camera-view triangles the GPU cull kept in the frame `culled` last read.
     pub fn culled_triangles(&self) -> Option<u64> {
         self.counts
@@ -510,8 +596,15 @@ impl Cull {
     ) {
         self.views = views.len() as u32;
         let mut data = [0u32; UNIFORM_BYTES as usize / 4];
+        // A headset's debug switch (`docs/quest.md`): every view keeps everything.
+        let pass_all = exact_gpu::debug_switch("cull-pass-all");
         for (v, matrix) in views.iter().enumerate() {
-            for (i, plane) in planes(*matrix).iter().enumerate() {
+            let planes = if pass_all {
+                [[0.0, 0.0, 0.0, 1.0]; 6]
+            } else {
+                planes(*matrix)
+            };
+            for (i, plane) in planes.iter().enumerate() {
                 let at = (v * 6 + i) * 4;
                 for k in 0..4 {
                     data[at + k] = plane[k].to_bits();

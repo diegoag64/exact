@@ -69,6 +69,79 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
     }
 }
 
+/// The stereo frame (three seconds at 72 Hz) at which a headset logs its
+/// world's state once (`WorldSurface::xr_state_line`).
+pub(super) const XR_STATE_FRAME: u64 = 216;
+
+impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, P, ASSETS, H> {
+    /// One line for a headset's log: the arguments the world runs under (after
+    /// `Game::xr_args`), its tick and entities, its assets, what the last
+    /// stereo frame drew, the stage, and the journal's last lines.
+    pub(super) fn xr_state_line(&self) -> String {
+        let Some(sim) = &self.sim else {
+            return "xr state: no world".into();
+        };
+        let world = sim.world();
+        let args = <G::Args as exact_game::Args>::FIELDS
+            .iter()
+            .zip(exact_game::Args::values(sim.args()))
+            .map(|((name, _), value)| {
+                let shown = match &value {
+                    Value::Number(n) => format!("{n}"),
+                    Value::Bool(b) => format!("{b}"),
+                    v => v.as_str().map_or("…".into(), |s| format!("{s:?}")),
+                };
+                format!("{name}={shown}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let stats = &self.perf.stats;
+        let stage = G::xr_stage(world, sim.args());
+        let resident = self
+            .render
+            .as_ref()
+            .map_or(0, |(renderer, _)| renderer.models.loaded.len());
+        // What the GPU cull kept, per view (camera, sun cascades), from the
+        // readback armed a second before; "direct" where it does not run.
+        let culled = match self.render.as_ref() {
+            Some((renderer, _)) if renderer.cull.direct => "direct (no GPU cull)".to_string(),
+            Some((renderer, _)) => renderer
+                .cull
+                .last_counts()
+                .map_or("not read".into(), |c| format!("{c:?}")),
+            None => "no renderer".into(),
+        };
+        let journal = world.journal();
+        let tail = journal
+            .iter()
+            .rev()
+            .take(4)
+            .rev()
+            .map(|e| e.line.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        format!(
+            "xr state: args [{args}] tick={} entities={} {} resident_models={resident}; \
+             last frame mode={} draws={} instances={} triangles={} shadow_draws={} cascades={} samples={} gpu_cull_kept={culled}; \
+             stage center={} scale={} position={} extent={}; journal: {tail}",
+            world.tick(),
+            world.len(),
+            sim.asset_summary(),
+            self.xr_mode,
+            stats.draws,
+            stats.instances,
+            stats.triangles,
+            stats.shadow_draws,
+            stats.cascades,
+            stats.samples,
+            stage.center,
+            stage.scale,
+            stage.position,
+            stage.extent,
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn encode_eyes<const ASSETS: bool>(
     renderer: &mut crate::renderer::RendererWithAssets<ASSETS>,

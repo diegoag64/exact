@@ -70,6 +70,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Default
             xr_format: None,
             xr_left: false,
             xr_mode: "none",
+            xr_frames: 0,
         }
     }
 }

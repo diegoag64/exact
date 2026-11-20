@@ -74,6 +74,7 @@ mod storage;
 mod uniform;
 mod xr;
 pub use xr::{fov_projection, pose_view, XrEye, XrScratch, XrStereo, XrView};
+pub mod xr_capture;
 #[cfg(windows)]
 mod window;
 pub use uniform::FrameUniform;
@@ -373,6 +374,12 @@ pub trait Surface {
     /// The default draws each eye on its own.
     fn xr_stereo_mode(&self) -> &'static str {
         "per-eye"
+    }
+    /// Where an immersive frame's subject stands in the session's reference
+    /// space (metres): what a host's debug capture looks at when nobody wears
+    /// the headset (`docs/quest.md`). None when the surface does not say.
+    fn xr_focus(&self) -> Option<[f32; 3]> {
+        None
     }
     /// Whether the last render completed the current picture, qualifying its
     /// `presented` record. Native presentation follows [`Surface::frame_presentable`].
@@ -1508,6 +1515,20 @@ pub use device::{
 };
 
 pub mod android;
+
+static DEBUG_SWITCHES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Set a native host's debug switches once, at start: whitespace-separated
+/// words (the Quest host's `xr-debug` file, `docs/quest.md`).
+pub fn set_debug_switches(words: String) {
+    let _ = DEBUG_SWITCHES.set(words);
+}
+/// Whether the host turned debug switch `name` on ([`set_debug_switches`]);
+/// always false where none were set.
+pub fn debug_switch(name: &str) -> bool {
+    DEBUG_SWITCHES
+        .get()
+        .is_some_and(|words| words.split_whitespace().any(|w| w == name))
+}
 /// Whether this process draws into a native headset: an OpenXR session
 /// made with the device (the `openxr` feature on Android, `docs/quest.md`).
 pub fn headset() -> bool {

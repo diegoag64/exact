@@ -19,12 +19,14 @@
 //! and nothing here runs: the app draws to its window.
 #![allow(unsafe_code)]
 
+use crate::xr_capture::{self, Request};
 use crate::{wgpu, DeviceFailure, DeviceFailureKind, Gpu, Module, XrStereo};
 use ash::vk::{self, Handle as _};
 use openxr as xr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::sync::{Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::{Duration, Instant, SystemTime};
 
 /// The near and far planes of each eye, metres (the stage rescales them to
 /// world units).
@@ -174,6 +176,190 @@ fn activity(java: &Java, env: *mut jni_sys::JNIEnv) -> jni_sys::jobject {
     }
 }
 
+/// The application's external files directory
+/// (`Context.getExternalFilesDir(null)`, made if missing): where `adb` reads
+/// and writes a debug build's and a release build's files alike.
+fn external_files_dir(java: &Java) -> Option<PathBuf> {
+    let attached = Attached::new(java.vm).ok()?;
+    let env = attached.env;
+    // SAFETY: JNI calls on an attached thread with live references; every
+    // exception is cleared before the next call.
+    unsafe {
+        let e = &**env;
+        let failed = || {
+            if (e.ExceptionCheck.unwrap())(env) != 0 {
+                (e.ExceptionClear.unwrap())(env);
+                true
+            } else {
+                false
+            }
+        };
+        let class = (e.GetObjectClass.unwrap())(env, java.context);
+        let method = (e.GetMethodID.unwrap())(env, class, c"getExternalFilesDir".as_ptr(), c"(Ljava/lang/String;)Ljava/io/File;".as_ptr());
+        if failed() || method.is_null() {
+            return None;
+        }
+        let args = [jni_sys::jvalue { l: std::ptr::null_mut() }];
+        let file = (e.CallObjectMethodA.unwrap())(env, java.context, method, args.as_ptr());
+        if failed() || file.is_null() {
+            return None;
+        }
+        let file_class = (e.GetObjectClass.unwrap())(env, file);
+        let path = (e.GetMethodID.unwrap())(env, file_class, c"getAbsolutePath".as_ptr(), c"()Ljava/lang/String;".as_ptr());
+        let text = (e.CallObjectMethodA.unwrap())(env, file, path, std::ptr::null());
+        if failed() || text.is_null() {
+            return None;
+        }
+        let chars = (e.GetStringUTFChars.unwrap())(env, text, std::ptr::null_mut());
+        if chars.is_null() {
+            return None;
+        }
+        let dir = CStr::from_ptr(chars).to_string_lossy().into_owned();
+        (e.ReleaseStringUTFChars.unwrap())(env, text, chars);
+        Some(PathBuf::from(dir))
+    }
+}
+
+/// Debug switch `name` from the `xr-debug` file (`docs/quest.md`), read
+/// before the device exists.
+fn early_switch(name: &str) -> bool {
+    JAVA.get()
+        .and_then(external_files_dir)
+        .and_then(|dir| std::fs::read_to_string(dir.join("xr-debug")).ok())
+        .is_some_and(|text| text.split_whitespace().any(|w| w == name))
+}
+
+/// The debug eye capture (`docs/quest.md`, "Seeing what the headset shows"):
+/// off until the file `capture` appears in the app's external files
+/// directory; then the next stereo frame's two layers are read back and
+/// written beside it as `eye-<n>-left.png` and `eye-<n>-right.png`.
+#[derive(Default)]
+struct Capture {
+    /// The external files directory, once looked up (None inside: none).
+    dir: Option<Option<PathBuf>>,
+    /// Frames since the trigger was last looked for.
+    since_poll: u32,
+    /// The trigger's modification time and length when it could not be
+    /// removed: the same file is not taken again.
+    seen: Option<(SystemTime, u64)>,
+    /// A capture the next drawn frame takes.
+    pending: Option<Request>,
+    /// Captures taken in this process.
+    taken: u32,
+}
+
+/// Frames between looks for the trigger: about twice a second.
+const CAPTURE_POLL_FRAMES: u32 = 36;
+/// The trigger's file name in the external files directory.
+const CAPTURE_TRIGGER: &str = "capture";
+
+impl Capture {
+    /// Look for the trigger every [`CAPTURE_POLL_FRAMES`] frames.
+    fn poll(&mut self) {
+        self.since_poll += 1;
+        if self.pending.is_some() || self.since_poll < CAPTURE_POLL_FRAMES {
+            return;
+        }
+        self.since_poll = 0;
+        let dir = self
+            .dir
+            .get_or_insert_with(|| JAVA.get().and_then(external_files_dir))
+            .clone();
+        let Some(dir) = dir else { return };
+        let trigger = dir.join(CAPTURE_TRIGGER);
+        let Ok(meta) = std::fs::metadata(&trigger) else {
+            self.seen = None;
+            return;
+        };
+        let stamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
+        if self.seen == Some(stamp) {
+            return;
+        }
+        let text = std::fs::read_to_string(&trigger).unwrap_or_default();
+        if std::fs::remove_file(&trigger).is_err() {
+            self.seen = Some(stamp);
+        }
+        match Request::parse(&text) {
+            Ok(request) => self.pending = Some(request),
+            Err(e) => log(true, &format!("capture: {e}")),
+        }
+    }
+
+    /// Copy both layers of `target` into a buffer and write them as PNGs
+    /// (on another thread, so the frame loop waits only for the copy).
+    fn take(&mut self, gpu: &Gpu, target: &wgpu::Texture, format: wgpu::TextureFormat, size: (u32, u32), what: &str) {
+        let Some(Some(dir)) = self.dir.clone() else { return };
+        let bgra = matches!(format, wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm);
+        let (w, h) = size;
+        let bytes_per_row = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let layer_bytes = u64::from(bytes_per_row) * u64::from(h);
+        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("exact xr capture"),
+            size: layer_bytes * 2,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("exact xr capture"),
+        });
+        for layer in 0..2u32 {
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: target,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: layer_bytes * u64::from(layer),
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
+        gpu.queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        let (tx, rx) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
+        if !matches!(rx.recv(), Ok(Ok(()))) {
+            log(true, "capture: the read back failed");
+            return;
+        }
+        let data = match slice.get_mapped_range() {
+            Ok(view) => view.to_vec(),
+            Err(e) => {
+                log(true, &format!("capture: the read back failed: {e:?}"));
+                return;
+            }
+        };
+        buffer.unmap();
+        self.taken += 1;
+        let n = self.taken;
+        let what = what.to_owned();
+        std::thread::spawn(move || {
+            let mut written = Vec::new();
+            for (layer, eye) in ["left", "right"].into_iter().enumerate() {
+                let start = layer * layer_bytes as usize;
+                let rows = &data[start..start + layer_bytes as usize];
+                let rgb = xr_capture::rgb_rows(rows, bytes_per_row as usize, w as usize, h as usize, bgra);
+                let path = dir.join(format!("eye-{n}-{eye}.png"));
+                match std::fs::write(&path, xr_capture::png_rgb(w, h, &rgb)) {
+                    Ok(()) => written.push(path.display().to_string()),
+                    Err(e) => log(true, &format!("capture: {}: {e}", path.display())),
+                }
+            }
+            log(false, &format!("capture {n} ({what}): {}", written.join(" ")));
+        });
+    }
+}
+
 // ---------------------------------------------------------------- the headset
 
 /// Per-second numbers for the log line.
@@ -260,6 +446,7 @@ struct Headset {
     foveation: Option<Foveation>,
     vk_instance: ash::Instance,
     hal_device_ready: bool,
+    capture: Capture,
 }
 
 struct Swapchain {
@@ -380,7 +567,11 @@ fn make(
         .graphics_requirements::<xr::Vulkan>(system)
         .map_err(|e| failure("graphics requirements", e))?;
     // Vulkan 1.1: multiview is core there.
-    let api = vk::make_api_version(0, 1, 1, 0);
+    let api = if early_switch("vk13") {
+        vk::make_api_version(0, 1, 3, 0)
+    } else {
+        vk::make_api_version(0, 1, 1, 0)
+    };
     let min = vk::make_api_version(
         0,
         reqs.min_api_version_supported.major().into(),
@@ -450,11 +641,26 @@ fn make(
     );
     let mut features = grant.features;
     let mut limits = grant.limits;
+    // Debug switches read once at start (`docs/quest.md`, "Debug switches"):
+    // the file `xr-debug` in the app's external files directory.
+    let switches = JAVA
+        .get()
+        .and_then(external_files_dir)
+        .and_then(|dir| std::fs::read_to_string(dir.join("xr-debug")).ok())
+        .unwrap_or_default();
+    crate::set_debug_switches(switches.clone());
+    let switch = crate::debug_switch;
+    if !switches.trim().is_empty() {
+        log(true, &format!("debug switches: {}", switches.split_whitespace().collect::<Vec<_>>().join(" ")));
+    }
+    if switch("no-first-instance") {
+        features.remove(wgpu::Features::INDIRECT_FIRST_INSTANCE);
+    }
     // For a single-pass stereo renderer: multiview of both eyes (wgpu's
     // default view count is 0, so two are asked for), and multisampled
     // two-layer attachments for its 4x frames.
     let views = exposed.capabilities.limits.max_multiview_view_count;
-    if exposed.features.contains(wgpu::Features::MULTIVIEW) && views >= 2 {
+    if exposed.features.contains(wgpu::Features::MULTIVIEW) && views >= 2 && !switch("no-multiview") {
         features |= wgpu::Features::MULTIVIEW;
         limits.max_multiview_view_count = 2;
         if exposed.features.contains(wgpu::Features::MULTISAMPLE_ARRAY) {
@@ -507,8 +713,22 @@ fn make(
         )
     }
     .map_err(|e| failure("wgpu device", e))?;
-    // SAFETY: the instance, adapter and device above.
-    let wgpu_instance = unsafe { wgpu::Instance::from_hal::<wgpu::hal::api::Vulkan>(hal_instance) };
+    // The wgpu instance carries the module's instance flags, as every other
+    // host's does (`native.rs`). `wgpu::Instance::from_hal` would give it
+    // wgpu-core's defaults instead, among them `VALIDATION_INDIRECT_CALL`:
+    // every indirect draw then goes through wgpu's validation pass, and on a
+    // Quest 3 that pass zeroed each of the game renderer's culled draws (the
+    // island drew nothing opaque: `docs/quest.md`, "What the headset drew
+    // white"). So the instance is made with no backend of its own (no second
+    // VkInstance) and given the runtime's adapter; the adapter keeps the
+    // runtime's VkInstance alive.
+    let wgpu_instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::empty(),
+        flags,
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    drop(hal_instance);
+    // SAFETY: the adapter and device above, made from the runtime's instance.
     let adapter = unsafe { wgpu_instance.create_adapter_from_hal(exposed) };
     let (device, queue) = unsafe {
         adapter.create_device_from_hal(
@@ -526,13 +746,15 @@ fn make(
     log(
         false,
         &format!(
-            "device {} (Vulkan {}.{}), multiview {} (views {} of {views}), multisample array {}",
+            "device {} (Vulkan {}.{}, driver {}), multiview {} (views {} of {views}), multisample array {}, indirect first instance {}",
             adapter.get_info().name,
             vk::api_version_major(api),
             vk::api_version_minor(api),
+            adapter.get_info().driver_info,
             features.contains(wgpu::Features::MULTIVIEW),
             limits.max_multiview_view_count,
-            features.contains(wgpu::Features::MULTISAMPLE_ARRAY)
+            features.contains(wgpu::Features::MULTISAMPLE_ARRAY),
+            features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
         ),
     );
 
@@ -579,6 +801,7 @@ fn make(
         foveation,
         vk_instance: ash_instance,
         hal_device_ready: true,
+        capture: Capture::default(),
     });
     log(false, "session made; waiting for READY");
     Ok(Gpu {
@@ -954,6 +1177,7 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
     let state = headset.waiter.wait().map_err(|e| format!("wait: {e}"))?;
     let wait_ms = waited.elapsed().as_secs_f64() * 1e3;
     let started = Instant::now();
+    headset.capture.poll();
     headset.stream.begin().map_err(|e| format!("begin: {e}"))?;
     let time = state.predicted_display_time;
     if !state.should_render {
@@ -970,7 +1194,7 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
     }
     headset.space().map_err(|e| format!("space: {e}"))?;
     let space = headset.space.as_ref().unwrap();
-    let (located, views) = headset
+    let (located, mut views) = headset
         .session
         .locate_views(xr::ViewConfigurationType::PRIMARY_STEREO, time, space)
         .map_err(|e| format!("views: {e}"))?;
@@ -978,10 +1202,33 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
         let _ = headset.stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &[]);
         return Err(format!("{} views", views.len()));
     }
+    // A capture from a fixed pose: both eyes look at the stage from it, for
+    // this frame only, whether or not anyone wears the headset.
+    let capture = headset.capture.pending.take();
+    let fixed = capture.and_then(|c| c.pose).map(|pose| {
+        let focus = module.xr_focus(id).unwrap_or([0.0, 1.0, -0.8]);
+        for (view, (q, p)) in views.iter_mut().zip(pose.eyes(focus)) {
+            view.pose = xr::Posef {
+                orientation: xr::Quaternionf { x: q[0], y: q[1], z: q[2], w: q[3] },
+                position: xr::Vector3f { x: p[0], y: p[1], z: p[2] },
+            };
+            let f = view.fov;
+            if [f.angle_left, f.angle_right, f.angle_up, f.angle_down].iter().all(|a| *a == 0.0) {
+                let a = 45f32.to_radians();
+                view.fov = xr::Fovf { angle_left: -a, angle_right: a, angle_up: a, angle_down: -a };
+            }
+        }
+        format!(
+            "stage pose {:.2} m, {:.0}° down, {:.0}° turned, looking at {focus:?}",
+            pose.distance, pose.pitch_deg, pose.yaw_deg
+        )
+    });
     // Tracking lost (a headset nobody wears, a dark room): the compositor
     // refuses a layer without a valid orientation, so the frame shows
     // nothing and the world waits.
-    if !located.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+    if fixed.is_none() && !located.contains(xr::ViewStateFlags::ORIENTATION_VALID) {
+        // A capture of the tracked head waits for tracking.
+        headset.capture.pending = capture;
         headset
             .stream
             .end(time, xr::EnvironmentBlendMode::OPAQUE, &[])
@@ -1028,6 +1275,14 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
     let encode = Instant::now();
     let drawn = module.render_xr_stereo(id, xr_ms + offset, swapchain.format, &stereo);
     let encode_ms = encode.elapsed().as_secs_f64() * 1e3;
+    if capture.is_some() && drawn.is_some() {
+        if let Some(gpu) = module.gpu() {
+            let what = fixed.as_deref().unwrap_or("the tracked head");
+            headset
+                .capture
+                .take(gpu, &stereo.target, swapchain.format, swapchain.size, what);
+        }
+    }
     // Hand the image back in the layout the runtime expects.
     if let Some(gpu) = module.gpu() {
         let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
