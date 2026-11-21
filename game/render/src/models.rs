@@ -467,7 +467,7 @@ impl<const ASSETS: bool> crate::renderer::RendererWithAssets<ASSETS> {
         if names.iter().any(Option::is_some) {
             return None;
         }
-        let values = baked(m);
+        let values = baked(m, 0);
         let bits = |values: &[f32]| values.iter().map(|v| v.to_bits()).collect::<Vec<_>>();
         self.models
             .materials
@@ -475,7 +475,7 @@ impl<const ASSETS: bool> crate::renderer::RendererWithAssets<ASSETS> {
             .find(|t| {
                 t.bind.is_some()
                     && t.names.iter().all(Option::is_none)
-                    && bits(&baked(&t.data)) == bits(&values)
+                    && bits(&baked(&t.data, 0)) == bits(&values)
             })
             .and_then(|t| t.bind.as_ref())
     }
@@ -843,8 +843,11 @@ fn material_bind(
     }
 }
 
-/// The material's uniform (model.wgsl `BakedMaterial`).
-fn baked(m: &MaterialData) -> Vec<f32> {
+/// The material's uniform (model.wgsl `BakedMaterial`). `present`: which of
+/// its textures are its own rather than the white fallback, a bit each
+/// (`TEXTURE_BASE`…): the shader skips the samples of the rest, whose value
+/// it knows.
+fn baked(m: &MaterialData, present: u32) -> Vec<f32> {
     let mut values = Vec::new();
     values.extend(m.base_color);
     values.extend([
@@ -867,7 +870,7 @@ fn baked(m: &MaterialData) -> Vec<f32> {
         },
         m.rim,
         f32::from(u8::from(m.unlit)),
-        0.,
+        present as f32,
     ]);
     for uv in m.uv_transforms {
         values.extend([uv[0], uv[1], uv[2], uv[3], uv[4], uv[5], 0., 0.]);
@@ -887,7 +890,15 @@ fn new_material_bind(
     names: &[Option<String>; 5],
     textures: &BTreeMap<String, Texture>,
 ) -> (wgpu::BindGroup, u64) {
-    let values = baked(m);
+    // The base (0), metallic-roughness (2), emission (3) and occlusion (4)
+    // textures bound as themselves; a missing one binds a white texel, which
+    // model.wgsl then need not sample (`has_texture`). The normal map has its
+    // own switch, a zero scale.
+    let present = [(0, 1u32), (2, 2), (3, 4), (4, 8)]
+        .iter()
+        .filter(|(i, _)| names[*i].as_ref().is_some_and(|n| textures.contains_key(n)))
+        .fold(0, |bits, (_, bit)| bits | bit);
+    let values = baked(m, present);
     let uniform = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("game baked material"),
         size: (values.len() * 4) as u64,

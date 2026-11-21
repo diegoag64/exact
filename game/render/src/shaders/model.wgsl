@@ -20,13 +20,17 @@ struct BakedMaterial {
 @vertex fn model_vs(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>, @location(2) uv: vec2<f32>, @location(3) color:vec4<f32>, @builtin(instance_index) instance:u32, @builtin(vertex_index) vertex:u32) -> ModelVarying {
     return model_transform(position,normal,uv,instance,vertex,color);
 }
+// Whether the material binds its own texture of this bit (models.rs `baked`:
+// 1 base, 2 metallic-roughness, 4 emission, 8 occlusion). Without one the
+// sampler would read a white texel: 1.0, which the default below is.
+fn has_texture(bit:u32) -> bool { return (u32(baked.flags.w) & bit) != 0u; }
 fn material_uv(uv: vec2<f32>, index:u32) -> vec2<f32> {
     let t=baked.uv[index*2u]; let o=baked.uv[index*2u+1u];
     return mat2x2(t.xy,t.zw)*uv+o.xy;
 }
 fn model_base(input:ModelVarying) -> vec4<f32> {
     var texel=vec4(1.0);
-    if MODEL_TEXTURES { texel=textureSample(base_texture,base_sampler,material_uv(input.uv,0u)+input.uv_offset); }
+    if MODEL_TEXTURES && has_texture(1u) { texel=textureSample(base_texture,base_sampler,material_uv(input.uv,0u)+input.uv_offset); }
     return texel*select(baked.base,vec4(1.0),input.glow.w>0.5)*input.color;
 }
 fn mapped_normal(input:ModelVarying, front:bool) -> vec3<f32> {
@@ -72,7 +76,7 @@ fn layered_ambient(n:vec3<f32>, v:vec3<f32>, lobe:vec3<shading>) -> vec3<shading
 @diagnostic(off, derivative_uniformity)
 fn model_unlit(input:ModelVarying, base:vec4<f32>) -> vec4<f32> {
     var emission=vec3(1.0);
-    if MODEL_TEXTURES { emission=textureSample(emission_texture,emission_sampler,material_uv(input.uv,3u)+input.uv_offset).rgb; }
+    if MODEL_TEXTURES && has_texture(4u) { emission=textureSample(emission_texture,emission_sampler,material_uv(input.uv,3u)+input.uv_offset).rgb; }
     if MODEL_DISCARD && baked.flags.x==1.0 && base.a < baked.emission_cutoff.w { discard; }
     var color=vec3<shading>(base.rgb)+vec3<shading>(emission*baked.emission_cutoff.rgb*input.part_emission)+vec3<shading>(input.glow.xyz);
     if FOG { color=shaded_fog(color,input.world); }
@@ -93,9 +97,9 @@ fn model_shade(input:ModelVarying, front:bool, shadowed:bool) -> vec4<f32> {
     var emission=vec3(1.0);
     var ao=1.0;
     if MODEL_TEXTURES {
-        mr=textureSample(mr_texture,mr_sampler,material_uv(input.uv,2u));
-        emission=textureSample(emission_texture,emission_sampler,material_uv(input.uv,3u)+input.uv_offset).rgb;
-        ao=mix(1.0,textureSample(ao_texture,ao_sampler,material_uv(input.uv,4u)).r,baked.surface.w);
+        if has_texture(2u) { mr=textureSample(mr_texture,mr_sampler,material_uv(input.uv,2u)); }
+        if has_texture(4u) { emission=textureSample(emission_texture,emission_sampler,material_uv(input.uv,3u)+input.uv_offset).rgb; }
+        if has_texture(8u) { ao=mix(1.0,textureSample(ao_texture,ao_sampler,material_uv(input.uv,4u)).r,baked.surface.w); }
     }
     let n=mapped_normal(input,front);
     if MODEL_DISCARD && baked.flags.x==1.0 && base.a < baked.emission_cutoff.w { discard; }
