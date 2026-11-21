@@ -95,6 +95,15 @@ pub(crate) fn uniform(
         data[135] = frame.sun.unwrap().shadows.unwrap().softness.max(0.0);
         data[136] = -frame.proj.inverse().project_point3(Vec3::ZERO).z;
         let shadows = frame.sun.unwrap().shadows.unwrap();
+        // The immersive profile's one fixed layer (profile.rs): its
+        // receiver-plane filter stops after five of nine taps where they agree
+        // (shadow_sample.wgsl `cascade_sample`), which a headset frame's
+        // fragment-bound pass feels. `shadow-all-taps` (xr-debug) measures
+        // without it.
+        let early_out = cascades.count == 1
+            && shadows.fixed_box.is_some()
+            && !exact_gpu::debug_switch("shadow-all-taps");
+        data[137] = if early_out { 1. } else { 0. };
         if let crate::ShadowFilter::PcfSoft {
             depth_bias,
             normal_bias,

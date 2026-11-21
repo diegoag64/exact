@@ -24,6 +24,8 @@ struct Frame {
     shadow_matrices: array<mat4x4<f32>, 3>,
     splits_count: vec4<f32>,
     texels_softness: vec4<f32>,
+    // The sun's near plane in view depth; whether the receiver-plane filter
+    // may stop after five taps (frame.rs).
     shadow_near: vec4<f32>,
     logical_size: vec4<f32>,
     // SH9 diffuse irradiance / π, premultiplied (ibl.rs, ibl.wgsl).

@@ -374,6 +374,10 @@ lower a lighter frame's clocks in an A/B pair. On a Quest 3 that holds level
 `tools/xr/bench.mjs --levels` also sets Meta's debug properties
 (`debug.oculus.cpuLevel`/`gpuLevel`), which hold a level exactly.
 
+`shadow-all-taps` turns off the sun filter's early-out: the immersive
+profile's one fixed layer normally stops after the centre and four corner taps
+of the receiver-plane filter when they agree (`shadow_sample.wgsl`).
+
 `exact_gpu::debug_switch(name)` reads them anywhere in the module.
 With the state line the canvas also logs `xr cull: …`, the GPU cull's
 indirect arguments for this frame read back (instances per view, the first
