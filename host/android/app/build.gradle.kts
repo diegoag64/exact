@@ -33,6 +33,9 @@ val screenOrientation = mapOf(
     "portrait-secondary" to "reversePortrait", "landscape" to "sensorLandscape", "landscape-primary" to "landscape",
     "landscape-secondary" to "reverseLandscape",
 )[manifest["orientation"]] ?: "unspecified"
+// The manifest's `host.android.xr`: `quest` makes the APK a Meta Quest app (docs/quest.md): the launcher activity
+// starts in the headset (the OpenXR immersive categories), held landscape, and the device must track a head.
+val questXr = androidHost?.get("xr") == "quest"
 // The manifest's `host.android.minimumOS`, the oldest Android the app runs on, as its API level. Below 12 the APK keeps
 // the reader's Android 10 and 11 code (proguard-legacy.pro); otherwise R8 leaves none of it.
 val minimumOS = (androidHost?.get("minimumOS") as String?) ?: "12"
@@ -66,7 +69,7 @@ android {
         ndk { abiFilters += providers.gradleProperty("abis").orElse("arm64-v8a").get().split(',') }
         manifestPlaceholders["audioSession"] = manifest["audio_session"] as String? ?: "ambient"
         manifestPlaceholders["appName"] = providers.gradleProperty("appName").get()
-        manifestPlaceholders["screenOrientation"] = screenOrientation
+        manifestPlaceholders["screenOrientation"] = if (questXr) "landscape" else screenOrientation
         manifestPlaceholders["exactDevelopment"] = providers.gradleProperty("exactDevelopment").orNull == "1"
         // The launcher icon (`android:icon` and `android:roundIcon`) and the TV banner among the resources below, as
         // agent-android.mjs names them. With no icon the system draws its default one; with no banner the TV launcher
@@ -122,7 +125,40 @@ android {
     // scripts/android-manifest.mjs, LLP 1133.030 D9, LLP 1133.026 D19 item 3; with the share target's filters on the
     // app's activity, scripts/share-target.mjs, LLP 1133.024 D5), merged into the shell's manifest from the release source set's: an app that grants no device asks
     // for none, and one that uses no such package runs nothing beyond the shell's activity.
-    val fragment = providers.gradleProperty("manifestFragment").orNull?.let { file(it).readText() }?.takeIf { it.isNotBlank() }
+    val packagesFragment = providers.gradleProperty("manifestFragment").orNull?.let { file(it).readText() }?.takeIf { it.isNotBlank() }
+    // A Quest app (`host.android.xr`, docs/quest.md): head tracking required, the OpenXR loader's permissions and
+    // runtime queries (Khronos's loader finds Meta's runtime through its broker), the devices it runs on, and the
+    // immersive categories on the launcher activity, so Horizon OS starts it in the headset.
+    val questApplication = """
+        |        <meta-data android:name="com.oculus.supportedDevices" android:value="quest3|quest3s|questpro" />
+        |        <meta-data android:name="dev.exact.xr" android:value="quest" />
+        |        <activity android:name=".MainActivity">
+        |            <intent-filter>
+        |                <action android:name="android.intent.action.MAIN" />
+        |                <category android:name="android.intent.category.LAUNCHER" />
+        |                <category android:name="com.oculus.intent.category.VR" />
+        |                <category android:name="org.khronos.openxr.intent.category.IMMERSIVE_HMD" />
+        |            </intent-filter>
+        |        </activity>
+        |
+    """.trimMargin()
+    val questFragment = if (!questXr) null else """
+        |    <uses-feature android:name="android.hardware.vr.headtracking" android:required="true" android:version="1" />
+        |    <uses-permission android:name="org.khronos.openxr.permission.OPENXR" />
+        |    <uses-permission android:name="org.khronos.openxr.permission.OPENXR_SYSTEM" />
+        |    <queries>
+        |        <provider android:authorities="org.khronos.openxr.runtime_broker;org.khronos.openxr.system_runtime_broker" />
+        |        <intent><action android:name="org.khronos.openxr.OpenXRRuntimeService" /></intent>
+        |        <intent><action android:name="org.khronos.openxr.OpenXRApiLayerService" /></intent>
+        |    </queries>
+    """.trimMargin()
+    // One `<application>` per manifest: the Quest entries join the packages' when they have one.
+    val fragment = when {
+        questFragment == null -> packagesFragment
+        packagesFragment?.contains("    </application>") == true ->
+            questFragment + "\n" + packagesFragment.replace("    </application>", questApplication + "    </application>")
+        else -> listOfNotNull(packagesFragment, questFragment, "    <application>\n" + questApplication + "    </application>").joinToString("\n")
+    }
     // The app's widgets (LLP 1126.003 D9): per kind a provider subclass (Android names a provider by its class), its
     // `appwidget-provider` XML with D4's sizes, its initial and preview layout, and its receiver in the `:widgets`
     // process; and the rows `:widgets` reads (res/raw/exact_widgets.json). The receivers join the manifest below.

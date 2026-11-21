@@ -72,6 +72,11 @@ pub use tier::{set_thread_tier, set_tier, tier, GpuTier};
 #[cfg(not(target_arch = "wasm32"))]
 mod storage;
 mod uniform;
+mod xr;
+pub use xr::{fov_projection, pose_view, XrEye, XrScratch, XrStereo, XrView};
+pub mod xr_capture;
+pub mod xr_input;
+pub use xr_input::{XrHand, XrInput, XrPose};
 #[cfg(windows)]
 mod window;
 pub use uniform::FrameUniform;
@@ -326,6 +331,58 @@ pub trait Surface {
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
     ) -> bool;
+    /// An immersive session draws this surface in `format` (Some), or ended
+    /// (None): until it ends, a surface preparing for the page's format
+    /// (asset delivery) prepares for the session's instead.
+    fn immersive(&mut self, _format: Option<wgpu::TextureFormat>) {}
+    /// One immersive (WebXR) frame: advance once, then draw each of `views`
+    /// from its eye into its target (of `format`). Unlike [`Surface::render`]
+    /// the surface records and submits its own commands, one submission per
+    /// eye, so that each eye's `queue` writes land between them; the
+    /// session's textures are lent only until the host's callback returns.
+    /// Whether another frame is wanted; None (the default) when this surface
+    /// draws no immersive frames.
+    fn render_xr(
+        &mut self,
+        _frame: &Frame,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _views: &[XrView],
+        _format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        None
+    }
+    /// One stereo frame (OpenXR on a headset): advance once, then draw both
+    /// eyes of `stereo` into its two-layer array target (of `format`). The
+    /// surface records and submits its own commands, as in
+    /// [`Surface::render_xr`]. The default draws each eye on its own through
+    /// `render_xr`, into a view of its layer; a surface that draws both in one
+    /// multiview pass (`wgpu::Features::MULTIVIEW`) overrides it. None when
+    /// this surface draws no immersive frames.
+    fn render_xr_stereo(
+        &mut self,
+        frame: &Frame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stereo: &XrStereo,
+        format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        let views = stereo.eye_views(format);
+        self.render_xr(frame, device, queue, &views, format)
+    }
+    /// How the last stereo frame was drawn, for a host's log: `multiview` (both
+    /// eyes in one pass) or `per-eye`, then `direct` (tonemapped straight into
+    /// the target) or `hdr`, then the scene's samples (`multiview-direct-4x`).
+    /// The default draws each eye on its own.
+    fn xr_stereo_mode(&self) -> &'static str {
+        "per-eye"
+    }
+    /// Where an immersive frame's subject stands in the session's reference
+    /// space (metres): what a host's debug capture looks at when nobody wears
+    /// the headset (`docs/quest.md`). None when the surface does not say.
+    fn xr_focus(&self) -> Option<[f32; 3]> {
+        None
+    }
     /// Whether the last render completed the current picture, qualifying its
     /// `presented` record. Native presentation follows [`Surface::frame_presentable`].
     fn frame_ready(&self) -> bool {
@@ -1460,6 +1517,51 @@ pub use device::{
 };
 
 pub mod android;
+
+static DEBUG_SWITCHES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+/// Set a native host's debug switches once, at start: whitespace-separated
+/// words (the Quest host's `xr-debug` file, `docs/quest.md`).
+pub fn set_debug_switches(words: String) {
+    let _ = DEBUG_SWITCHES.set(words);
+}
+/// Whether the host turned debug switch `name` on ([`set_debug_switches`]);
+/// always false where none were set.
+pub fn debug_switch(name: &str) -> bool {
+    DEBUG_SWITCHES
+        .get()
+        .is_some_and(|words| words.split_whitespace().any(|w| w == name))
+}
+/// Whether this process draws into a native headset: an OpenXR session
+/// made with the device (the `openxr` feature on Android, `docs/quest.md`).
+pub fn headset() -> bool {
+    #[cfg(all(target_os = "android", feature = "openxr"))]
+    return openxr::active();
+    #[cfg(not(all(target_os = "android", feature = "openxr")))]
+    false
+}
+/// A native headset session (OpenXR on Android; `docs/quest.md`).
+#[cfg(all(target_os = "android", feature = "openxr"))]
+pub mod openxr;
+#[cfg(all(target_os = "android", feature = "openxr"))]
+mod openxr_input;
+/// The module's Android initialization for a headset session, which
+/// [`module!`] defines: with the `openxr` feature on Android, a
+/// `gpu_android_init` that keeps the Java VM and Context for the session.
+#[cfg(all(target_os = "android", feature = "openxr"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __openxr_android_init {
+    () => {
+        $crate::android_init!(|android| $crate::openxr::android_init(android));
+    };
+}
+/// Nothing without a headset session.
+#[cfg(not(all(target_os = "android", feature = "openxr")))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __openxr_android_init {
+    () => {};
+}
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fixture;
 #[cfg(not(target_arch = "wasm32"))]

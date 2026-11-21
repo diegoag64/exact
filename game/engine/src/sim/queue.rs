@@ -257,6 +257,11 @@ impl<G: Game> Sim<G> {
             let sensors = sensors.clone();
             self.world.insert_resource(sensors);
         }
+        let xr = *self.input.xr_state();
+        let stored = self.world.try_resource::<crate::XrInput>().map(|x| *x);
+        if stored != Some(xr) && (stored.is_some() || !xr.is_empty()) {
+            self.world.insert_resource(xr);
+        }
     }
     /// Mature holds and let windows lapse up to a tick's end (in µs × HZ).
     pub(super) fn mature_input(&mut self, end: u128) {

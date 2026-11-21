@@ -143,6 +143,19 @@ pub trait Game: 'static {
     fn samples(_args: &Self::Args) -> crate::SceneSamples {
         Self::SAMPLES
     }
+    /// Where the world stands in an immersive (WebXR) session, read each
+    /// immersive frame: the headset's eyes replace the world's camera. Only a
+    /// game whose app.json sets `game.xr` offers a session. Never saved or
+    /// hashed; the default puts world metres on the session's floor.
+    fn xr_stage(_world: &World, _args: &Self::Args) -> crate::XrStage {
+        crate::XrStage::default()
+    }
+    /// The canvas's arguments as a native headset app runs it (app.json's
+    /// `host.android.xr`, a Quest build), where the HUD and menus are not
+    /// drawn: each bind is adjusted here before the world sees it, so a game
+    /// can start straight into play. Never called otherwise; the default
+    /// keeps the arguments the app binds.
+    fn xr_args(_args: &mut Self::Args) {}
     /// One fixed step, called after inputs and before transform propagation.
     fn tick(world: &mut World, input: &Input, args: &Self::Args);
     /// Rebuild presentation-only state (`#[derive(Presentation)]` components) from
@@ -1244,6 +1257,15 @@ impl<G: Game> Sim<G> {
     pub fn sensor_ended(&mut self, sensor: crate::SensorKind) {
         self.input(InputEvent::SensorEnded {
             sensor,
+            at_ms: self.last_us.unwrap_or(0) as f64 / 1000.0,
+            player: 0,
+        });
+    }
+    /// Queue a headset's head and controllers at the current clock, as a
+    /// headset host reports them each frame (`Input::xr`).
+    pub fn xr(&mut self, input: crate::XrInput) {
+        self.input(InputEvent::Xr {
+            input,
             at_ms: self.last_us.unwrap_or(0) as f64 / 1000.0,
             player: 0,
         });

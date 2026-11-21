@@ -224,6 +224,7 @@ impl HookTargets {
             viewport: [size.0 as f32, size.1 as f32, split, 0.],
         };
         queue.write_buffer(&depth.uniform, 0, &u.bytes());
+        crate::counters::pass();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(if opaque {
                 "game opaque depth resolve"
@@ -245,8 +246,10 @@ impl HookTargets {
             multiview_mask: None,
         });
         crate::renderer::viewport(&mut pass, size);
+        crate::counters::pipeline();
         pass.set_pipeline(&depth.pipeline);
         pass.set_bind_group(0, &depth.bind, &[]);
+        crate::counters::commands(1);
         pass.draw(0..3, 0..1);
         true
     }

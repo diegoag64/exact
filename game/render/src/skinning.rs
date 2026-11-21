@@ -638,6 +638,7 @@ impl Skinning {
         if self.active == 0 {
             return false;
         }
+        crate::counters::pass();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("game skin local interpolation"),
             timestamp_writes: timestamps.map(|query_set| wgpu::ComputePassTimestampWrites {
@@ -646,8 +647,10 @@ impl Skinning {
                 end_of_pass_write_index: Some(33),
             }),
         });
+        crate::counters::pipeline();
         pass.set_pipeline(self.pipeline.as_ref().unwrap());
         pass.set_bind_group(0, self.bind.as_ref().unwrap(), &[]);
+        crate::counters::commands(1);
         pass.dispatch_workgroups(self.active, 1, 1);
         true
     }

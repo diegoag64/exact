@@ -164,6 +164,7 @@
       "properties": {
         "audio": { "type": "boolean" },
         "assets": { "type": "boolean" },
+        "xr": { "type": "boolean", "description": "Offer an immersive WebXR session on the web (an Enter VR button where the browser has WebXR on WebGPU): the headset's eyes draw the world, placed by Game::xr_stage." },
         "crate": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-logic$" },
         "look": {
           "type": "object",
@@ -1149,13 +1150,17 @@
           "additionalProperties": false
         },
         "android": {
-          "description": "Android: the package `id` (default app.id), the painter, `minimumOS` (default 12), `notificationChannels`, `certificates` for the origin's `assetlinks.json`, and `maven` libraries for the app's Kotlin.",
+          "description": "Android: the package `id` (default app.id), the painter, `xr` (a headset app), `minimumOS` (default 12), `notificationChannels`, `certificates` for the origin's `assetlinks.json`, and `maven` libraries for the app's Kotlin.",
           "type": "object",
           "properties": {
             "id": {
               "description": "The Android package name (Gradle applicationId), independent of the Apple bundle identifier. Defaults to app.id with hyphens replaced by underscores. Set it before publishing; a store package name is permanent.",
               "type": "string",
               "pattern": "^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+$"
+            },
+            "xr": {
+              "enum": ["quest"],
+              "description": "The Android build is a headset app (docs/quest.md): `quest` makes the APK a Meta Quest 3/3S/Pro app that the headset starts immersive. Its GPU module opens an OpenXR session (Khronos loader, Meta's runtime) whose Vulkan device it renders with, and the game's canvas draws into the headset each frame, placed by Game::xr_stage; the HUD and menus are not drawn there. The APK then requires head tracking, so a phone cannot install it; without a runtime the app draws to its window as usual."
             },
             "painter": {
               "enum": ["ink"],

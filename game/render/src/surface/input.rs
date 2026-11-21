@@ -114,6 +114,35 @@ pub(super) fn engine_event(event: &InputEvent) -> exact_game::InputEvent {
             at_ms: *at_ms,
             player: 0,
         },
+        InputEvent::Xr { input, at_ms } => E::Xr {
+            input: xr_input(input),
+            at_ms: *at_ms,
+            player: 0,
+        },
+    }
+}
+
+/// A headset frame's head and hands as the engine's.
+fn xr_input(input: &exact_gpu::XrInput) -> exact_game::XrInput {
+    use exact_game::{Quat, Vec2, Vec3, XrController, XrPose};
+    let pose = |p: &exact_gpu::XrPose| XrPose {
+        position: Vec3::from_array(p.position),
+        rotation: Quat::from_array(p.orientation),
+    };
+    exact_game::XrInput {
+        head_tracked: input.head_tracked,
+        head: pose(&input.head),
+        hands: input.hands.map(|h| XrController {
+            active: h.active,
+            tracked: h.tracked,
+            aim: pose(&h.aim),
+            grip: pose(&h.grip),
+            trigger: h.trigger,
+            squeeze: h.squeeze,
+            stick: Vec2::from_array(h.stick),
+            buttons: h.buttons,
+        }),
+        recenters: input.recenters,
     }
 }
 

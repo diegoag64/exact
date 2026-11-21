@@ -144,6 +144,38 @@ pub(crate) fn shader_sources() -> Vec<String> {
     all
 }
 
+/// Every module a stereo frame compiles, in its multiview form.
+#[cfg(test)]
+pub(crate) fn multiview_sources() -> Vec<(String, String)> {
+    use crate::stereo::{multiview_source, tone_source};
+    let mut out = Vec::new();
+    for early in [false, true] {
+        let [forward, _, sky, tone, _] = primitive_sources(early);
+        out.push((format!("forward early={early}"), multiview_source(&forward)));
+        out.push((
+            format!("forward half early={early}"),
+            half_precision(&multiview_source(&forward)),
+        ));
+        out.push(("sky".into(), multiview_source(&sky)));
+        out.push(("tone".into(), tone_source(&tone)));
+        out.push((
+            format!("model early={early}"),
+            multiview_source(&model_sources(false, early)),
+        ));
+    }
+    out.push(("outline".into(), multiview_source(&outline_source())));
+    out.push(("water".into(), multiview_source(&water_source())));
+    for samples in [1, 4] {
+        for base in ["particle", "sprite"] {
+            out.push((
+                format!("{base} {samples}"),
+                multiview_source(quad_module(base, "plain", samples)),
+            ));
+        }
+    }
+    out
+}
+
 /// Frustum culling reuses the scene's transform bindings (0-5) in compute.
 pub(crate) fn cull_source() -> String {
     [FRAME, TRANSFORM, piece!("cull")].concat()
@@ -214,6 +246,11 @@ pub(crate) const MODEL_LIGHTS: usize = 2048;
 pub(crate) struct Pipelines {
     pub cache: exact_gpu::PipelineCache,
     pub samples: u32,
+    /// Both eyes' views (`stereo::MASK`): the set a stereo frame draws its
+    /// picture with, whose frame-pass pipelines are multiview and compiled
+    /// from `stereo::multiview_source`; shadow and bloom pipelines stay
+    /// single-view. None: the renderer's own set.
+    pub multiview: Option<std::num::NonZeroU32>,
     pub depth_prepass: bool,
     /// The device has SHADER_F16: forward modules shade in half precision.
     pub half: bool,
@@ -265,6 +302,44 @@ impl Pipelines {
         samples: u32,
         depth_prepass: bool,
     ) -> Self {
+        Self::configured_views(device, format, samples, depth_prepass, None, None)
+    }
+    /// This set's stereo twin: the same targets and settings, its frame-pass
+    /// pipelines drawing both eyes (`stereo::MASK`). It shares this set's
+    /// bind group layouts, so the renderer's bind groups serve both.
+    pub fn stereo(&self, device: &wgpu::Device) -> Self {
+        let mut stereo = Self::configured_views(
+            device,
+            self.format,
+            self.samples,
+            self.depth_prepass,
+            Some(crate::stereo::MASK),
+            Some(self),
+        );
+        stereo.matte_models = self.matte_models;
+        stereo.share_models(device, self);
+        stereo
+    }
+    /// The model family once `from` has one, sharing its material and
+    /// instance layouts.
+    pub fn share_models(&mut self, device: &wgpu::Device, from: &Self) {
+        if self.models.is_none() {
+            if let Some(family) = &from.models {
+                self.prepare_model_with(device, Some((&family.material, &family.instance)));
+            }
+        }
+    }
+    /// [`Self::configured`] with frame-pass pipelines drawing `multiview`'s
+    /// views (a stereo frame's set, `stereo.rs`).
+    pub fn configured_views(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        depth_prepass: bool,
+        multiview: Option<std::num::NonZeroU32>,
+        share: Option<&Self>,
+    ) -> Self {
+        let stereo = multiview.is_some();
         let cache = exact_gpu::PipelineCache::new(device);
         let buffer = |binding, ty, visibility| wgpu::BindGroupLayoutEntry {
             binding,
@@ -361,7 +436,11 @@ impl Pipelines {
                 texture(
                     1,
                     wgpu::TextureSampleType::Float { filterable: false },
-                    wgpu::TextureViewDimension::D2,
+                    if stereo {
+                        wgpu::TextureViewDimension::D2Array
+                    } else {
+                        wgpu::TextureViewDimension::D2
+                    },
                 ),
             ],
         );
@@ -447,10 +526,34 @@ impl Pipelines {
                 ),
             ],
         );
+        // A stereo twin binds the renderer's own groups: the same layouts.
+        let (scene_layout, shadow_layout, camera_layout, bloom_layout, bloom_join_layout) =
+            match share {
+                Some(p) => (
+                    p.scene_layout.clone(),
+                    p.shadow_layout.clone(),
+                    p.camera_layout.clone(),
+                    p.bloom_layout.clone(),
+                    p.bloom_join_layout.clone(),
+                ),
+                None => (
+                    scene_layout,
+                    shadow_layout,
+                    camera_layout,
+                    bloom_layout,
+                    bloom_join_layout,
+                ),
+            };
         let early = device
             .features()
             .contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST);
-        let sources = primitive_sources(early);
+        let mut sources = primitive_sources(early);
+        if stereo {
+            // The frame pass's modules: forward, sky and tone.
+            sources[0] = crate::stereo::multiview_source(&sources[0]);
+            sources[2] = crate::stereo::multiview_source(&sources[2]);
+            sources[3] = crate::stereo::tone_source(&sources[3]);
+        }
         let half = device.features().contains(wgpu::Features::SHADER_F16);
         let pbr_source = if half {
             half_precision(&sources[0])
@@ -479,7 +582,8 @@ impl Pipelines {
         let forward = std::array::from_fn(|i| {
             let shadow = i & 1 != 0;
             let layouts = [Some(&scene_layout), Some(&shadow_layout)];
-            make_pipeline(
+            make_pipeline_views(
+                multiview,
                 device,
                 cache.handle.as_ref(),
                 &shaders[0],
@@ -551,10 +655,12 @@ impl Pipelines {
             &scene_layout,
             None,
             samples,
+            multiview,
         );
         let tone = std::array::from_fn(|i| {
             let layouts = [Some(&tone_layout), Some(&bloom_layout)];
-            make_pipeline(
+            make_pipeline_views(
+                multiview,
                 device,
                 cache.handle.as_ref(),
                 &shaders[3],
@@ -671,6 +777,7 @@ impl Pipelines {
         Self {
             cache,
             samples,
+            multiview,
             depth_prepass,
             matte_models: false,
             models: None,
@@ -768,14 +875,31 @@ impl Pipelines {
     }
 
     pub fn prepare_model(&mut self, device: &wgpu::Device) {
+        self.prepare_model_with(device, None);
+    }
+    fn prepare_model_with(
+        &mut self,
+        device: &wgpu::Device,
+        share: Option<(&wgpu::BindGroupLayout, &wgpu::BindGroupLayout)>,
+    ) {
         self.models.get_or_insert_with(|| {
-            let material = crate::model_pipeline::material_layout(device);
-            let instance = crate::model_pipeline::instance_layout(device);
+            let (material, instance) = match share {
+                Some((material, instance)) => (material.clone(), instance.clone()),
+                None => (
+                    crate::model_pipeline::material_layout(device),
+                    crate::model_pipeline::instance_layout(device),
+                ),
+            };
             let shaders = std::array::from_fn(|i| {
                 device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("game model shader"),
                     source: wgpu::ShaderSource::Wgsl({
-                        let source = model_sources(i == 1, self.early);
+                        let mut source = model_sources(i == 1, self.early);
+                        // A stereo set's forward module draws both eyes; its
+                        // shadow module casts once, single-view.
+                        if i == 0 && self.multiview.is_some() {
+                            source = crate::stereo::multiview_source(&source);
+                        }
                         // The forward module shades; the shadow module only casts.
                         if i == 0 && self.half {
                             half_precision(&source).into()
@@ -859,6 +983,7 @@ impl Pipelines {
                 shadow,
                 (self.samples, self.format),
                 (self.early, key & PREPASS != 0, false, self.matte_models),
+                if shadow { None } else { self.multiview },
             )
         };
         if shadow {
@@ -908,6 +1033,7 @@ impl Pipelines {
                 let cache = self.cache.handle.clone();
                 let (target, early) = ((self.samples, self.format), self.early);
                 let matte = self.matte_models;
+                let multiview = self.multiview;
                 family.workers.start(key, move || {
                     slots[key].get_or_init(|| {
                         crate::model_pipeline::pipeline(
@@ -919,6 +1045,7 @@ impl Pipelines {
                             false,
                             target,
                             (early, key & PREPASS != 0, false, matte),
+                            multiview,
                         )
                     });
                 });
@@ -952,6 +1079,7 @@ impl Pipelines {
         let scene_layout = self.scene_layout.clone();
         let shadow_layout = self.shadow_layout.clone();
         let (samples, format, supports_early) = (self.samples, self.format, self.early);
+        let multiview = self.multiview;
         let build = move |key| {
             let general = key & PRIMITIVE_GENERAL != 0;
             let early = key & EARLY != 0;
@@ -967,7 +1095,8 @@ impl Pipelines {
             };
             let flag = |bit| if key & bit != 0 { 1.0 } else { 0.0 };
             let direct = key & DIRECT != 0;
-            make_pipeline(
+            make_pipeline_views(
+                multiview,
                 &device,
                 cache.as_ref(),
                 &shader,
@@ -1058,7 +1187,8 @@ impl Pipelines {
     ) -> &wgpu::RenderPipeline {
         self.camera_depth[usize::from(mirrored) + 2 * usize::from(fading) + 4 * usize::from(direct)]
             .get_or_init(|| {
-                make_pipeline(
+                make_pipeline_views(
+                    self.multiview,
                     device,
                     self.cache.handle.as_ref(),
                     &self.pbr,
@@ -1110,6 +1240,7 @@ impl Pipelines {
                 false,
                 (self.samples, self.format),
                 (false, false, true, self.matte_models),
+                self.multiview,
             )
         };
         let coverage = family.camera_depth[index & !4].get_or_init(|| make(key & !32));
@@ -1129,6 +1260,7 @@ impl Pipelines {
                 &self.scene_layout,
                 Some(self.format),
                 self.samples,
+                self.multiview,
             )
         })
     }
@@ -1166,8 +1298,10 @@ fn sky_pipeline(
     layout: &wgpu::BindGroupLayout,
     direct: Option<wgpu::TextureFormat>,
     samples: u32,
+    multiview: Option<std::num::NonZeroU32>,
 ) -> wgpu::RenderPipeline {
-    make_pipeline(
+    make_pipeline_views(
+        multiview,
         device,
         cache,
         module,
@@ -1194,6 +1328,46 @@ fn sky_pipeline(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn make_pipeline(
+    device: &wgpu::Device,
+    cache: Option<&wgpu::PipelineCache>,
+    shader: &wgpu::ShaderModule,
+    label: &str,
+    vs: &str,
+    fs: Option<&str>,
+    layouts: &[Option<&wgpu::BindGroupLayout>],
+    buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+    depth_stencil: Option<wgpu::DepthStencilState>,
+    samples: u32,
+    format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
+    constants: &[(&str, f64)],
+    mirrored: bool,
+    color_write: bool,
+) -> wgpu::RenderPipeline {
+    make_pipeline_views(
+        None,
+        device,
+        cache,
+        shader,
+        label,
+        vs,
+        fs,
+        layouts,
+        buffers,
+        depth_stencil,
+        samples,
+        format,
+        blend,
+        constants,
+        mirrored,
+        color_write,
+    )
+}
+
+/// [`make_pipeline`] drawing `multiview`'s views (a stereo set's).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn make_pipeline_views(
+    multiview: Option<std::num::NonZeroU32>,
     device: &wgpu::Device,
     cache: Option<&wgpu::PipelineCache>,
     shader: &wgpu::ShaderModule,
@@ -1265,7 +1439,7 @@ pub(crate) fn make_pipeline(
                 count: samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: multiview,
             cache,
         })
     })

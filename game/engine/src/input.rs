@@ -6,6 +6,7 @@ mod pad;
 mod pointers;
 mod sensor;
 mod triggers;
+mod xr;
 pub(crate) use contexts::seed;
 pub use contexts::{Binding, Bindings, InputContexts};
 pub(crate) use pad::pad_index;
@@ -13,6 +14,7 @@ pub use pad::{Curve, Pad, PadState, MAX_PADS, PAD_BUTTONS};
 pub use pointers::{PointerContact, PointerEdge};
 pub use sensor::{tilt_stick, SensorKind, SensorSample, SensorState, Tilt};
 pub use triggers::InputState;
+pub use xr::{XrButton, XrController, XrHand, XrInput, XrPose};
 /// Register the input resources a world restores in any process: contexts,
 /// bindings and the state input last applied.
 pub(crate) fn register_resources(world: &mut crate::World) {
@@ -20,7 +22,8 @@ pub(crate) fn register_resources(world: &mut crate::World) {
         .register_resource::<InputContexts>()
         .register_resource::<Bindings>()
         .register_resource::<InputState>()
-        .register_resource::<SensorState>();
+        .register_resource::<SensorState>()
+        .register_resource::<XrInput>();
 }
 use triggers::{Trigger, TriggerState};
 
@@ -442,6 +445,17 @@ pub enum InputEvent {
         /// Local player.
         player: u8,
     },
+    /// A headset's head and controllers, whole, in the session's reference
+    /// space: sent each frame a headset draws. The latest stands until the
+    /// next; one that only moved replaces an earlier one within a tick.
+    Xr {
+        /// The head and both hands.
+        input: XrInput,
+        /// Host clock milliseconds.
+        at_ms: f64,
+        /// Local player.
+        player: u8,
+    },
 }
 impl Default for InputEvent {
     fn default() -> Self {
@@ -512,6 +526,8 @@ impl InputEvent {
                     ..
                 },
             ) => a == b && ac == bc && astd == bstd && ab == bb,
+            // A headset frame that pressed and released nothing only moved.
+            (Self::Xr { input: a, .. }, Self::Xr { input: b, .. }) => a.same_buttons(b),
             _ => false,
         }
     }
@@ -534,6 +550,7 @@ impl InputEvent {
             | Self::Message { at_ms, .. }
             | Self::Sensor { at_ms, .. }
             | Self::SensorEnded { at_ms, .. }
+            | Self::Xr { at_ms, .. }
             | Self::Blur { at_ms, .. } => *at_ms = value,
         }
     }
@@ -547,6 +564,7 @@ impl InputEvent {
             | Self::Message { at_ms, .. }
             | Self::Sensor { at_ms, .. }
             | Self::SensorEnded { at_ms, .. }
+            | Self::Xr { at_ms, .. }
             | Self::Blur { at_ms, .. } => *at_ms,
         }
     }
@@ -622,6 +640,12 @@ pub struct Input {
     sensors: SensorState,
     #[data(skip)]
     tick_samples: Vec<sensor::TickSample>,
+    // The world's XrInput as last applied, and the buttons pressed and
+    // released this tick, a bit mask a hand.
+    #[data(skip)]
+    xr: XrInput,
+    #[data(skip)]
+    xr_edges: [(u32, u32); 2],
     // Every contact and this tick's edges; a restore rebuilds them from `contacts`.
     #[data(skip)]
     pointers: Vec<PointerContact>,
@@ -710,6 +734,7 @@ impl Input {
             InputEvent::Sensor { values, .. } if values.iter().any(|v| !v.is_finite()) => {
                 return Err("a sensor sample needs finite values".into())
             }
+            InputEvent::Xr { input, .. } => input.validate()?,
             _ => {}
         }
         Ok(())
@@ -994,6 +1019,7 @@ impl Input {
         if let Some(p) = &mut self.pointer {
             p.delta = Vec2::ZERO;
         }
+        self.clear_xr_edges();
         self.clear_pointer_edges();
     }
     pub(crate) fn restore_dynamic(&mut self, saved: Self) {
@@ -1022,8 +1048,10 @@ impl Input {
     /// edges it makes.
     pub(crate) fn apply(&mut self, event: InputEvent, at_us: i64) {
         self.mature(|due| due <= at_us);
-        if matches!(event, InputEvent::Wheel { .. } | InputEvent::Message { .. })
-            || (matches!(
+        if matches!(
+            event,
+            InputEvent::Wheel { .. } | InputEvent::Message { .. } | InputEvent::Xr { .. }
+        ) || (matches!(
                 event,
                 InputEvent::Pointer {
                     phase: PointerPhase::Move,
@@ -1095,6 +1123,7 @@ impl Input {
                 ..
             } => self.apply_sample(sensor, values, dropped, at_us),
             InputEvent::SensorEnded { sensor, .. } => self.end_sensor(sensor),
+            InputEvent::Xr { input, .. } => self.apply_xr(input),
             InputEvent::Control {
                 name,
                 id,

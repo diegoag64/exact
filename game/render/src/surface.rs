@@ -4,6 +4,7 @@ mod look;
 pub(crate) mod performance;
 mod render;
 mod textures;
+mod xr;
 
 use crate::{
     perf::{Perf, Stamp},
@@ -115,8 +116,22 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     /// Texture uploads off the presenting thread, under the live clock.
     #[cfg(not(target_arch = "wasm32"))]
     uploads: Option<crate::models::Uploads>,
+    /// The format an immersive session draws in, while one does (`xr`).
+    xr_format: Option<wgpu::TextureFormat>,
+    /// A session that drew in another format ended: the next renderer made
+    /// for a new format delivers its textures again.
+    xr_left: bool,
+    /// How the last stereo frame drew (`Surface::xr_stereo_mode`).
+    xr_mode: &'static str,
+    /// Stereo frames drawn, for the one-time state line (`xr_state_line`).
+    xr_frames: u64,
 }
 impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, P, ASSETS, H> {
+    /// The renderer's counts for the last frame drawn (draws, instances,
+    /// cumulative direct and stereo frames).
+    pub fn frame_stats(&self) -> crate::Stats {
+        self.perf.stats
+    }
     /// Bake-owned development capability; production modules refuse live edits.
     #[doc(hidden)]
     pub fn development_edits(mut self, allowed: bool) -> Self {
@@ -472,6 +487,12 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
     ) {
         // A host prepares before it renders: the renderer this makes is timed
         // under the host's clock, and its time counts in the next drawn frame.
+        // In an immersive session the renderer is the session's format's.
+        let format = self.xr_format.unwrap_or(format);
+        // Back from a session in another format: its renderer is made again.
+        if std::mem::take(&mut self.xr_left) && self.format.is_some_and(|f| f != format) {
+            self.redeliver_textures();
+        }
         if self.perf.rendering {
             return self.prepare_now(device, queue, format);
         }
@@ -570,7 +591,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         let timing = crate::perf::PipelineTiming::start(self.perf.measure_frame);
         self.perf.live = !frame.seekable;
         self.perf.rendering = true;
-        let wants = self.render_frame(frame, device, queue, encoder, target, format);
+        let wants = self.render_frame(frame, device, queue, encoder, target, format, None);
         // Natively the module draws an incomplete frame again (gpu/src/frame.rs);
         // the web's host draws only what the surface asks for.
         self.still = !wants && (cfg!(target_arch = "wasm32") || self.frame_ready);
@@ -586,6 +607,109 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         drop(timing);
         self.perf.keep_pipeline_time(frame.seekable);
         wants
+    }
+    fn render_xr(
+        &mut self,
+        frame: &Frame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        views: &[exact_gpu::XrView],
+        format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        let first = &views.first()?.target;
+        // A host that draws only immersive frames need not announce them.
+        if self.xr_format.is_none() {
+            self.immersive_format(Some(format));
+        }
+        self.perf.measure_frame = false;
+        self.perf.live = !frame.seekable;
+        self.perf.rendering = true;
+        // Each eye records and submits its own commands (`xr::encode_eyes`).
+        let mut unused = device.create_command_encoder(&Default::default());
+        let wants = self.render_frame(
+            frame,
+            device,
+            queue,
+            &mut unused,
+            first,
+            format,
+            Some(xr::Immersive::Eyes(views)),
+        );
+        self.still = !wants;
+        self.perf.rendering = false;
+        Some(wants)
+    }
+    fn render_xr_stereo(
+        &mut self,
+        frame: &Frame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stereo: &exact_gpu::XrStereo,
+        format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        let target = stereo.array_view(format);
+        self.perf.measure_frame = false;
+        self.perf.live = !frame.seekable;
+        self.perf.rendering = true;
+        // Both eyes in one multiview pass where the device has it, else each
+        // on its own (`xr::encode_stereo`); either submits its own commands.
+        let mut unused = device.create_command_encoder(&Default::default());
+        let before = (self.perf.stats.stereo_frames, self.perf.stats.direct_frames);
+        let wants = self.render_frame(
+            frame,
+            device,
+            queue,
+            &mut unused,
+            &target,
+            format,
+            Some(xr::Immersive::Stereo(stereo)),
+        );
+        let after = &self.perf.stats;
+        self.xr_mode = xr::stereo_mode(
+            after.stereo_frames > before.0,
+            after.direct_frames > before.1,
+            after.samples,
+        );
+        self.still = !wants;
+        self.perf.rendering = false;
+        self.xr_frames += 1;
+        // A second before the state line, read back what the GPU cull keeps.
+        if self.xr_frames + 72 <= xr::XR_STATE_FRAME && self.xr_frames < xr::XR_STATE_FRAME {
+            if let Some((renderer, _)) = &mut self.render {
+                if self.xr_frames + 72 == xr::XR_STATE_FRAME {
+                    renderer.count_culled(true);
+                }
+                // Finish a read the last frame started.
+                let _ = renderer.culled();
+            }
+        }
+        // Once, three seconds in (assets delivered, the world running): what
+        // the headset's world holds, so a state problem shows in the log
+        // without a picture.
+        if self.xr_frames == xr::XR_STATE_FRAME {
+            eprintln!("{}", self.xr_state_line());
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some((renderer, _)) = &self.render {
+                eprintln!(
+                    "xr cull: {}",
+                    renderer.cull.debug_read(&renderer.device, &renderer.queue, &renderer.slot_list)
+                );
+            }
+            if let Some((renderer, _)) = &mut self.render {
+                renderer.count_culled(false);
+            }
+        }
+        Some(wants)
+    }
+    fn xr_stereo_mode(&self) -> &'static str {
+        self.xr_mode
+    }
+    fn xr_focus(&self) -> Option<[f32; 3]> {
+        let sim = self.sim.as_ref()?;
+        Some(G::xr_stage(sim.world(), sim.args()).position.to_array())
+    }
+    fn immersive(&mut self, format: Option<wgpu::TextureFormat>) {
+        self.immersive_format(format);
     }
     fn frame_ready(&self) -> bool {
         self.frame_ready
@@ -654,6 +778,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
                 | InputEvent::Pointer { phase: Q::Down, .. }
                 | InputEvent::Control { phase: Q::Down, .. }
         ) || matches!(event, InputEvent::Pad { buttons, .. } if buttons.iter().any(|b| *b >= 0.5))
+            || matches!(event, InputEvent::Xr { input, .. } if input.hands.iter().any(|h| h.buttons != 0))
         {
             self.presentation.unlock();
         }

@@ -16,22 +16,39 @@ pub struct Rung {
     pub tier: GpuTier,
     /// The rung itself: `Auto` resolved by the tier.
     pub level: GpuTier,
+    /// The immersive profile (`crate::profile`) replaces the rung's clamps:
+    /// asked for with `Quality::Xr`, and taken by every immersive frame.
+    pub xr: bool,
 }
 
 impl Rung {
     /// `asked` under `tier`: `Auto` takes the tier's rung.
     pub fn resolve(asked: Quality, tier: GpuTier) -> Self {
         let level = match asked {
-            Quality::Auto => tier,
+            Quality::Auto | Quality::Xr => tier,
             Quality::Low => GpuTier::Low,
             Quality::Mid => GpuTier::Mid,
             Quality::High => GpuTier::High,
         };
-        Self { asked, tier, level }
+        Self {
+            asked,
+            tier,
+            level,
+            xr: asked == Quality::Xr,
+        }
+    }
+
+    /// This rung for an immersive frame: the profile's.
+    pub fn immersive(self) -> Self {
+        Self { xr: true, ..self }
     }
 
     /// Scene samples: one under `Low`; the game's own as the ceiling.
     pub fn samples(self, game: SceneSamples) -> SceneSamples {
+        // The profile's direct frames resolve four samples in tile memory.
+        if self.xr {
+            return game;
+        }
         if self.level == GpuTier::Low {
             SceneSamples::One
         } else {
@@ -46,6 +63,9 @@ impl Rung {
         if game != AUTO_RENDER_SCALE {
             return game;
         }
+        if self.xr {
+            return 1.0;
+        }
         match self.level {
             GpuTier::Low => 0.5,
             GpuTier::Mid => 0.75,
@@ -56,6 +76,20 @@ impl Rung {
     /// Clamp one frame's input. `authored_shadows`: the game inserted a
     /// `Shadows` resource, which is its own and stands.
     pub fn clamp(self, input: &mut crate::FrameInput<'_>, authored_shadows: bool) {
+        self.clamp_staged(input, authored_shadows, None);
+    }
+
+    /// `clamp`, with where the game places its world in a headset, which
+    /// the profile fits the sun's shadow to.
+    pub fn clamp_staged(
+        self,
+        input: &mut crate::FrameInput<'_>,
+        authored_shadows: bool,
+        stage: Option<&exact_game::XrStage>,
+    ) {
+        if self.xr {
+            return crate::profile::clamp(input, authored_shadows, stage);
+        }
         if self.level == GpuTier::High {
             return;
         }
@@ -87,6 +121,9 @@ impl Rung {
     /// `Low`, both elsewhere. A present-time choice (`Renderer::set_water_effects`):
     /// the saved resource keeps the game's caustics and shafts.
     pub fn water_effects(self) -> WaterEffects {
+        if self.xr {
+            return crate::profile::water_effects();
+        }
         let on = self.level != GpuTier::Low;
         WaterEffects {
             caustics: on,
@@ -100,11 +137,12 @@ impl Rung {
             Quality::Low => "low",
             Quality::Mid => "mid",
             Quality::High => "high",
+            Quality::Xr => "xr",
         };
         format!(
             r#"{{"asked":"{asked}","tier":"{}","rung":"{}","samples":{},"scale":{scale}}}"#,
             self.tier.keyword(),
-            self.level.keyword(),
+            if self.xr { "xr" } else { self.level.keyword() },
             samples.count()
         )
     }

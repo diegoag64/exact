@@ -209,6 +209,15 @@ pub enum InputEvent {
         /// Host input clock in milliseconds.
         at_ms: f64,
     },
+    /// A headset's head and controllers for one frame, in the session's
+    /// reference space ([`crate::XrInput`]; `docs/quest.md`, "Controllers").
+    /// A headset host sends one each frame it draws; no other host sends any.
+    Xr {
+        /// The head and both hands.
+        input: crate::XrInput,
+        /// Host clock in milliseconds.
+        at_ms: f64,
+    },
 }
 
 impl crate::Module {

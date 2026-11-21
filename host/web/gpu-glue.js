@@ -110,6 +110,8 @@ let recoveryTimer, recoveryFailures = 0, recoveryErrorLogged = false, recoveryTe
 let terminalDevice = false;
 let tierCode = 0; // the GPU tier this page told its modules (gpu-tier.js `TIERS`)
 let raf = null;
+// xr-glue.js when the page offers immersive sessions; its session state is `api.immersive`.
+let xr = null;
 let finishReady;
 const ready = new Promise((resolve) => { finishReady = resolve; });
 
@@ -212,6 +214,8 @@ const clockFor = (frameNow) => exact.now?.() ?? frameNow;
 let hidden = document.hidden;
 function lifecycle(code) {
   if (trapped()) return;
+  // An immersive session may hide the page; its world keeps drawing in the headset.
+  if (code === 0 && exact.gpu?.immersive?.active) return;
   if (code === 0 || code === 1) hidden = code === 0;
   const deliver = () => { for (const entry of surfaces.values()) if (entry.id) gpu?.gpu_lifecycle(entry.id, code); };
   if (recoveringDevice) recoveringDevice.then(deliver); else deliver();
@@ -526,6 +530,8 @@ let sentPeriod = 0, frameGeneration = 0, frameRaw = 0;
 function frame(now) {
   raf = null;
   if (trapped()) return;
+  // In an immersive session the session's frames draw the world (xr-glue.js).
+  if (exact.gpu?.immersive?.active) return;
   if (hidden && !exact.now) return;
   const at = frameAt = pace(now);
   frameRaw = now; frameGeneration++;
@@ -1389,6 +1395,12 @@ async function swap(version) {
   if (lost) recoverDevice();
   return { ms: performance.now() - start, errors };
 }
+// A game that opted in to immersive sessions (app.json `game.xr`): its adapter
+// must be XR compatible before the module asks for one (xr-glue.js).
+if (artifact === null && document.documentElement?.hasAttribute?.("data-exact-xr")) {
+  try { xr = await import("./xr-glue.js"); xr.shimAdapter(); }
+  catch (error) { console.error("exact xr:", error); xr = null; }
+}
 const t0 = performance.now();
 try {
   const version = (stem === "gpu" ? exact.gpuVersion : exact.gpuVersions?.[stem]) ?? 0;
@@ -1425,3 +1437,21 @@ try {
   // A refused initial surface must not prevent independent canvases from loading.
   for (const entry of waiting) { try { ensure(entry); } catch (error) { report(error); } }
 } finally { finishReady(loaded); }
+if (xr && loaded) xr.offer({
+  module: () => gpu,
+  target: () => [...surfaces.values()].find(e => e.id && !e.terminal && live(e.view) === e) ?? null,
+  clock: now => { gpu?.gpu_host_frame?.(now, performance.now(), 0, 0); return clockFor(now); },
+  started: session => {
+    if (raf !== null) { cancelAnimationFrame(raf); raf = null; }
+    const rate = session.frameRate;
+    if (rate > 0 && gpu) { sentPeriod = 1000 / rate; gpu.gpu_period(sentPeriod); }
+  },
+  after: entry => { if (!trapped()) { messages(entry); flush(); } },
+  ended: () => {
+    sentPeriod = 0;
+    for (const entry of surfaces.values()) entry.wants = true;
+    lifecycle(document.hidden ? 0 : 1);
+    schedule();
+  },
+  lost: () => recoverDevice(),
+}).then(state => { if (state) api.immersive = state; }, error => console.error("exact xr:", error));
