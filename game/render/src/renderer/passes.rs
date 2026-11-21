@@ -528,6 +528,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 &self.scene_binds[self.current],
                 above,
                 state.direct,
+                crate::water::Passes::raster(&self.device, self.immersive),
             );
             self.probe_note(|| Drew::Fixed("water surface"));
             state.draws += 1;

@@ -362,7 +362,10 @@ that what it costs shows as what its absence saves (never a fix: the picture
 lacks that part): `skip-models` (the culled opaque models and primitives),
 `skip-quads` (opaque quads), `skip-outlines` (outline hulls), `skip-sky`,
 `skip-water`, `skip-translucent`, and `no-sun-shadow` (the immersive
-profile drops the sun's shadow).
+profile drops the sun's shadow). `water-fullscreen` draws the water's
+surface as the flat path does, a full-screen triangle that writes its depth,
+rather than the plane's geometry (`game/render/src/water.rs`,
+`Passes::raster`).
 
 `exact_gpu::debug_switch(name)` reads them anywhere in the module.
 With the state line the canvas also logs `xr cull: …`, the GPU cull's

@@ -787,7 +787,7 @@ fn make(
     log(
         false,
         &format!(
-            "device {} (Vulkan {}.{}, driver {}), multiview {} (views {} of {views}), multisample array {}, indirect first instance {}",
+            "device {} (Vulkan {}.{}, driver {}), multiview {} (views {} of {views}), multisample array {}, indirect first instance {}, unclipped depth {}",
             adapter.get_info().name,
             vk::api_version_major(api),
             vk::api_version_minor(api),
@@ -795,7 +795,8 @@ fn make(
             features.contains(wgpu::Features::MULTIVIEW),
             limits.max_multiview_view_count,
             features.contains(wgpu::Features::MULTISAMPLE_ARRAY),
-            features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE)
+            features.contains(wgpu::Features::INDIRECT_FIRST_INSTANCE),
+            features.contains(wgpu::Features::DEPTH_CLIP_CONTROL)
         ),
     );
 

@@ -286,6 +286,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             frame.water.map(|_| crate::water::from_above(frame)),
             shafts,
             direct,
+            crate::water::Passes::raster(&self.device, self.immersive),
         );
         let cascades = self.prepare_effects(frame);
         let map = frame.environment_map.and_then(|m| {

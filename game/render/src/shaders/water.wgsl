@@ -29,6 +29,33 @@ struct WaterFragment {
     @builtin(frag_depth) depth: f32,
 }
 @fragment fn water_fs(input: SkyVarying) -> WaterFragment {
+    return water_surface(input.ndc);
+}
+// The surface as geometry (water.rs, `Passes::raster`): a square of the plane
+// about the camera, reaching far past any far plane, drawn with unclipped
+// depth so that beyond the far plane it lies at the far depth, as
+// `water_surface`'s clamp puts it. The rasterizer then gives each sample the
+// plane's depth, and early depth tests leave hidden water unshaded: the
+// full-screen form writes its depth from the shader and shades every pixel.
+const WATER_REACH: f32 = 1.0e6;
+struct WaterPlane {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) at: vec4<f32>,
+}
+@vertex fn water_plane_vs(@builtin(vertex_index) i: u32) -> WaterPlane {
+    // Two triangles, corners 0 1 2 and 0 2 3 of the square.
+    let c = select(i, select(0u, i - 2u, i > 3u), i >= 3u);
+    let corner = vec2(select(-1.0, 1.0, c == 1u || c == 2u), select(-1.0, 1.0, c >= 2u));
+    let centre = frame.camera_alpha.xyz;
+    let world = vec3(centre.x + corner.x * WATER_REACH, frame.water.x, centre.z + corner.y * WATER_REACH);
+    let clip = frame.view_proj * vec4(world, 1.0);
+    return WaterPlane(clip, clip);
+}
+@fragment fn water_plane_fs(input: WaterPlane) -> @location(0) vec4<f32> {
+    return water_surface(input.at.xy / input.at.w).color;
+}
+fn water_surface(ndc: vec2<f32>) -> WaterFragment {
+    let input = SkyVarying(vec4(0.0), ndc);
     // From the near plane, so an orthographic camera's parallel rays start apart.
     let near = frame.inverse_view_proj * vec4(input.ndc, 0.0, 1.0);
     let origin = near.xyz / near.w;
