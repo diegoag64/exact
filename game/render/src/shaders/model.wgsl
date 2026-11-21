@@ -81,7 +81,9 @@ fn model_unlit(input:ModelVarying, base:vec4<f32>) -> vec4<f32> {
     return vec4(vec3<f32>(color),alpha);
 }
 @diagnostic(off, derivative_uniformity)
-fn model_shade(input:ModelVarying, front:bool, visibility:f32) -> vec4<f32> {
+// `shadowed`: the sun's shadow is sampled after the unlit return and the
+// discards, only where the sun lights the fragment.
+fn model_shade(input:ModelVarying, front:bool, shadowed:bool) -> vec4<f32> {
     if DEPTH_PREPASS && input.clip.z >= 1.0 { discard; }
     // Opaque materials fade by dither; blended ones multiply alpha below.
     if MODEL_DISCARD && baked.flags.x!=2.0 && faded(input.slot,input.clip.xy) { discard; }
@@ -123,6 +125,8 @@ fn model_shade(input:ModelVarying, front:bool, visibility:f32) -> vec4<f32> {
     }
     var color=environment*shading(ao)+emitted+glow;
     if frame.sun_direction_illuminance.w>0.0 {
+        var visibility=1.0;
+        if shadowed { visibility=sun_visibility(input.world,normalize(input.normal)); }
         color+=layered_brdf(n,v,(-frame.sun_direction_illuminance.xyz),albedo,metallic,roughness)*vec3<shading>(frame.sun_color_count.xyz)*shading(frame.sun_direction_illuminance.w)*shading(visibility*water_caustics(input.world));
     }
     if LIGHTS && frame.fill_direction_illuminance.w>0.0 { color+=fill_light(n,v,albedo,metallic,roughness); }
@@ -135,8 +139,8 @@ fn model_shade(input:ModelVarying, front:bool, visibility:f32) -> vec4<f32> {
     if MODEL_DISCARD && baked.flags.x==2.0 { alpha=base.a*(1.0-fade_of(input.slot)); }
     return vec4(vec3<f32>(color),alpha);
 }
-@fragment fn model_fs(input:ModelVarying,@builtin(front_facing) front:bool)->@location(0) vec4<f32> {return finish(model_shade(input,front,1.0));}
-@fragment fn model_fs_shadow(input:ModelVarying,@builtin(front_facing) front:bool)->@location(0) vec4<f32> {return finish(model_shade(input,front,sun_visibility(input.world,normalize(input.normal))));}
+@fragment fn model_fs(input:ModelVarying,@builtin(front_facing) front:bool)->@location(0) vec4<f32> {return finish(model_shade(input,front,false));}
+@fragment fn model_fs_shadow(input:ModelVarying,@builtin(front_facing) front:bool)->@location(0) vec4<f32> {return finish(model_shade(input,front,true));}
 
 @fragment fn model_depth_fs(input:ModelVarying) {
     if faded(input.slot,input.clip.xy) { discard; }

@@ -4,8 +4,8 @@
 // 64,000-cube frame: 170 ms, 15 with this). Only for batches with no fading slot:
 // `faded` discards, and a forced early test writes depth before it would.
 @fragment @early_depth_test(force) fn fs_early(input: Surface) -> @location(0) vec4<f32> {
-    return finish(shade(input, 1.0));
+    return finish(shade(input, false));
 }
 @fragment @early_depth_test(force) fn fs_shadow_early(input: Surface) -> @location(0) vec4<f32> {
-    return finish(shade(input, sun_visibility(input.world, normalize(input.normal))));
+    return finish(shade(input, true));
 }
