@@ -278,8 +278,15 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         depth_prepass: bool,
     ) -> Self {
         let samples = samples.count();
+        // `depth-prepass`: a measuring switch (docs/quest.md) that draws the
+        // opaque depth first at any sample count.
+        let measured = exact_gpu::debug_switch("depth-prepass");
+        if measured {
+            exact_gpu::debug_applied(&format!("depth prepass at {samples}x"));
+        }
+        let depth_prepass = depth_prepass || measured;
         assert!(
-            !depth_prepass || samples == 1,
+            !depth_prepass || samples == 1 || measured,
             "depth prepass requires one scene sample"
         );
         let pipelines = Pipelines::configured(device, format, samples, depth_prepass);

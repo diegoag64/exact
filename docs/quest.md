@@ -382,7 +382,10 @@ Trade-off switches, which lower the picture to price a fidelity choice (never
 a setting): `msaa-1` draws a headset frame with one sample rather than four
 (the `stereo frames draw …-1x` line confirms it), and `eye-scale-<k>` makes the
 eye swapchains `k` times the recommended size (0.25 to 1.5; logged as
-`applied: eye-scale …`).
+`applied: eye-scale …`). `depth-prepass` draws the opaque depth first, inside
+the forward pass, at any sample count (logged as `applied: depth prepass at
+4x`). On the Quest 3 menu it cost +2.4 ms at 4x and +1.1 ms at 1x: the frame is
+bound by geometry per bin, not by overdraw (the game's `artifacts/quest/perf/LOG.md`, phase 4).
 
 What a frame applied is logged under `exact-xr` as `applied: …`: the skip
 switches in force, and the sun filter's state (`sun shadow early-out true
