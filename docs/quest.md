@@ -378,6 +378,16 @@ lower a lighter frame's clocks in an A/B pair. On a Quest 3 that holds level
 profile's one fixed layer normally stops after the centre and four corner taps
 of the receiver-plane filter when they agree (`shadow_sample.wgsl`).
 
+Trade-off switches, which lower the picture to price a fidelity choice (never
+a setting): `msaa-1` draws a headset frame with one sample rather than four
+(the `stereo frames draw …-1x` line confirms it), and `eye-scale-<k>` makes the
+eye swapchains `k` times the recommended size (0.25 to 1.5; logged as
+`applied: eye-scale …`).
+
+What a frame applied is logged under `exact-xr` as `applied: …`: the skip
+switches in force, and the sun filter's state (`sun shadow early-out true
+(cascades 1, fixed box true, shadow-all-taps false)`) whenever it changes.
+
 `exact_gpu::debug_switch(name)` reads them anywhere in the module.
 With the state line the canvas also logs `xr cull: …`, the GPU cull's
 indirect arguments for this frame read back (instances per view, the first

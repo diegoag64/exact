@@ -47,6 +47,10 @@ impl Rung {
     pub fn samples(self, game: SceneSamples) -> SceneSamples {
         // The profile's direct frames resolve four samples in tile memory.
         if self.xr {
+            // `msaa-1`: a measuring switch (docs/quest.md), never a setting.
+            if exact_gpu::debug_switch("msaa-1") {
+                return SceneSamples::One;
+            }
             return game;
         }
         if self.level == GpuTier::Low {

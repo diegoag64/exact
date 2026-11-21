@@ -43,6 +43,7 @@ extern "C" {
     fn __system_property_get(name: *const c_char, value: *mut c_char) -> c_int;
 }
 
+static DEBUG_SCALE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
 /// One line to logcat under the tag `exact-xr` (info), or warn.
 pub(crate) fn log(warn: bool, line: &str) {
     let text = CString::new(line.replace('\0', " ")).unwrap_or_default();
@@ -1028,7 +1029,19 @@ impl Headset {
             .enumerate_view_configuration_views(self.system, xr::ViewConfigurationType::PRIMARY_STEREO)
             .map_err(|e| format!("views: {e}"))?;
         let view = views.first().ok_or("no views")?;
-        let size = (view.recommended_image_rect_width, view.recommended_image_rect_height);
+        let mut size = (view.recommended_image_rect_width, view.recommended_image_rect_height);
+        // `eye-scale-<k>` (a measuring switch, docs/quest.md): eyes of k times
+        // the recommended size, to price the resolution against the picture.
+        let scale = DEBUG_SCALE.get_or_init(|| {
+            crate::DEBUG_SWITCHES
+                .get()
+                .and_then(|w| w.split_whitespace().find_map(|w| w.strip_prefix("eye-scale-")?.parse::<f32>().ok()))
+                .filter(|k| (0.25..=1.5).contains(k))
+        });
+        if let Some(k) = *scale {
+            size = ((size.0 as f32 * k).round() as u32, (size.1 as f32 * k).round() as u32);
+            log(false, &format!("applied: eye-scale {k}: {}x{}", size.0, size.1));
+        }
         let formats = self
             .session
             .enumerate_swapchain_formats()

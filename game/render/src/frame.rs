@@ -104,6 +104,19 @@ pub(crate) fn uniform(
             && shadows.fixed_box.is_some()
             && !exact_gpu::debug_switch("shadow-all-taps");
         data[137] = if early_out { 1. } else { 0. };
+        // Logged when it changes, on a headset only (`debug_applied` logs
+        // nowhere else), so a run's switches can be confirmed. Not
+        // `exact_gpu::headset()`: a headset frame is drawn under its lock.
+        static LAST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(u32::MAX);
+        let all_taps = exact_gpu::debug_switch("shadow-all-taps");
+        let state = early_out as u32 | all_taps as u32 * 2 | cascades.count << 2;
+        if LAST.swap(state, std::sync::atomic::Ordering::Relaxed) != state {
+            exact_gpu::debug_applied(&format!(
+                "sun shadow early-out {early_out} (cascades {}, fixed box {}, shadow-all-taps {all_taps})",
+                cascades.count,
+                shadows.fixed_box.is_some(),
+            ));
+        }
         if let crate::ShadowFilter::PcfSoft {
             depth_bias,
             normal_bias,

@@ -1531,6 +1531,15 @@ pub fn debug_switch(name: &str) -> bool {
         .get()
         .is_some_and(|words| words.split_whitespace().any(|w| w == name))
 }
+/// One line to the headset's log (`exact-xr`, logcat) where a debug switch
+/// took effect, so a measurement can confirm what the engine applied
+/// (`docs/quest.md`, "Debug switches"); nothing elsewhere.
+pub fn debug_applied(line: &str) {
+    #[cfg(all(target_os = "android", feature = "openxr"))]
+    openxr::log(false, &format!("applied: {line}"));
+    #[cfg(not(all(target_os = "android", feature = "openxr")))]
+    let _ = line;
+}
 /// Whether this process draws into a native headset: an OpenXR session
 /// made with the device (the `openxr` feature on Android, `docs/quest.md`).
 pub fn headset() -> bool {

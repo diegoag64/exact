@@ -998,14 +998,27 @@ impl Skips {
         static SKIPS: std::sync::OnceLock<Skips> = std::sync::OnceLock::new();
         *SKIPS.get_or_init(|| {
             let on = exact_gpu::debug_switch;
-            Skips {
+            let skips = Skips {
                 models: on("skip-models"),
                 quads: on("skip-quads"),
                 outlines: on("skip-outlines"),
                 sky: on("skip-sky"),
                 water: on("skip-water"),
                 translucent: on("skip-translucent"),
+            };
+            let named = [
+                ("skip-models", skips.models),
+                ("skip-quads", skips.quads),
+                ("skip-outlines", skips.outlines),
+                ("skip-sky", skips.sky),
+                ("skip-water", skips.water),
+                ("skip-translucent", skips.translucent),
+            ];
+            let left: Vec<_> = named.iter().filter(|(_, on)| *on).map(|(name, _)| *name).collect();
+            if !left.is_empty() {
+                exact_gpu::debug_applied(&left.join(" "));
             }
+            skips
         })
     }
 }
