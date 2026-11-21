@@ -24,6 +24,8 @@ pub struct StagePose {
     pub pitch_deg: f32,
     /// Degrees the head stands turned about +Y.
     pub yaw_deg: f32,
+    /// The point it looks at, where that is not the stage's centre (`look`).
+    pub focus: Option<[f32; 3]>,
 }
 
 impl Default for StagePose {
@@ -32,6 +34,7 @@ impl Default for StagePose {
             distance: 0.6,
             pitch_deg: 40.0,
             yaw_deg: 0.0,
+            focus: None,
         }
     }
 }
@@ -42,7 +45,9 @@ pub const IPD: f32 = 0.064;
 impl Request {
     /// The trigger file's text: empty or `head` for the tracked head;
     /// `stage [distance_m [pitch_deg [yaw_deg]]]` for the fixed pose
-    /// (0.6 m, 40° down, 0° by default).
+    /// (0.6 m, 40° down, 0° by default); `look <ex ey ez> <tx ty tz>` for a
+    /// head at a point of the reference space looking at another (a close
+    /// look at something that is not the stage's centre: a panel, a hand).
     pub fn parse(text: &str) -> Result<Self, String> {
         let mut words = text.split_whitespace();
         match words.next() {
@@ -69,7 +74,34 @@ impl Request {
                 }
                 Ok(Self { pose: Some(pose) })
             }
-            Some(other) => Err(format!("`{other}`: the trigger says `head` or `stage …`")),
+            Some("look") => {
+                let n: Vec<f32> = words
+                    .map(|w| match w.parse::<f32>() {
+                        Ok(v) if v.is_finite() => Ok(v),
+                        _ => Err(format!("`{w}` is not a number")),
+                    })
+                    .collect::<Result<_, _>>()?;
+                if n.len() != 6 {
+                    return Err("look takes an eye and a target, three numbers each".into());
+                }
+                let f = [n[3] - n[0], n[4] - n[1], n[5] - n[2]];
+                let distance = (f[0] * f[0] + f[1] * f[1] + f[2] * f[2]).sqrt();
+                let flat = (f[0] * f[0] + f[2] * f[2]).sqrt();
+                if distance < 1e-4 {
+                    return Err("look: the eye is at its target".into());
+                }
+                // Straight down or up, the head stands unturned.
+                let yaw = if flat < 1e-5 { 0.0 } else { (-f[0]).atan2(-f[2]) };
+                Ok(Self {
+                    pose: Some(StagePose {
+                        distance,
+                        pitch_deg: (-f[1]).atan2(flat).to_degrees(),
+                        yaw_deg: yaw.to_degrees(),
+                        focus: Some([n[3], n[4], n[5]]),
+                    }),
+                })
+            }
+            Some(other) => Err(format!("`{other}`: the trigger says `head`, `stage …` or `look …`")),
         }
     }
 }
@@ -102,6 +134,7 @@ impl StagePose {
     /// The head: its orientation (`[x, y, z, w]`, OpenXR's: looking down −Z
     /// with +Y up at identity) and position, looking at `focus`.
     pub fn head(&self, focus: Vec3) -> (Quat, Vec3) {
+        let focus = self.focus.unwrap_or(focus);
         let (pitch, yaw) = (-self.pitch_deg.to_radians(), self.yaw_deg.to_radians());
         let qx = [(pitch / 2.0).sin(), 0.0, 0.0, (pitch / 2.0).cos()];
         let qy = [0.0, (yaw / 2.0).sin(), 0.0, (yaw / 2.0).cos()];
@@ -218,6 +251,25 @@ mod tests {
         assert!(Request::parse("stage -1").is_err());
         assert!(Request::parse("stage x").is_err());
         assert!(Request::parse("left").is_err());
+    }
+
+    #[test]
+    fn a_look_stands_the_head_at_its_eye_facing_its_target() {
+        let (eye, target) = ([0.3f32, 1.4, 0.2], [-0.2f32, 1.0, -0.6]);
+        let pose = Request::parse("look 0.3 1.4 0.2  -0.2 1.0 -0.6").unwrap().pose.unwrap();
+        // Wherever the stage is.
+        let (q, head) = pose.head([9.0, 9.0, 9.0]);
+        for i in 0..3 {
+            assert!((head[i] - eye[i]).abs() < 1e-5, "{head:?}");
+        }
+        let view = crate::pose_view(q, head);
+        let ahead = [0, 1, 2].map(|r| (0..3).map(|c| view[c * 4 + r] * target[c]).sum::<f32>() + view[12 + r]);
+        assert!(ahead[0].abs() < 1e-5 && ahead[1].abs() < 1e-5 && ahead[2] < 0.0, "{ahead:?}");
+        // Straight down is a pose too; no eye at its target, nor five numbers.
+        let down = Request::parse("look 0 2 0  0 1 0").unwrap().pose.unwrap();
+        assert!((down.pitch_deg - 90.0).abs() < 1e-3 && down.yaw_deg == 0.0);
+        assert!(Request::parse("look 0 1 0 0 1 0").is_err());
+        assert!(Request::parse("look 0 1 0 0 1").is_err());
     }
 
     #[test]

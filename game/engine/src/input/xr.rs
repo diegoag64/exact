@@ -155,6 +155,11 @@ pub struct XrInput {
     pub head: XrPose,
     /// Left, right ([`XrHand::index`]).
     pub hands: [XrController; 2],
+    /// How many times the runtime has moved the reference space under the
+    /// person since the session began: a recenter (on a Quest, the Meta
+    /// button held). Poses after one are in the new space, so what a game
+    /// placed about the person at the start is placed again when this grows.
+    pub recenters: u32,
 }
 impl XrInput {
     /// One hand's controller.

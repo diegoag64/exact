@@ -150,6 +150,10 @@ pub struct XrInput {
     pub head: XrPose,
     /// Left, right.
     pub hands: [XrHand; 2],
+    /// How many times the runtime has moved the reference space under the
+    /// person since the session began (a recenter: on a Quest, the Meta
+    /// button held). Every pose after one is in the new space.
+    pub recenters: u32,
 }
 
 impl XrInput {
@@ -186,6 +190,8 @@ enum Step {
     Release(usize),
     Wait(u32),
     Message(String),
+    /// Count a recenter, as the runtime's event does.
+    Recenter,
 }
 
 /// Scripted hands and head that stand in for the tracked ones
@@ -198,6 +204,8 @@ pub struct Injector {
     waiting: u32,
     hands: [Option<XrHand>; 2],
     head: Option<XrPose>,
+    /// Recenters the script counted, added to the runtime's.
+    recenters: u32,
 }
 
 impl Injector {
@@ -217,6 +225,9 @@ impl Injector {
     /// - `<hand> release`, `head release`, `release`: back to tracking.
     /// - `wait <frames>`, `message <text>` (a posted message, as Contract's
     ///   `postMessage`).
+    /// - `recenter`: count a recenter ([`XrInput::recenters`]), as the
+    ///   runtime does when the person holds the Meta button; the poses stay
+    ///   where they are (script a `head` first to stand somewhere else).
     pub fn script(&mut self, text: &str) -> Result<(), String> {
         let mut steps = Vec::new();
         for (n, line) in text.lines().enumerate() {
@@ -280,8 +291,10 @@ impl Injector {
                 }
                 Step::Wait(frames) => self.waiting = frames,
                 Step::Message(text) => messages.push(text),
+                Step::Recenter => self.recenters += 1,
             }
         }
+        input.recenters = input.recenters.wrapping_add(self.recenters);
         for (slot, scripted) in input.hands.iter_mut().zip(&self.hands) {
             if let Some(hand) = scripted {
                 *slot = *hand;
@@ -340,6 +353,7 @@ fn parse_step(text: &str, steps: &mut Vec<Step>) -> Result<(), String> {
             steps.push(Step::Message(body.to_owned()));
         }
         "release" if rest.is_empty() => steps.push(Step::Release(3)),
+        "recenter" if rest.is_empty() => steps.push(Step::Recenter),
         "head" => match rest.first() {
             Some(&"release") if rest.len() == 1 => steps.push(Step::Release(2)),
             _ => {
@@ -511,5 +525,23 @@ mod tests {
         let mut input = XrInput::default();
         inject.frame(&mut input);
         assert_eq!(input, XrInput::default());
+    }
+
+    #[test]
+    fn a_scripted_recenter_is_counted_on_top_of_the_runtimes() {
+        let mut inject = Injector::default();
+        inject.script("head 0.4 1.2 0.3  1 0 0; recenter; wait 2; recenter").unwrap();
+        let mut input = XrInput { recenters: 3, ..XrInput::default() };
+        inject.frame(&mut input);
+        assert_eq!(input.recenters, 4);
+        assert!(close(input.head.position, [0.4, 1.2, 0.3]));
+        // The count stands on later frames, and the next adds to it.
+        let mut input = XrInput { recenters: 3, ..XrInput::default() };
+        inject.frame(&mut input);
+        assert_eq!(input.recenters, 4);
+        let mut input = XrInput { recenters: 3, ..XrInput::default() };
+        inject.frame(&mut input);
+        assert_eq!(input.recenters, 5);
+        assert!(inject.script("recenter now").is_err());
     }
 }

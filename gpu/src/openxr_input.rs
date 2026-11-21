@@ -226,6 +226,13 @@ impl Controls {
         }
     }
 
+    /// The runtime moved the reference space under the person (a recenter):
+    /// counted, so the canvas hears that every pose from here is in the new
+    /// space ([`XrInput::recenters`]).
+    pub(crate) fn recentered(&mut self) {
+        self.tracked.recenters = self.tracked.recenters.wrapping_add(1);
+    }
+
     /// One frame: sync the actions, locate the poses in `base` at `time`,
     /// run the script, and return the frame's input when it differs from
     /// what was last delivered, with the messages the script posted.

@@ -160,7 +160,9 @@ there), `tracked`, `aim` and `grip` poses (position in metres and a unit
 quaternion, in the session's reference space; a pose points along its −Z),
 `trigger` and `squeeze` in 0–1, `stick` (+x right, +y forward) and `buttons`,
 bits of `xr_input::button` (`TRIGGER`, `SQUEEZE`, `PRIMARY` A or X,
-`SECONDARY` B or Y, `MENU`, `STICK`).
+`SECONDARY` B or Y, `MENU`, `STICK`); and `recenters`, the runtime's
+`XrEventDataReferenceSpaceChangePending` events counted since the session
+began.
 
 **The world** (`game/engine/src/input/xr.rs`):
 
@@ -180,7 +182,9 @@ fn tick(world: &mut World, input: &Input, args: &Args) {
 ```
 
 `Input::xr()` is the latest state (`XrInput`: `head`, `head_tracked`,
-`hands`); `xr_pressed` and `xr_released` are the edges since the last tick;
+`hands`, and `recenters`, which grows each time the runtime moves the
+reference space under the person: the Meta button held. A game that placed
+its world about the person's head places it again when the count changes); `xr_pressed` and `xr_released` are the edges since the last tick;
 `XrController::down` is held. The state is also the world resource `XrInput`
 (saved and hashed, absent in a world no headset reported to), and
 `Sim::xr(input)` queues one in a test. Within a tick a later frame that
@@ -232,6 +236,7 @@ in the reference space (the floor where the app started, +Y up, −Z ahead).
 | `<hand> release`, `head release`, `release` | back to tracking |
 | `wait <frames>` | let that many frames pass |
 | `message <text>` | post text to the canvas, as Contract's `postMessage` |
+| `recenter` | count a recenter (`XrInput::recenters`), as the runtime does when the Meta button is held; the poses stay where they are, so script a `head` first to stand somewhere else |
 
 A wrong line refuses the whole file, by line. `gpu/src/xr_input.rs`
 (`Injector`) holds the grammar and its tests; nothing runs until the file
@@ -286,6 +291,7 @@ undistorted.
     adb shell "echo head > $D/capture"          # the next frame from the tracked head
     adb shell "echo stage > $D/capture"         # from a fixed pose looking at the stage
     adb shell "echo 'stage 0.8 30 -20' > $D/capture"   # distance m, pitch ° down, yaw °
+    adb shell "echo 'look 0 1.4 0  -0.3 1.1 -0.6' > $D/capture"   # an eye point, looking at a target
     adb logcat -s exact-xr | grep capture       # `capture <n> (…): <left> <right>`
     adb pull $D/eye-1-left.png; adb pull $D/eye-1-right.png
 
@@ -302,6 +308,9 @@ undistorted.
   com.oculus.vrpowermanager.prox_close` keeps it running for a while). The
   compositor shows that one frame too, so someone wearing the headset sees a
   one-frame jump.
+- `look <ex ey ez> <tx ty tz>` is the same fixed head standing at a point of
+  the reference space and looking at another: a close look at what is not
+  the stage's centre (a panel over a hand, a controller, one tile).
 - Captures are numbered from 1 in each process (`eye-<n>-left.png`,
   `eye-<n>-right.png`) and overwrite an earlier process's of the same number.
   The module removes the trigger after reading it; where it cannot, the same

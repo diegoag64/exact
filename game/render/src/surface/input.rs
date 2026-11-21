@@ -142,6 +142,7 @@ fn xr_input(input: &exact_gpu::XrInput) -> exact_game::XrInput {
             stick: Vec2::from_array(h.stick),
             buttons: h.buttons,
         }),
+        recenters: input.recenters,
     }
 }
 

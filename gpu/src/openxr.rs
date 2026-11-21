@@ -884,6 +884,14 @@ impl Headset {
                         controls.profile_changed(&self.instance, &self.session);
                     }
                 }
+                // A recenter (the Meta button held): the runtime re-bases
+                // LOCAL and LOCAL_FLOOR about the person.
+                Event::ReferenceSpaceChangePending(change) => {
+                    log(false, &format!("reference space {:?} changes (a recenter)", change.reference_space_type()));
+                    if let Some(controls) = &mut self.controls {
+                        controls.recentered();
+                    }
+                }
                 Event::DisplayRefreshRateChangedFB(change) => log(
                     false,
                     &format!(
@@ -1237,9 +1245,13 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
                 view.fov = xr::Fovf { angle_left: -a, angle_right: a, angle_up: a, angle_down: -a };
             }
         }
+        let focus = pose.focus.unwrap_or(focus);
         format!(
-            "stage pose {:.2} m, {:.0}° down, {:.0}° turned, looking at {focus:?}",
-            pose.distance, pose.pitch_deg, pose.yaw_deg
+            "{} pose {:.2} m, {:.0}° down, {:.0}° turned, looking at {focus:?}",
+            if pose.focus.is_some() { "look" } else { "stage" },
+            pose.distance,
+            pose.pitch_deg,
+            pose.yaw_deg
         )
     });
     // Tracking lost (a headset nobody wears, a dark room): the compositor
