@@ -581,6 +581,7 @@ fn make(
     wanted.fb_foveation = available.fb_foveation;
     wanted.fb_foveation_configuration = available.fb_foveation_configuration;
     wanted.fb_swapchain_update_state = available.fb_swapchain_update_state;
+    wanted.ext_performance_settings = available.ext_performance_settings;
     let instance = entry
         .create_instance(
             &xr::ApplicationInfo {
@@ -886,6 +887,7 @@ impl Headset {
                             self.session.begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
                             self.running = true;
                             self.request_refresh_rate();
+                            self.request_fixed_levels();
                         }
                         xr::SessionState::STOPPING => {
                             self.session.end()?;
@@ -941,6 +943,32 @@ impl Headset {
             }
         }
         Ok(())
+    }
+
+    /// The `fixed-levels` debug switch (`docs/quest.md`, "Debug switches"):
+    /// CPU and GPU held at XR_EXT_performance_settings' sustained-high level,
+    /// so that A/B measurements are not skewed by the runtime lowering the
+    /// clocks of a lighter frame. Never on otherwise: the runtime's dynamic
+    /// levels save power.
+    fn request_fixed_levels(&self) {
+        if !crate::debug_switch("fixed-levels") {
+            return;
+        }
+        let Some(perf) = self.instance.exts().ext_performance_settings else {
+            log(true, "fixed-levels: the runtime has no XR_EXT_performance_settings");
+            return;
+        };
+        for domain in [xr::sys::PerfSettingsDomainEXT::CPU, xr::sys::PerfSettingsDomainEXT::GPU] {
+            // SAFETY: the extension's function on this live session.
+            let result = unsafe {
+                (perf.perf_settings_set_performance_level)(
+                    self.session.as_raw(),
+                    domain,
+                    xr::sys::PerfSettingsLevelEXT::SUSTAINED_HIGH,
+                )
+            };
+            log(true, &format!("fixed-levels: {domain:?} sustained high ({result:?})"));
+        }
     }
 
     fn request_refresh_rate(&self) {
