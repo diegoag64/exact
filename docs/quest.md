@@ -322,6 +322,19 @@ undistorted.
   stage …; journal: …` (the last journal lines), so a state problem shows in
   the log without a picture.
 
+### Holding the head still
+
+For measurements that must see the same picture run after run (a headset on
+a desk, a benchmark): a file named `xr-hold` in the same directory, holding
+`stage …` or `look …` as the capture trigger takes them, makes every frame
+draw from that fixed pose until a later `xr-hold` says `head` or `release`.
+The module looks for it as often as for the capture trigger, removes it and
+logs `hold: …`. Like a capture's pose, a held one draws whether or not the
+head is tracked; the compositor shows it as it shows any frame.
+
+    adb shell "echo 'look 0 1.4 0  0 0.85 -0.9' > $D/xr-hold"
+    adb shell "echo release > $D/xr-hold"
+
 `gpu/src/xr_capture.rs` holds what needs no headset (the trigger's grammar,
 the fixed pose, the PNG writer, with their tests); `gpu/src/openxr.rs`
 (`Capture`) polls, reads back and writes.
@@ -342,6 +355,14 @@ They exist to bisect a picture that is wrong on the headset only:
 | `no-merge` | each culled group is its own `draw_indexed_indirect` (no multi-draw runs) |
 | `cull-pass-all` | the GPU cull keeps everything in every view (its frustum test passes all) |
 | `vk13` | the runtime makes the Vulkan instance at 1.3 rather than 1.1 |
+| `swap-color-only` | the swapchain is made for colour attachment only (no sampled or copy usage; the eye capture then cannot read it) |
+
+Measuring switches, which leave a part of the game renderer's frame out so
+that what it costs shows as what its absence saves (never a fix: the picture
+lacks that part): `skip-models` (the culled opaque models and primitives),
+`skip-quads` (opaque quads), `skip-outlines` (outline hulls), `skip-sky`,
+`skip-water`, `skip-translucent`, and `no-sun-shadow` (the immersive
+profile drops the sun's shadow).
 
 `exact_gpu::debug_switch(name)` reads them anywhere in the module.
 With the state line the canvas also logs `xr cull: …`, the GPU cull's

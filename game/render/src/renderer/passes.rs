@@ -403,7 +403,10 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         pass.set_index_buffer(self.indices.raw.slice(..), wgpu::IndexFormat::Uint32);
         let mut bound = Bound::merging(self.probe.is_none());
         bound.group(&mut pass, 1, &self.shadow_sample);
-        for (index, group) in self.cull.groups.iter().enumerate() {
+        // Measuring switches (`xr-debug`, the engine's docs/quest.md): what a
+        // part of the pass costs is the time it saves when left out.
+        let skip = Skips::read();
+        for (index, group) in self.cull.groups.iter().enumerate().filter(|_| !skip.models) {
             if let Some(material) = self.model_material(group.batch) {
                 if let Some(custom) = hooks.materials().iter().find(|c| c.material == material) {
                     let binds = self.custom_bindings.as_ref().unwrap();
@@ -456,8 +459,9 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         if layer {
             self.scene_viewport(&mut pass, state.size, false);
         }
-        for (index, _) in
-            (self.quads.draws.iter().enumerate()).filter(|(_, d)| self.quads.opaque(d))
+        for (index, _) in (self.quads.draws.iter().enumerate())
+            .filter(|(_, d)| self.quads.opaque(d))
+            .filter(|_| !skip.quads)
         {
             let pipeline =
                 (self.quads).bind::<ASSETS>(&mut pass, index, &self.models.textures, state.direct);
@@ -479,14 +483,18 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             state.times[2] = start.map(|s| s.elapsed());
             self.scene_viewport(&mut pass, state.size, false);
         }
-        let hulls = self.draw_outlines(&mut pass, state.size, state.direct);
+        let hulls = if skip.outlines {
+            Default::default()
+        } else {
+            self.draw_outlines(&mut pass, state.size, state.direct)
+        };
         if hulls.draws > 0 {
             self.probe_note(|| Drew::Hulls { draws: hulls.draws });
         }
         state.draws += hulls.draws;
         state.hull_instances += hulls.instances;
         state.hull_triangles += hulls.triangles;
-        if frame::has_sky(frame, self.sky_ready) {
+        if frame::has_sky(frame, self.sky_ready) && !skip.sky {
             crate::counters::pipeline();
             pass.set_pipeline(if state.direct {
                 self.pipelines.sky_direct(&self.device)
@@ -511,7 +519,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             }
             state.times[3] = start.map(|s| s.elapsed());
         }
-        if frame.water.is_some() {
+        if frame.water.is_some() && !skip.water {
             // A background hook may have left its own viewport and scissor.
             self.scene_viewport(&mut pass, state.size, false);
             let above = crate::water::from_above(frame);
@@ -524,7 +532,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             self.probe_note(|| Drew::Fixed("water surface"));
             state.draws += 1;
         }
-        if !state.scene_copy && !split {
+        if !state.scene_copy && !split && !skip.translucent {
             timing::pass_stamp(
                 &self.device,
                 &mut pass,
@@ -969,4 +977,34 @@ mod bound_tests;
 
 pub(super) fn hook_error(stage: &str, error: RenderError) -> RenderError {
     RenderError::Scene(format!("render hook {stage}: {error}"))
+}
+
+/// Parts of the forward pass a measurement leaves out (`xr-debug` switches:
+/// `skip-models`, `skip-quads`, `skip-outlines`, `skip-sky`, `skip-water`,
+/// `skip-translucent`). Never set outside a debug run.
+#[derive(Clone, Copy, Default)]
+struct Skips {
+    models: bool,
+    quads: bool,
+    outlines: bool,
+    sky: bool,
+    water: bool,
+    translucent: bool,
+}
+
+impl Skips {
+    fn read() -> Self {
+        static SKIPS: std::sync::OnceLock<Skips> = std::sync::OnceLock::new();
+        *SKIPS.get_or_init(|| {
+            let on = exact_gpu::debug_switch;
+            Skips {
+                models: on("skip-models"),
+                quads: on("skip-quads"),
+                outlines: on("skip-outlines"),
+                sky: on("skip-sky"),
+                water: on("skip-water"),
+                translucent: on("skip-translucent"),
+            }
+        })
+    }
 }

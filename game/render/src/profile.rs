@@ -79,6 +79,10 @@ pub fn shadow_box(stage: &XrStage) -> Option<ShadowBox> {
 pub(crate) fn clamp(input: &mut crate::FrameInput<'_>, authored_shadows: bool, stage: Option<&XrStage>) {
     let _ = authored_shadows;
     if let Some(sun) = &mut input.sun {
+        // A measurement's switch (`xr-debug`): the frame without the sun's shadow.
+        if exact_gpu::debug_switch("no-sun-shadow") {
+            sun.shadows = None;
+        }
         if let Some(shadows) = &mut sun.shadows {
             shadows.cascades = 1;
             shadows.resolution = shadows.resolution.min(SHADOW_RESOLUTION);

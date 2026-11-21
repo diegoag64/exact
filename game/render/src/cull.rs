@@ -434,9 +434,19 @@ impl Cull {
                 *total += u64::from(words[(v * groups + g) * 5 + 1]);
             }
         }
-        let first: Vec<String> = (0..groups.min(6))
+        let mut first: Vec<String> = (0..groups.min(6))
             .map(|g| format!("{:?}", &words[g * 5..g * 5 + 5]))
             .collect();
+        // The camera's heaviest groups by triangles: [group, triangles, index count, instances].
+        let mut heavy: Vec<(usize, u64, u32, u32)> = (0..groups)
+            .map(|g| (g, u64::from(words[g * 5]) / 3 * u64::from(words[g * 5 + 1]), words[g * 5], words[g * 5 + 1]))
+            .collect();
+        heavy.sort_by(|a, b| b.1.cmp(&a.1));
+        let total: u64 = heavy.iter().map(|h| h.1).sum();
+        first.push(format!(
+            "; camera triangles {total}, heaviest {:?}",
+            &heavy[..heavy.len().min(12)]
+        ));
         format!(
             "groups={groups} views={} first_instance={} instances per view {totals:?}; camera draws {}; \
              compacted camera slots in their group {}/{} ({})",

@@ -246,12 +246,21 @@ struct Capture {
     pending: Option<Request>,
     /// Captures taken in this process.
     taken: u32,
+    /// A fixed head pose every frame draws from (the `xr-hold` file), for
+    /// measurements that must see the same picture run after run.
+    hold: Option<xr_capture::StagePose>,
+    /// The hold file's last stamp, as `seen` for the trigger.
+    hold_seen: Option<(SystemTime, u64)>,
 }
 
 /// Frames between looks for the trigger: about twice a second.
 const CAPTURE_POLL_FRAMES: u32 = 36;
 /// The trigger's file name in the external files directory.
 const CAPTURE_TRIGGER: &str = "capture";
+/// The held pose's file name (`docs/quest.md`, "Holding the head still"):
+/// `stage …` or `look …` as the trigger takes them holds that pose for
+/// every frame; `head` or `release` gives the frames back to the tracked head.
+const HOLD_FILE: &str = "xr-hold";
 
 impl Capture {
     /// Look for the trigger every [`CAPTURE_POLL_FRAMES`] frames.
@@ -266,6 +275,7 @@ impl Capture {
             .get_or_insert_with(|| JAVA.get().and_then(external_files_dir))
             .clone();
         let Some(dir) = dir else { return };
+        self.poll_hold(&dir);
         let trigger = dir.join(CAPTURE_TRIGGER);
         let Ok(meta) = std::fs::metadata(&trigger) else {
             self.seen = None;
@@ -282,6 +292,32 @@ impl Capture {
         match Request::parse(&text) {
             Ok(request) => self.pending = Some(request),
             Err(e) => log(true, &format!("capture: {e}")),
+        }
+    }
+
+    /// Take a new `xr-hold` file: the pose every frame draws from until the
+    /// next one releases it.
+    fn poll_hold(&mut self, dir: &std::path::Path) {
+        let file = dir.join(HOLD_FILE);
+        let Ok(meta) = std::fs::metadata(&file) else {
+            self.hold_seen = None;
+            return;
+        };
+        let stamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
+        if self.hold_seen == Some(stamp) {
+            return;
+        }
+        let text = std::fs::read_to_string(&file).unwrap_or_default();
+        if std::fs::remove_file(&file).is_err() {
+            self.hold_seen = Some(stamp);
+        }
+        let text = if text.trim() == "release" { "head" } else { text.as_str() };
+        match Request::parse(text) {
+            Ok(request) => {
+                self.hold = request.pose;
+                log(false, &format!("hold: {:?}", self.hold));
+            }
+            Err(e) => log(true, &format!("hold: {e}")),
         }
     }
 
@@ -994,6 +1030,14 @@ impl Headset {
             array_size: 2,
             mip_count: 1,
         };
+        // `swap-color-only` (`xr-debug`): a swapchain only drawn into, as a
+        // measurement of what its other usages cost (the eye capture then
+        // cannot read it back).
+        let usage_full = if crate::debug_switch("swap-color-only") {
+            xr::SwapchainUsageFlags::COLOR_ATTACHMENT
+        } else {
+            usage_full
+        };
         let (handle, full) = match self.session.create_swapchain(&info(usage_full)) {
             Ok(s) => (s, true),
             Err(_) => (
@@ -1003,6 +1047,7 @@ impl Headset {
                 false,
             ),
         };
+        let full = full && !crate::debug_switch("swap-color-only");
         let usage = if full {
             wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
@@ -1232,7 +1277,8 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
     // A capture from a fixed pose: both eyes look at the stage from it, for
     // this frame only, whether or not anyone wears the headset.
     let capture = headset.capture.pending.take();
-    let fixed = capture.and_then(|c| c.pose).map(|pose| {
+    let held = headset.capture.hold;
+    let fixed = capture.and_then(|c| c.pose).or(held).map(|pose| {
         let focus = module.xr_focus(id).unwrap_or([0.0, 1.0, -0.8]);
         for (view, (q, p)) in views.iter_mut().zip(pose.eyes(focus)) {
             view.pose = xr::Posef {
