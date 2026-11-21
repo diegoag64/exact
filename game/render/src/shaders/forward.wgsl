@@ -42,18 +42,16 @@ struct Surface {
         vec3(materials[i+4u], materials[i+5u], materials[i+3u]),
         vec3(materials[i+6u], materials[i+7u], materials[i+8u]));
 }
-@fragment fn fs(input: Surface) -> @location(0) vec4<f32> { return finish(shade(input, false)); }
+@fragment fn fs(input: Surface) -> @location(0) vec4<f32> { return finish(shade(input, 1.0)); }
 @fragment fn fs_shadow(input: Surface) -> @location(0) vec4<f32> {
-    return finish(shade(input, true));
+    return finish(shade(input, sun_visibility(input.world, normalize(input.normal))));
 }
 fn finish(color: vec4<f32>) -> vec4<f32> {
     if DIRECT { return vec4(tonemap(color.rgb).rgb, color.a); }
     return color;
 }
 @diagnostic(off, derivative_uniformity)
-// `shadowed`: the sun's shadow is sampled, once the fragment is known to be
-// kept and lit by the sun (a discarded or unlit fragment never pays its taps).
-fn shade(input: Surface, shadowed: bool) -> vec4<f32> {
+fn shade(input: Surface, visibility: f32) -> vec4<f32> {
     if DEPTH_PREPASS && input.clip.z >= 1.0 { discard; }
     if FADES && faded(input.slot, input.clip.xy) { discard; }
     var base = input.albedo;
@@ -87,8 +85,6 @@ fn shade(input: Surface, shadowed: bool) -> vec4<f32> {
     var color = ambient(n, v, albedo, metallic, roughness) + vec3<shading>(emissive);
     if frame.sun_direction_illuminance.w > 0.0 {
         let l = -frame.sun_direction_illuminance.xyz;
-        var visibility = 1.0;
-        if shadowed { visibility = sun_visibility(input.world, n); }
         color += brdf(n, v, l, albedo, metallic, roughness) * vec3<shading>(frame.sun_color_count.xyz)
             * shading(frame.sun_direction_illuminance.w) * shading(visibility * water_caustics(input.world));
     }
