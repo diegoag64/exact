@@ -265,8 +265,10 @@ impl Abi {
         unsafe { std::mem::transmute_copy::<usize, T>(&address) }
     }
     fn lifecycle(&self, id: u32, code: u32) {
-        if self.rendered {
-            // SAFETY: validated rendered-module ABI; id belongs to this module.
+        // Android loads its device in `android::load`, without `rendered`; its
+        // canvases' game audio pauses and resumes on this call.
+        if self.rendered || self.device_loaded {
+            // SAFETY: a device module exports gpu_lifecycle; id belongs to this module.
             unsafe { self.symbol::<unsafe extern "C" fn(u32, u32)>(b"gpu_lifecycle")(id, code) };
         }
     }
