@@ -60,7 +60,10 @@ impl XrPose {
     }
 
     fn finite(&self) -> bool {
-        self.position.iter().chain(&self.orientation).all(|v| v.is_finite())
+        self.position
+            .iter()
+            .chain(&self.orientation)
+            .all(|v| v.is_finite())
     }
 }
 
@@ -84,16 +87,36 @@ fn quat_from_axes(x: [f32; 3], y: [f32; 3], z: [f32; 3]) -> [f32; 4] {
     let trace = m00 + m11 + m22;
     let q = if trace > 0.0 {
         let s = (trace + 1.0).sqrt() * 2.0;
-        [(y[2] - z[1]) / s, (z[0] - x[2]) / s, (x[1] - y[0]) / s, 0.25 * s]
+        [
+            (y[2] - z[1]) / s,
+            (z[0] - x[2]) / s,
+            (x[1] - y[0]) / s,
+            0.25 * s,
+        ]
     } else if m00 > m11 && m00 > m22 {
         let s = (1.0 + m00 - m11 - m22).sqrt() * 2.0;
-        [0.25 * s, (y[0] + x[1]) / s, (z[0] + x[2]) / s, (y[2] - z[1]) / s]
+        [
+            0.25 * s,
+            (y[0] + x[1]) / s,
+            (z[0] + x[2]) / s,
+            (y[2] - z[1]) / s,
+        ]
     } else if m11 > m22 {
         let s = (1.0 + m11 - m00 - m22).sqrt() * 2.0;
-        [(y[0] + x[1]) / s, 0.25 * s, (z[1] + y[2]) / s, (z[0] - x[2]) / s]
+        [
+            (y[0] + x[1]) / s,
+            0.25 * s,
+            (z[1] + y[2]) / s,
+            (z[0] - x[2]) / s,
+        ]
     } else {
         let s = (1.0 + m22 - m00 - m11).sqrt() * 2.0;
-        [(z[0] + x[2]) / s, (z[1] + y[2]) / s, 0.25 * s, (x[1] - y[0]) / s]
+        [
+            (z[0] + x[2]) / s,
+            (z[1] + y[2]) / s,
+            0.25 * s,
+            (x[1] - y[0]) / s,
+        ]
     };
     let n = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
     q.map(|v| v / n)
@@ -182,10 +205,21 @@ pub const CLICK_FRAMES: u32 = 8;
 #[derive(Debug, Clone, PartialEq)]
 enum Step {
     /// Replace a hand's aim and grip, or one of them.
-    Pose { hand: usize, aim: Option<XrPose>, grip: Option<XrPose> },
+    Pose {
+        hand: usize,
+        aim: Option<XrPose>,
+        grip: Option<XrPose>,
+    },
     Head(XrPose),
-    Button { hand: usize, bit: u32, down: bool },
-    Stick { hand: usize, stick: [f32; 2] },
+    Button {
+        hand: usize,
+        bit: u32,
+        down: bool,
+    },
+    Stick {
+        hand: usize,
+        stick: [f32; 2],
+    },
     /// Give the hand (0, 1), the head (2) or all of them (3) back to tracking.
     Release(usize),
     Wait(u32),
@@ -256,7 +290,9 @@ impl Injector {
             self.waiting -= 1;
         }
         while self.waiting == 0 {
-            let Some(step) = self.steps.pop_front() else { break };
+            let Some(step) = self.steps.pop_front() else {
+                break;
+            };
             match step {
                 Step::Pose { hand, aim, grip } => {
                     let h = self.hand(hand, input);
@@ -270,7 +306,11 @@ impl Injector {
                 Step::Head(pose) => self.head = Some(pose),
                 Step::Button { hand, bit, down } => {
                     let h = self.hand(hand, input);
-                    h.buttons = if down { h.buttons | bit } else { h.buttons & !bit };
+                    h.buttons = if down {
+                        h.buttons | bit
+                    } else {
+                        h.buttons & !bit
+                    };
                     if bit == button::TRIGGER {
                         h.trigger = f32::from(u8::from(down));
                     }
@@ -361,7 +401,11 @@ fn parse_step(text: &str, steps: &mut Vec<Step>) -> Result<(), String> {
                 if n.len() != 6 {
                     return Err("head takes a position and a forward direction".into());
                 }
-                steps.push(Step::Head(XrPose::looking(three(&n, 0), three(&n, 3), [0.0, 1.0, 0.0])));
+                steps.push(Step::Head(XrPose::looking(
+                    three(&n, 0),
+                    three(&n, 3),
+                    [0.0, 1.0, 0.0],
+                )));
             }
         },
         "left" | "right" => {
@@ -371,41 +415,78 @@ fn parse_step(text: &str, steps: &mut Vec<Step>) -> Result<(), String> {
                 "aim" | "point" => {
                     let n = numbers(1)?;
                     if n.len() != 6 {
-                        return Err(format!("{verb} takes an origin and a {}", if verb == "aim" { "direction" } else { "target" }));
+                        return Err(format!(
+                            "{verb} takes an origin and a {}",
+                            if verb == "aim" { "direction" } else { "target" }
+                        ));
                     }
                     let (origin, mut toward) = (three(&n, 0), three(&n, 3));
                     if verb == "point" {
-                        toward = [toward[0] - origin[0], toward[1] - origin[1], toward[2] - origin[2]];
+                        toward = [
+                            toward[0] - origin[0],
+                            toward[1] - origin[1],
+                            toward[2] - origin[2],
+                        ];
                     }
                     if normalize(toward).is_none() {
                         return Err(format!("{verb}: no direction"));
                     }
                     let pose = XrPose::looking(origin, toward, [0.0, 1.0, 0.0]);
-                    steps.push(Step::Pose { hand, aim: Some(pose), grip: Some(pose) });
+                    steps.push(Step::Pose {
+                        hand,
+                        aim: Some(pose),
+                        grip: Some(pose),
+                    });
                 }
                 "grip" => {
                     let n = numbers(1)?;
                     if n.len() != 6 && n.len() != 9 {
-                        return Err("grip takes a position, a forward direction and maybe an up direction".into());
+                        return Err(
+                            "grip takes a position, a forward direction and maybe an up direction"
+                                .into(),
+                        );
                     }
-                    let up = if n.len() == 9 { three(&n, 6) } else { [0.0, 1.0, 0.0] };
+                    let up = if n.len() == 9 {
+                        three(&n, 6)
+                    } else {
+                        [0.0, 1.0, 0.0]
+                    };
                     let pose = XrPose::looking(three(&n, 0), three(&n, 3), up);
-                    steps.push(Step::Pose { hand, aim: None, grip: Some(pose) });
+                    steps.push(Step::Pose {
+                        hand,
+                        aim: None,
+                        grip: Some(pose),
+                    });
                 }
                 "stick" if rest.len() == 3 => {
                     let n = numbers(1)?;
                     if n.iter().any(|v| !(-1.0..=1.0).contains(v)) {
                         return Err("the thumbstick is within -1..1".into());
                     }
-                    steps.push(Step::Stick { hand, stick: [n[0], n[1]] });
+                    steps.push(Step::Stick {
+                        hand,
+                        stick: [n[0], n[1]],
+                    });
                 }
                 "release" if rest.len() == 1 => steps.push(Step::Release(hand)),
                 "click" => {
-                    let bit = rest.get(1).and_then(|w| button_bit(w)).filter(|_| rest.len() == 2).ok_or("click takes a button")?;
+                    let bit = rest
+                        .get(1)
+                        .and_then(|w| button_bit(w))
+                        .filter(|_| rest.len() == 2)
+                        .ok_or("click takes a button")?;
                     steps.extend([
-                        Step::Button { hand, bit, down: true },
+                        Step::Button {
+                            hand,
+                            bit,
+                            down: true,
+                        },
                         Step::Wait(CLICK_FRAMES),
-                        Step::Button { hand, bit, down: false },
+                        Step::Button {
+                            hand,
+                            bit,
+                            down: false,
+                        },
                         Step::Wait(CLICK_FRAMES),
                     ]);
                 }
@@ -450,10 +531,20 @@ mod tests {
 
     #[test]
     fn a_pose_points_where_it_was_told() {
-        for forward in [[0.0, 0.0, -1.0], [0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.3, -0.7, -0.4], [0.0, 0.0, 1.0]] {
+        for forward in [
+            [0.0, 0.0, -1.0],
+            [0.0, -1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.3, -0.7, -0.4],
+            [0.0, 0.0, 1.0],
+        ] {
             let pose = XrPose::looking([1.0, 2.0, 3.0], forward, [0.0, 1.0, 0.0]);
             let n = normalize(forward).unwrap();
-            assert!(close(pose.forward(), n), "{forward:?}: {:?}", pose.forward());
+            assert!(
+                close(pose.forward(), n),
+                "{forward:?}: {:?}",
+                pose.forward()
+            );
             let q = pose.orientation;
             assert!((q.iter().map(|v| v * v).sum::<f32>() - 1.0).abs() < 1e-5);
         }
@@ -485,7 +576,10 @@ mod tests {
         assert!(close(frames[0].aim.position, [0.2, 1.2, -0.2]));
         let toward = normalize([-0.2, -0.35, -0.7]).unwrap();
         assert!(close(frames[0].aim.forward(), toward));
-        let held = frames.iter().filter(|h| h.buttons & button::TRIGGER != 0).count();
+        let held = frames
+            .iter()
+            .filter(|h| h.buttons & button::TRIGGER != 0)
+            .count();
         assert_eq!(held, CLICK_FRAMES as usize);
         assert_eq!(frames[0].trigger, 1.0);
         assert_eq!(posted, ["wave"]);
@@ -515,7 +609,9 @@ mod tests {
             assert!(e.contains(word), "{text}: {e}");
         }
         assert!(!inject.active(), "a refused script queues nothing");
-        inject.script("left grip 0 1 -0.5  0 -1 0  -1 0 0\nhead 0 1.6 0 0 -0.5 -1\nleft y down").unwrap();
+        inject
+            .script("left grip 0 1 -0.5  0 -1 0  -1 0 0\nhead 0 1.6 0 0 -0.5 -1\nleft y down")
+            .unwrap();
         let mut input = XrInput::default();
         inject.frame(&mut input);
         assert!(input.head_tracked && close(input.head.position, [0.0, 1.6, 0.0]));
@@ -530,16 +626,27 @@ mod tests {
     #[test]
     fn a_scripted_recenter_is_counted_on_top_of_the_runtimes() {
         let mut inject = Injector::default();
-        inject.script("head 0.4 1.2 0.3  1 0 0; recenter; wait 2; recenter").unwrap();
-        let mut input = XrInput { recenters: 3, ..XrInput::default() };
+        inject
+            .script("head 0.4 1.2 0.3  1 0 0; recenter; wait 2; recenter")
+            .unwrap();
+        let mut input = XrInput {
+            recenters: 3,
+            ..XrInput::default()
+        };
         inject.frame(&mut input);
         assert_eq!(input.recenters, 4);
         assert!(close(input.head.position, [0.4, 1.2, 0.3]));
         // The count stands on later frames, and the next adds to it.
-        let mut input = XrInput { recenters: 3, ..XrInput::default() };
+        let mut input = XrInput {
+            recenters: 3,
+            ..XrInput::default()
+        };
         inject.frame(&mut input);
         assert_eq!(input.recenters, 4);
-        let mut input = XrInput { recenters: 3, ..XrInput::default() };
+        let mut input = XrInput {
+            recenters: 3,
+            ..XrInput::default()
+        };
         inject.frame(&mut input);
         assert_eq!(input.recenters, 5);
         assert!(inject.script("recenter now").is_err());

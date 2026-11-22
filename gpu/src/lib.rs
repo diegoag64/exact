@@ -1462,52 +1462,10 @@ impl Module {
         inst.dirty = true;
         true
     }
-
-    /// A canvas's picture as pixels, rendered again into a module-owned
-    /// texture (LLP 1014: a canvas nested under a canvas painted through its
-    /// surface paints this into its ancestor's capture), and whether the
-    /// surface wants another frame. Nothing before the first bind.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn readback(&mut self, id: u32, frame: &Frame) -> Option<(fixture::Pixels, bool)> {
-        let (width, height) = frame.pixels();
-        let len = (width as usize)
-            .checked_mul(height as usize)?
-            .checked_mul(4)?;
-        let mut data = vec![0; len];
-        let wants = self.readback_into(id, frame, &mut data)?;
-        Some((
-            fixture::Pixels {
-                width,
-                height,
-                data,
-            },
-            wants,
-        ))
-    }
 }
 
-/// Run a future to completion on this thread. wgpu's adapter and device
-/// requests are futures that complete synchronously on native backends;
-/// this is the whole executor they need.
-pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-    fn noop(_: *const ()) {}
-    fn clone(p: *const ()) -> RawWaker {
-        RawWaker::new(p, &VTABLE)
-    }
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
-    // SAFETY: the vtable's functions do nothing and the data pointer is null and never read.
-    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
-    let mut cx = Context::from_waker(&waker);
-    let mut f = std::pin::pin!(f);
-    loop {
-        if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
-            return v;
-        }
-        std::thread::yield_now();
-    }
-}
-
+mod block_on;
+pub use block_on::block_on;
 mod pipeline_cache;
 pub use pipeline_cache::PipelineCache;
 mod device;
@@ -1518,64 +1476,17 @@ pub use device::{
 };
 
 pub mod android;
-
-static DEBUG_SWITCHES: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-/// Set a native host's debug switches once, at start: whitespace-separated
-/// words (the Quest host's `xr-debug` file, `docs/quest.md`).
-pub fn set_debug_switches(words: String) {
-    let _ = DEBUG_SWITCHES.set(words);
-}
-/// Whether the host turned debug switch `name` on ([`set_debug_switches`]);
-/// always false where none were set.
-pub fn debug_switch(name: &str) -> bool {
-    DEBUG_SWITCHES
-        .get()
-        .is_some_and(|words| words.split_whitespace().any(|w| w == name))
-}
-/// One line to the headset's log (`exact-xr`, logcat) where a debug switch
-/// took effect, so a measurement can confirm what the engine applied
-/// (`docs/quest.md`, "Debug switches"); nothing elsewhere.
-pub fn debug_applied(line: &str) {
-    #[cfg(all(target_os = "android", feature = "openxr"))]
-    openxr::log(false, &format!("applied: {line}"));
-    #[cfg(not(all(target_os = "android", feature = "openxr")))]
-    let _ = line;
-}
-/// Whether this process draws into a native headset: an OpenXR session
-/// made with the device (the `openxr` feature on Android, `docs/quest.md`).
-pub fn headset() -> bool {
-    #[cfg(all(target_os = "android", feature = "openxr"))]
-    return openxr::active();
-    #[cfg(not(all(target_os = "android", feature = "openxr")))]
-    false
-}
+mod headset;
+pub use headset::{debug_applied, debug_switch, headset, set_debug_switches};
+#[cfg(not(target_arch = "wasm32"))]
+pub mod fixture;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod native;
 /// A native headset session (OpenXR on Android; `docs/quest.md`).
 #[cfg(all(target_os = "android", feature = "openxr"))]
 pub mod openxr;
 #[cfg(all(target_os = "android", feature = "openxr"))]
 mod openxr_input;
-/// The module's Android initialization for a headset session, which
-/// [`module!`] defines: with the `openxr` feature on Android, a
-/// `gpu_android_init` that keeps the Java VM and Context for the session.
-#[cfg(all(target_os = "android", feature = "openxr"))]
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __openxr_android_init {
-    () => {
-        $crate::android_init!(|android| $crate::openxr::android_init(android));
-    };
-}
-/// Nothing without a headset session.
-#[cfg(not(all(target_os = "android", feature = "openxr")))]
-#[doc(hidden)]
-#[macro_export]
-macro_rules! __openxr_android_init {
-    () => {};
-}
-#[cfg(not(target_arch = "wasm32"))]
-pub mod fixture;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod native;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 

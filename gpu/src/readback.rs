@@ -99,6 +99,28 @@ impl Readback {
 }
 
 impl Module {
+    /// A canvas's picture as pixels, rendered again into a module-owned
+    /// texture (LLP 1014: a canvas nested under a canvas painted through its
+    /// surface paints this into its ancestor's capture), and whether the
+    /// surface wants another frame. Nothing before the first bind.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn readback(&mut self, id: u32, frame: &Frame) -> Option<(fixture::Pixels, bool)> {
+        let (width, height) = frame.pixels();
+        let len = (width as usize)
+            .checked_mul(height as usize)?
+            .checked_mul(4)?;
+        let mut data = vec![0; len];
+        let wants = self.readback_into(id, frame, &mut data)?;
+        Some((
+            fixture::Pixels {
+                width,
+                height,
+                data,
+            },
+            wants,
+        ))
+    }
+
     /// Render and capture directly into caller-owned RGBA bytes, reusing GPU
     /// storage until the size, format, or device changes, or the surface clears.
     pub fn readback_into(&mut self, id: u32, frame: &Frame, out: &mut [u8]) -> Option<bool> {

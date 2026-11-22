@@ -1452,8 +1452,7 @@ async function swap(version) {
 // A game that opted in to immersive sessions (app.json `game.xr`): its adapter
 // must be XR compatible before the module asks for one (xr-glue.js).
 if (artifact === null && document.documentElement?.hasAttribute?.("data-exact-xr")) {
-  try { xr = await import("./xr-glue.js"); xr.shimAdapter(); }
-  catch (error) { console.error("exact xr:", error); xr = null; }
+  xr = await import("./xr-glue.js").then(m => (m.shimAdapter(), m), error => (console.error("exact xr:", error), null));
 }
 const t0 = performance.now();
 try {
@@ -1491,21 +1490,7 @@ try {
   // A refused initial surface must not prevent independent canvases from loading.
   for (const entry of waiting) { try { ensure(entry); } catch (error) { reportError(error); } }
 } finally { finishReady(loaded); }
-if (xr && loaded) xr.offer({
-  module: () => gpu,
-  target: () => [...surfaces.values()].find(e => e.id && !e.terminal && live(e.view) === e) ?? null,
-  clock: now => { gpu?.gpu_host_frame?.(now, performance.now(), 0, 0); return clockFor(now); },
-  started: session => {
-    if (raf !== null) { cancelAnimationFrame(raf); raf = null; }
-    const rate = session.frameRate;
-    if (rate > 0 && gpu) { sentPeriod = 1000 / rate; gpu.gpu_period(sentPeriod); }
-  },
-  after: entry => { if (!trapped()) { messages(entry); flush(); } },
-  ended: () => {
-    sentPeriod = 0;
-    for (const entry of surfaces.values()) entry.wants = true;
-    lifecycle(document.hidden ? 0 : 1);
-    schedule();
-  },
-  lost: () => recoverDevice(),
-}).then(state => { if (state) api.immersive = state; }, error => console.error("exact xr:", error));
+// The session's frames draw the world in its place (xr-glue.js `connect`).
+if (xr && loaded) xr.connect({ api, gpu: () => gpu, surfaces, live, clockFor, trapped, messages, flush, lifecycle, schedule, recoverDevice,
+  pause: () => { if (raf !== null) { cancelAnimationFrame(raf); raf = null; } },
+  period: ms => { if (!ms) sentPeriod = 0; else if (gpu) gpu.gpu_period(sentPeriod = ms); } });

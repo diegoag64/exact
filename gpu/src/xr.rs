@@ -126,9 +126,21 @@ pub fn pose_view(orientation: [f32; 4], position: [f32; 3]) -> [f32; 16] {
     let [x, y, z, w] = orientation;
     // Rows of the pose's rotation.
     let r = [
-        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w), 2.0 * (x * z + y * w)],
-        [2.0 * (x * y + z * w), 1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-        [2.0 * (x * z - y * w), 2.0 * (y * z + x * w), 1.0 - 2.0 * (x * x + y * y)],
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - z * w),
+            2.0 * (x * z + y * w),
+        ],
+        [
+            2.0 * (x * y + z * w),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - x * w),
+        ],
+        [
+            2.0 * (x * z - y * w),
+            2.0 * (y * z + x * w),
+            1.0 - 2.0 * (x * x + y * y),
+        ],
     ];
     let p = position;
     // The inverse is Rᵀ with −Rᵀp; column j of Rᵀ is row j of R.
@@ -425,6 +437,9 @@ mod tests {
         assert!(eye.iter().all(|c| c.abs() < 1e-5), "{eye:?}");
         // A point a metre down −X from the eye is a metre ahead (−Z).
         let ahead = project(&m, [0.0, 1.6, 2.0]);
-        assert!((ahead[2] + 1.0).abs() < 1e-5 && ahead[0].abs() < 1e-5, "{ahead:?}");
+        assert!(
+            (ahead[2] + 1.0).abs() < 1e-5 && ahead[0].abs() < 1e-5,
+            "{ahead:?}"
+        );
     }
 }

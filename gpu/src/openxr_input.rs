@@ -49,14 +49,26 @@ pub(crate) struct Controls {
 fn pose(p: xr::Posef) -> XrPose {
     XrPose {
         position: [p.position.x, p.position.y, p.position.z],
-        orientation: [p.orientation.x, p.orientation.y, p.orientation.z, p.orientation.w],
+        orientation: [
+            p.orientation.x,
+            p.orientation.y,
+            p.orientation.z,
+            p.orientation.w,
+        ],
     }
 }
 
 impl Controls {
     /// Make the action set, suggest its bindings and attach it to `session`.
-    pub(crate) fn new<G>(instance: &xr::Instance, session: &xr::Session<G>) -> Result<Self, String> {
-        let path = |text: &str| instance.string_to_path(text).map_err(|e| format!("{text}: {e}"));
+    pub(crate) fn new<G>(
+        instance: &xr::Instance,
+        session: &xr::Session<G>,
+    ) -> Result<Self, String> {
+        let path = |text: &str| {
+            instance
+                .string_to_path(text)
+                .map_err(|e| format!("{text}: {e}"))
+        };
         let hands = [path("/user/hand/left")?, path("/user/hand/right")?];
         let set = instance
             .create_action_set("exact", "Exact", 0)
@@ -109,11 +121,26 @@ impl Controls {
             for p in both("thumbstick/click")? {
                 touch.push(xr::Binding::new(&stick_down, p));
             }
-            touch.push(xr::Binding::new(&primary, path("/user/hand/left/input/x/click")?));
-            touch.push(xr::Binding::new(&primary, path("/user/hand/right/input/a/click")?));
-            touch.push(xr::Binding::new(&secondary, path("/user/hand/left/input/y/click")?));
-            touch.push(xr::Binding::new(&secondary, path("/user/hand/right/input/b/click")?));
-            touch.push(xr::Binding::new(&menu, path("/user/hand/left/input/menu/click")?));
+            touch.push(xr::Binding::new(
+                &primary,
+                path("/user/hand/left/input/x/click")?,
+            ));
+            touch.push(xr::Binding::new(
+                &primary,
+                path("/user/hand/right/input/a/click")?,
+            ));
+            touch.push(xr::Binding::new(
+                &secondary,
+                path("/user/hand/left/input/y/click")?,
+            ));
+            touch.push(xr::Binding::new(
+                &secondary,
+                path("/user/hand/right/input/b/click")?,
+            ));
+            touch.push(xr::Binding::new(
+                &menu,
+                path("/user/hand/left/input/menu/click")?,
+            ));
             let profile = "/interaction_profiles/oculus/touch_controller";
             match instance.suggest_interaction_profile_bindings(path(profile)?, &touch) {
                 Ok(()) => suggested.push(profile),
@@ -156,7 +183,10 @@ impl Controls {
         let head = session
             .create_reference_space(xr::ReferenceSpaceType::VIEW, xr::Posef::IDENTITY)
             .map_err(|e| format!("view space: {e}"))?;
-        log(false, &format!("controllers: actions attached ({})", suggested.join(", ")));
+        log(
+            false,
+            &format!("controllers: actions attached ({})", suggested.join(", ")),
+        );
         Ok(Self {
             set,
             hands,
@@ -212,7 +242,10 @@ impl Controls {
             self.inject_seen = None;
             return;
         };
-        let stamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
+        let stamp = (
+            meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            meta.len(),
+        );
         if self.inject_seen == Some(stamp) {
             return;
         }
@@ -221,7 +254,10 @@ impl Controls {
             self.inject_seen = Some(stamp);
         }
         match self.inject.script(&text) {
-            Ok(()) => log(false, &format!("xr-input: {} lines taken", text.lines().count())),
+            Ok(()) => log(
+                false,
+                &format!("xr-input: {} lines taken", text.lines().count()),
+            ),
             Err(e) => log(true, &format!("xr-input: {e}")),
         }
     }
@@ -250,7 +286,8 @@ impl Controls {
                 log(true, &format!("controllers: sync: {e}"));
             }
         }
-        let valid = xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID;
+        let valid =
+            xr::SpaceLocationFlags::POSITION_VALID | xr::SpaceLocationFlags::ORIENTATION_VALID;
         let mut input = self.tracked;
         match self.head.locate(base, time) {
             Ok(at) if at.location_flags.contains(valid) => {
@@ -261,7 +298,10 @@ impl Controls {
         }
         for (i, hand) in self.hands.iter().enumerate() {
             let slot = &mut input.hands[i];
-            let poses = self.pose_actions.iter().any(|a| a.is_active(session, *hand).unwrap_or(false));
+            let poses = self
+                .pose_actions
+                .iter()
+                .any(|a| a.is_active(session, *hand).unwrap_or(false));
             let boolean = |action: &xr::Action<bool>| {
                 action
                     .state(session, *hand)
@@ -281,8 +321,15 @@ impl Controls {
                 .stick
                 .state(session, *hand)
                 .ok()
-                .filter(|s| s.is_active && s.current_state.x.is_finite() && s.current_state.y.is_finite())
-                .map_or([0.0; 2], |s| [s.current_state.x.clamp(-1.0, 1.0), s.current_state.y.clamp(-1.0, 1.0)]);
+                .filter(|s| {
+                    s.is_active && s.current_state.x.is_finite() && s.current_state.y.is_finite()
+                })
+                .map_or([0.0; 2], |s| {
+                    [
+                        s.current_state.x.clamp(-1.0, 1.0),
+                        s.current_state.y.clamp(-1.0, 1.0),
+                    ]
+                });
             slot.buttons = [
                 (&self.trigger_down, button::TRIGGER),
                 (&self.squeeze_down, button::SQUEEZE),
@@ -301,7 +348,10 @@ impl Controls {
                     .filter(|at| at.location_flags.contains(valid))
                     .map(|at| pose(at.pose))
             };
-            match (poses.then(|| located(&self.aim[i])).flatten(), poses.then(|| located(&self.grip[i])).flatten()) {
+            match (
+                poses.then(|| located(&self.aim[i])).flatten(),
+                poses.then(|| located(&self.grip[i])).flatten(),
+            ) {
                 (Some(aim), Some(grip)) => {
                     slot.tracked = true;
                     slot.aim = aim;
@@ -312,7 +362,13 @@ impl Controls {
             if self.active[i] != slot.active {
                 self.active[i] = slot.active;
                 let name = ["left", "right"][i];
-                log(false, &format!("controllers: {name} hand {}", if slot.active { "active" } else { "inactive" }));
+                log(
+                    false,
+                    &format!(
+                        "controllers: {name} hand {}",
+                        if slot.active { "active" } else { "inactive" }
+                    ),
+                );
             }
         }
         self.tracked = input;

@@ -55,7 +55,10 @@ impl Request {
             Some("stage") => {
                 let mut pose = StagePose::default();
                 let numbers: Vec<f32> = words
-                    .map(|w| w.parse::<f32>().map_err(|_| format!("`{w}` is not a number")))
+                    .map(|w| {
+                        w.parse::<f32>()
+                            .map_err(|_| format!("`{w}` is not a number"))
+                    })
                     .collect::<Result<_, _>>()?;
                 if numbers.len() > 3 {
                     return Err("stage takes at most distance, pitch and yaw".into());
@@ -91,7 +94,11 @@ impl Request {
                     return Err("look: the eye is at its target".into());
                 }
                 // Straight down or up, the head stands unturned.
-                let yaw = if flat < 1e-5 { 0.0 } else { (-f[0]).atan2(-f[2]) };
+                let yaw = if flat < 1e-5 {
+                    0.0
+                } else {
+                    (-f[0]).atan2(-f[2])
+                };
                 Ok(Self {
                     pose: Some(StagePose {
                         distance,
@@ -101,7 +108,9 @@ impl Request {
                     }),
                 })
             }
-            Some(other) => Err(format!("`{other}`: the trigger says `head`, `stage …` or `look …`")),
+            Some(other) => Err(format!(
+                "`{other}`: the trigger says `head`, `stage …` or `look …`"
+            )),
         }
     }
 }
@@ -124,7 +133,13 @@ fn mul(a: Quat, b: Quat) -> Quat {
 pub fn rotate(q: Quat, v: Vec3) -> Vec3 {
     let u = [q[0], q[1], q[2]];
     let w = q[3];
-    let cross = |a: Vec3, b: Vec3| [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    let cross = |a: Vec3, b: Vec3| {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    };
     let t = cross(u, v).map(|c| 2.0 * c);
     let ut = cross(u, t);
     [0, 1, 2].map(|i| v[i] + w * t[i] + ut[i])
@@ -157,7 +172,13 @@ impl StagePose {
 
 /// Tightly packed RGB rows from a layer read back with `bytes_per_row`
 /// padding, four bytes a pixel, red first unless `bgra`.
-pub fn rgb_rows(data: &[u8], bytes_per_row: usize, width: usize, height: usize, bgra: bool) -> Vec<u8> {
+pub fn rgb_rows(
+    data: &[u8],
+    bytes_per_row: usize,
+    width: usize,
+    height: usize,
+    bgra: bool,
+) -> Vec<u8> {
     let mut out = Vec::with_capacity(width * height * 3);
     for row in data.chunks(bytes_per_row).take(height) {
         for px in row[..width * 4].as_chunks::<4>().0 {
@@ -176,7 +197,11 @@ fn crc32(chunks: &[&[u8]]) -> u32 {
     for (n, entry) in table.iter_mut().enumerate() {
         let mut c = n as u32;
         for _ in 0..8 {
-            c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+            c = if c & 1 != 0 {
+                0xEDB8_8320 ^ (c >> 1)
+            } else {
+                c >> 1
+            };
         }
         *entry = c;
     }
@@ -245,9 +270,15 @@ mod tests {
     fn the_trigger_parses() {
         assert_eq!(Request::parse("").unwrap().pose, None);
         assert_eq!(Request::parse("head\n").unwrap().pose, None);
-        assert_eq!(Request::parse("stage").unwrap().pose, Some(StagePose::default()));
+        assert_eq!(
+            Request::parse("stage").unwrap().pose,
+            Some(StagePose::default())
+        );
         let pose = Request::parse("stage 0.8 30 -20").unwrap().pose.unwrap();
-        assert_eq!((pose.distance, pose.pitch_deg, pose.yaw_deg), (0.8, 30.0, -20.0));
+        assert_eq!(
+            (pose.distance, pose.pitch_deg, pose.yaw_deg),
+            (0.8, 30.0, -20.0)
+        );
         assert!(Request::parse("stage -1").is_err());
         assert!(Request::parse("stage x").is_err());
         assert!(Request::parse("left").is_err());
@@ -256,15 +287,22 @@ mod tests {
     #[test]
     fn a_look_stands_the_head_at_its_eye_facing_its_target() {
         let (eye, target) = ([0.3f32, 1.4, 0.2], [-0.2f32, 1.0, -0.6]);
-        let pose = Request::parse("look 0.3 1.4 0.2  -0.2 1.0 -0.6").unwrap().pose.unwrap();
+        let pose = Request::parse("look 0.3 1.4 0.2  -0.2 1.0 -0.6")
+            .unwrap()
+            .pose
+            .unwrap();
         // Wherever the stage is.
         let (q, head) = pose.head([9.0, 9.0, 9.0]);
         for i in 0..3 {
             assert!((head[i] - eye[i]).abs() < 1e-5, "{head:?}");
         }
         let view = crate::pose_view(q, head);
-        let ahead = [0, 1, 2].map(|r| (0..3).map(|c| view[c * 4 + r] * target[c]).sum::<f32>() + view[12 + r]);
-        assert!(ahead[0].abs() < 1e-5 && ahead[1].abs() < 1e-5 && ahead[2] < 0.0, "{ahead:?}");
+        let ahead = [0, 1, 2]
+            .map(|r| (0..3).map(|c| view[c * 4 + r] * target[c]).sum::<f32>() + view[12 + r]);
+        assert!(
+            ahead[0].abs() < 1e-5 && ahead[1].abs() < 1e-5 && ahead[2] < 0.0,
+            "{ahead:?}"
+        );
         // Straight down is a pose too; no eye at its target, nor five numbers.
         let down = Request::parse("look 0 2 0  0 1 0").unwrap().pose.unwrap();
         assert!((down.pitch_deg - 90.0).abs() < 1e-3 && down.yaw_deg == 0.0);
@@ -279,12 +317,19 @@ mod tests {
         let (q, head) = pose.head(focus);
         // 0.6 m back toward the person and up, 40° down.
         let rad = 40f32.to_radians();
-        assert!((head[1] - (0.85 + 0.6 * rad.sin())).abs() < 1e-5, "{head:?}");
-        assert!((head[2] - (-0.9 + 0.6 * rad.cos())).abs() < 1e-5, "{head:?}");
+        assert!(
+            (head[1] - (0.85 + 0.6 * rad.sin())).abs() < 1e-5,
+            "{head:?}"
+        );
+        assert!(
+            (head[2] - (-0.9 + 0.6 * rad.cos())).abs() < 1e-5,
+            "{head:?}"
+        );
         assert!(head[0].abs() < 1e-6);
         // The view (`pose_view`) puts the focus straight ahead.
         let view = crate::pose_view(q, head);
-        let ahead = [0, 1, 2].map(|r| (0..3).map(|c| view[c * 4 + r] * focus[c]).sum::<f32>() + view[12 + r]);
+        let ahead = [0, 1, 2]
+            .map(|r| (0..3).map(|c| view[c * 4 + r] * focus[c]).sum::<f32>() + view[12 + r]);
         assert!(ahead[0].abs() < 1e-5 && ahead[1].abs() < 1e-5, "{ahead:?}");
         assert!((ahead[2] + 0.6).abs() < 1e-5, "{ahead:?}");
         let [left, right] = pose.eyes(focus);

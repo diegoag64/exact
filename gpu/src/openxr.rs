@@ -19,14 +19,16 @@
 //! and nothing here runs: the app draws to its window.
 #![allow(unsafe_code)]
 
-use crate::xr_capture::{self, Request};
+mod capture;
+
 use crate::{wgpu, DeviceFailure, DeviceFailureKind, Gpu, Module, XrStereo};
 use ash::vk::{self, Handle as _};
+use capture::{Capture, Perf};
 use openxr as xr;
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::sync::{Mutex, OnceLock};
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 /// The near and far planes of each eye, metres (the stage rescales them to
 /// world units).
@@ -48,7 +50,13 @@ static DEBUG_SCALE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new(
 pub(crate) fn log(warn: bool, line: &str) {
     let text = CString::new(line.replace('\0', " ")).unwrap_or_default();
     // SAFETY: two NUL-terminated strings.
-    unsafe { __android_log_write(if warn { 5 } else { 4 }, c"exact-xr".as_ptr(), text.as_ptr()) };
+    unsafe {
+        __android_log_write(
+            if warn { 5 } else { 4 },
+            c"exact-xr".as_ptr(),
+            text.as_ptr(),
+        )
+    };
 }
 
 fn sdk_version() -> u32 {
@@ -85,7 +93,9 @@ pub fn android_init(android: crate::android::Android) -> Result<(), String> {
     let env = android.env as *mut jni_sys::JNIEnv;
     // SAFETY: the host's contract: a live env on this thread and a live
     // reference to the application Context.
-    let context = unsafe { ((**env).NewGlobalRef.ok_or("no NewGlobalRef")?)(env, android.context as jni_sys::jobject) };
+    let context = unsafe {
+        ((**env).NewGlobalRef.ok_or("no NewGlobalRef")?)(env, android.context as jni_sys::jobject)
+    };
     if context.is_null() {
         return Err("no global reference to the application Context".into());
     }
@@ -111,13 +121,23 @@ impl Attached {
         unsafe {
             let invoke = &**vm;
             if (invoke.GetEnv.unwrap())(vm, &mut env, jni_sys::JNI_VERSION_1_6) == jni_sys::JNI_OK {
-                return Ok(Self { vm, env: env.cast(), detach: false });
+                return Ok(Self {
+                    vm,
+                    env: env.cast(),
+                    detach: false,
+                });
             }
-            if (invoke.AttachCurrentThread.unwrap())(vm, &mut env, std::ptr::null_mut()) != jni_sys::JNI_OK {
+            if (invoke.AttachCurrentThread.unwrap())(vm, &mut env, std::ptr::null_mut())
+                != jni_sys::JNI_OK
+            {
                 return Err("could not attach this thread to the Java VM".into());
             }
         }
-        Ok(Self { vm, env: env.cast(), detach: true })
+        Ok(Self {
+            vm,
+            env: env.cast(),
+            detach: true,
+        })
     }
 }
 
@@ -146,21 +166,40 @@ fn activity(java: &Java, env: *mut jni_sys::JNIEnv) -> jni_sys::jobject {
             }
         };
         let class = (e.GetObjectClass.unwrap())(env, java.context);
-        let get_loader = (e.GetMethodID.unwrap())(env, class, c"getClassLoader".as_ptr(), c"()Ljava/lang/ClassLoader;".as_ptr());
-        let loader = (e.CallObjectMethodA.unwrap())(env, java.context, get_loader, std::ptr::null());
+        let get_loader = (e.GetMethodID.unwrap())(
+            env,
+            class,
+            c"getClassLoader".as_ptr(),
+            c"()Ljava/lang/ClassLoader;".as_ptr(),
+        );
+        let loader =
+            (e.CallObjectMethodA.unwrap())(env, java.context, get_loader, std::ptr::null());
         if clear() || loader.is_null() {
             return java.context;
         }
         let loader_class = (e.GetObjectClass.unwrap())(env, loader);
-        let load = (e.GetMethodID.unwrap())(env, loader_class, c"loadClass".as_ptr(), c"(Ljava/lang/String;)Ljava/lang/Class;".as_ptr());
+        let load = (e.GetMethodID.unwrap())(
+            env,
+            loader_class,
+            c"loadClass".as_ptr(),
+            c"(Ljava/lang/String;)Ljava/lang/Class;".as_ptr(),
+        );
         let name = (e.NewStringUTF.unwrap())(env, c"dev.exact.canvas.Immersive".as_ptr());
         let args = [jni_sys::jvalue { l: name }];
         let immersive = (e.CallObjectMethodA.unwrap())(env, loader, load, args.as_ptr());
         if clear() || immersive.is_null() {
-            log(true, "no dev.exact.canvas.Immersive: the session is given the application Context");
+            log(
+                true,
+                "no dev.exact.canvas.Immersive: the session is given the application Context",
+            );
             return java.context;
         }
-        let field = (e.GetStaticFieldID.unwrap())(env, immersive, c"activity".as_ptr(), c"Landroid/app/Activity;".as_ptr());
+        let field = (e.GetStaticFieldID.unwrap())(
+            env,
+            immersive,
+            c"activity".as_ptr(),
+            c"Landroid/app/Activity;".as_ptr(),
+        );
         if clear() || field.is_null() {
             return java.context;
         }
@@ -172,7 +211,10 @@ fn activity(java: &Java, env: *mut jni_sys::JNIEnv) -> jni_sys::jobject {
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        log(true, "no activity registered: the session is given the application Context");
+        log(
+            true,
+            "no activity registered: the session is given the application Context",
+        );
         java.context
     }
 }
@@ -196,17 +238,29 @@ fn external_files_dir(java: &Java) -> Option<PathBuf> {
             }
         };
         let class = (e.GetObjectClass.unwrap())(env, java.context);
-        let method = (e.GetMethodID.unwrap())(env, class, c"getExternalFilesDir".as_ptr(), c"(Ljava/lang/String;)Ljava/io/File;".as_ptr());
+        let method = (e.GetMethodID.unwrap())(
+            env,
+            class,
+            c"getExternalFilesDir".as_ptr(),
+            c"(Ljava/lang/String;)Ljava/io/File;".as_ptr(),
+        );
         if failed() || method.is_null() {
             return None;
         }
-        let args = [jni_sys::jvalue { l: std::ptr::null_mut() }];
+        let args = [jni_sys::jvalue {
+            l: std::ptr::null_mut(),
+        }];
         let file = (e.CallObjectMethodA.unwrap())(env, java.context, method, args.as_ptr());
         if failed() || file.is_null() {
             return None;
         }
         let file_class = (e.GetObjectClass.unwrap())(env, file);
-        let path = (e.GetMethodID.unwrap())(env, file_class, c"getAbsolutePath".as_ptr(), c"()Ljava/lang/String;".as_ptr());
+        let path = (e.GetMethodID.unwrap())(
+            env,
+            file_class,
+            c"getAbsolutePath".as_ptr(),
+            c"()Ljava/lang/String;".as_ptr(),
+        );
         let text = (e.CallObjectMethodA.unwrap())(env, file, path, std::ptr::null());
         if failed() || text.is_null() {
             return None;
@@ -230,233 +284,7 @@ fn early_switch(name: &str) -> bool {
         .is_some_and(|text| text.split_whitespace().any(|w| w == name))
 }
 
-/// The debug eye capture (`docs/quest.md`, "Seeing what the headset shows"):
-/// off until the file `capture` appears in the app's external files
-/// directory; then the next stereo frame's two layers are read back and
-/// written beside it as `eye-<n>-left.png` and `eye-<n>-right.png`.
-#[derive(Default)]
-struct Capture {
-    /// The external files directory, once looked up (None inside: none).
-    dir: Option<Option<PathBuf>>,
-    /// Frames since the trigger was last looked for.
-    since_poll: u32,
-    /// The trigger's modification time and length when it could not be
-    /// removed: the same file is not taken again.
-    seen: Option<(SystemTime, u64)>,
-    /// A capture the next drawn frame takes.
-    pending: Option<Request>,
-    /// Captures taken in this process.
-    taken: u32,
-    /// A fixed head pose every frame draws from (the `xr-hold` file), for
-    /// measurements that must see the same picture run after run.
-    hold: Option<xr_capture::StagePose>,
-    /// The hold file's last stamp, as `seen` for the trigger.
-    hold_seen: Option<(SystemTime, u64)>,
-}
-
-/// Frames between looks for the trigger: about twice a second.
-const CAPTURE_POLL_FRAMES: u32 = 36;
-/// The trigger's file name in the external files directory.
-const CAPTURE_TRIGGER: &str = "capture";
-/// The held pose's file name (`docs/quest.md`, "Holding the head still"):
-/// `stage …` or `look …` as the trigger takes them holds that pose for
-/// every frame; `head` or `release` gives the frames back to the tracked head.
-const HOLD_FILE: &str = "xr-hold";
-
-impl Capture {
-    /// Look for the trigger every [`CAPTURE_POLL_FRAMES`] frames.
-    fn poll(&mut self) {
-        self.since_poll += 1;
-        if self.pending.is_some() || self.since_poll < CAPTURE_POLL_FRAMES {
-            return;
-        }
-        self.since_poll = 0;
-        let dir = self
-            .dir
-            .get_or_insert_with(|| JAVA.get().and_then(external_files_dir))
-            .clone();
-        let Some(dir) = dir else { return };
-        self.poll_hold(&dir);
-        let trigger = dir.join(CAPTURE_TRIGGER);
-        let Ok(meta) = std::fs::metadata(&trigger) else {
-            self.seen = None;
-            return;
-        };
-        let stamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
-        if self.seen == Some(stamp) {
-            return;
-        }
-        let text = std::fs::read_to_string(&trigger).unwrap_or_default();
-        if std::fs::remove_file(&trigger).is_err() {
-            self.seen = Some(stamp);
-        }
-        match Request::parse(&text) {
-            Ok(request) => self.pending = Some(request),
-            Err(e) => log(true, &format!("capture: {e}")),
-        }
-    }
-
-    /// Take a new `xr-hold` file: the pose every frame draws from until the
-    /// next one releases it.
-    fn poll_hold(&mut self, dir: &std::path::Path) {
-        let file = dir.join(HOLD_FILE);
-        let Ok(meta) = std::fs::metadata(&file) else {
-            self.hold_seen = None;
-            return;
-        };
-        let stamp = (meta.modified().unwrap_or(SystemTime::UNIX_EPOCH), meta.len());
-        if self.hold_seen == Some(stamp) {
-            return;
-        }
-        let text = std::fs::read_to_string(&file).unwrap_or_default();
-        if std::fs::remove_file(&file).is_err() {
-            self.hold_seen = Some(stamp);
-        }
-        let text = if text.trim() == "release" { "head" } else { text.as_str() };
-        match Request::parse(text) {
-            Ok(request) => {
-                self.hold = request.pose;
-                log(false, &format!("hold: {:?}", self.hold));
-            }
-            Err(e) => log(true, &format!("hold: {e}")),
-        }
-    }
-
-    /// Copy both layers of `target` into a buffer and write them as PNGs
-    /// (on another thread, so the frame loop waits only for the copy).
-    fn take(&mut self, gpu: &Gpu, target: &wgpu::Texture, format: wgpu::TextureFormat, size: (u32, u32), what: &str) {
-        let Some(Some(dir)) = self.dir.clone() else { return };
-        let bgra = matches!(format, wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm);
-        let (w, h) = size;
-        let bytes_per_row = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let layer_bytes = u64::from(bytes_per_row) * u64::from(h);
-        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("exact xr capture"),
-            size: layer_bytes * 2,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("exact xr capture"),
-        });
-        for layer in 0..2u32 {
-            encoder.copy_texture_to_buffer(
-                wgpu::TexelCopyTextureInfo {
-                    texture: target,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: 0, y: 0, z: layer },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: layer_bytes * u64::from(layer),
-                        bytes_per_row: Some(bytes_per_row),
-                        rows_per_image: Some(h),
-                    },
-                },
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            );
-        }
-        gpu.queue.submit([encoder.finish()]);
-        let slice = buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-        if !matches!(rx.recv(), Ok(Ok(()))) {
-            log(true, "capture: the read back failed");
-            return;
-        }
-        let data = match slice.get_mapped_range() {
-            Ok(view) => view.to_vec(),
-            Err(e) => {
-                log(true, &format!("capture: the read back failed: {e:?}"));
-                return;
-            }
-        };
-        buffer.unmap();
-        self.taken += 1;
-        let n = self.taken;
-        let what = what.to_owned();
-        std::thread::spawn(move || {
-            let mut written = Vec::new();
-            for (layer, eye) in ["left", "right"].into_iter().enumerate() {
-                let start = layer * layer_bytes as usize;
-                let rows = &data[start..start + layer_bytes as usize];
-                let rgb = xr_capture::rgb_rows(rows, bytes_per_row as usize, w as usize, h as usize, bgra);
-                let path = dir.join(format!("eye-{n}-{eye}.png"));
-                match std::fs::write(&path, xr_capture::png_rgb(w, h, &rgb)) {
-                    Ok(()) => written.push(path.display().to_string()),
-                    Err(e) => log(true, &format!("capture: {}: {e}", path.display())),
-                }
-            }
-            log(false, &format!("capture {n} ({what}): {}", written.join(" ")));
-        });
-    }
-}
-
 // ---------------------------------------------------------------- the headset
-
-/// Per-second numbers for the log line.
-#[derive(Default)]
-struct Perf {
-    since: Option<Instant>,
-    frames: u32,
-    skipped: u32,
-    cpu_ms: f64,
-    encode_ms: f64,
-    wait_ms: f64,
-    worst_ms: f64,
-    /// How the last frame drew (`Module::xr_stereo_mode`).
-    mode: &'static str,
-}
-
-impl Perf {
-    fn frame(&mut self, wait_ms: f64, cpu_ms: f64, encode_ms: f64, rendered: bool, mode: Option<&'static str>) {
-        if let Some(mode) = mode {
-            if mode != self.mode {
-                log(false, &format!("stereo frames draw {mode}"));
-            }
-            self.mode = mode;
-        }
-        let now = Instant::now();
-        let since = *self.since.get_or_insert(now);
-        if rendered {
-            self.frames += 1;
-            self.cpu_ms += cpu_ms;
-            self.encode_ms += encode_ms;
-            self.worst_ms = self.worst_ms.max(cpu_ms);
-        } else {
-            self.skipped += 1;
-        }
-        self.wait_ms += wait_ms;
-        let elapsed = now.duration_since(since).as_secs_f64();
-        if elapsed >= 1.0 {
-            let n = f64::from(self.frames.max(1));
-            let all = f64::from((self.frames + self.skipped).max(1));
-            log(
-                false,
-                &format!(
-                    "perf mode={} fps={:.1} cpu_ms={:.2} encode_ms={:.2} worst_ms={:.2} wait_ms={:.2} skipped={}",
-                    if self.mode.is_empty() { "none" } else { self.mode },
-                    f64::from(self.frames) / elapsed,
-                    self.cpu_ms / n,
-                    self.encode_ms / n,
-                    self.worst_ms,
-                    self.wait_ms / all,
-                    self.skipped
-                ),
-            );
-            *self = Perf {
-                since: Some(now),
-                mode: self.mode,
-                ..Default::default()
-            };
-        }
-    }
-}
 
 /// The session and what it draws into, made with the device.
 struct Headset {
@@ -523,7 +351,10 @@ pub(crate) fn create_gpu(
     requirements: &[crate::grants::Requirements],
 ) -> Option<Result<Gpu, DeviceFailure>> {
     let Some(java) = JAVA.get() else {
-        log(true, "no Java VM (gpu_android_init did not run): no headset");
+        log(
+            true,
+            "no Java VM (gpu_android_init did not run): no headset",
+        );
         return None;
     };
     let attached = match Attached::new(java.vm) {
@@ -539,7 +370,10 @@ pub(crate) fn create_gpu(
     let entry = match load_entry(&platform) {
         Ok(entry) => entry,
         Err(e) => {
-            log(true, &format!("no OpenXR loader or runtime ({e}): the app draws to its window"));
+            log(
+                true,
+                &format!("no OpenXR loader or runtime ({e}): the app draws to its window"),
+            );
             return None;
         }
     };
@@ -572,7 +406,10 @@ fn make(
         .enumerate_extensions()
         .map_err(|e| failure("extensions", e))?;
     if !available.khr_vulkan_enable2 {
-        return Err(failure("extensions", "the runtime has no XR_KHR_vulkan_enable2"));
+        return Err(failure(
+            "extensions",
+            "the runtime has no XR_KHR_vulkan_enable2",
+        ));
     }
     let mut wanted = xr::ExtensionSet::default();
     wanted.khr_vulkan_enable2 = true;
@@ -625,7 +462,9 @@ fn make(
 
     // SAFETY: the system's libvulkan.
     let vk_entry = unsafe { ash::Entry::load() }.map_err(|e| failure("libvulkan", e))?;
-    let flags = crate::device::instance_flags() - wgpu::InstanceFlags::DEBUG - wgpu::InstanceFlags::VALIDATION;
+    let flags = crate::device::instance_flags()
+        - wgpu::InstanceFlags::DEBUG
+        - wgpu::InstanceFlags::VALIDATION;
     let extensions = wgpu::hal::vulkan::Instance::desired_extensions(&vk_entry, api, flags)
         .map_err(|e| failure("Vulkan extensions", e))?;
     let names: Vec<*const c_char> = extensions.iter().map(|e| e.as_ptr()).collect();
@@ -641,7 +480,10 @@ fn make(
     let raw_instance = unsafe {
         instance.create_vulkan_instance(
             system,
-            std::mem::transmute::<vk::PFN_vkGetInstanceProcAddr, xr::sys::platform::VkGetInstanceProcAddr>(get_proc),
+            std::mem::transmute::<
+                vk::PFN_vkGetInstanceProcAddr,
+                xr::sys::platform::VkGetInstanceProcAddr,
+            >(get_proc),
             &create as *const _ as *const _,
         )
     }
@@ -694,7 +536,13 @@ fn make(
     crate::set_debug_switches(switches.clone());
     let switch = crate::debug_switch;
     if !switches.trim().is_empty() {
-        log(true, &format!("debug switches: {}", switches.split_whitespace().collect::<Vec<_>>().join(" ")));
+        log(
+            true,
+            &format!(
+                "debug switches: {}",
+                switches.split_whitespace().collect::<Vec<_>>().join(" ")
+            ),
+        );
     }
     if switch("no-first-instance") {
         features.remove(wgpu::Features::INDIRECT_FIRST_INSTANCE);
@@ -703,7 +551,8 @@ fn make(
     // default view count is 0, so two are asked for), and multisampled
     // two-layer attachments for its 4x frames.
     let views = exposed.capabilities.limits.max_multiview_view_count;
-    if exposed.features.contains(wgpu::Features::MULTIVIEW) && views >= 2 && !switch("no-multiview") {
+    if exposed.features.contains(wgpu::Features::MULTIVIEW) && views >= 2 && !switch("no-multiview")
+    {
         features |= wgpu::Features::MULTIVIEW;
         limits.max_multiview_view_count = 2;
         if exposed.features.contains(wgpu::Features::MULTISAMPLE_ARRAY) {
@@ -731,7 +580,10 @@ fn make(
     let raw_device = unsafe {
         instance.create_vulkan_device(
             system,
-            std::mem::transmute::<vk::PFN_vkGetInstanceProcAddr, xr::sys::platform::VkGetInstanceProcAddr>(get_proc),
+            std::mem::transmute::<
+                vk::PFN_vkGetInstanceProcAddr,
+                xr::sys::platform::VkGetInstanceProcAddr,
+            >(get_proc),
             raw_physical,
             &create as *const _ as *const _,
         )
@@ -822,7 +674,11 @@ fn make(
         instance.exts().fb_foveation_configuration,
         instance.exts().fb_swapchain_update_state,
     ) {
-        (Some(fov), Some(config), Some(update)) => Some(Foveation { fov, config, update }),
+        (Some(fov), Some(config), Some(update)) => Some(Foveation {
+            fov,
+            config,
+            update,
+        }),
         _ => None,
     };
     let controls = match crate::openxr_input::Controls::new(&instance, &session) {
@@ -885,7 +741,8 @@ impl Headset {
                     log(false, &format!("session state {state:?}"));
                     match state {
                         xr::SessionState::READY => {
-                            self.session.begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
+                            self.session
+                                .begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
                             self.running = true;
                             self.request_refresh_rate();
                             self.request_fixed_levels();
@@ -927,7 +784,13 @@ impl Headset {
                 // A recenter (the Meta button held): the runtime re-bases
                 // LOCAL and LOCAL_FLOOR about the person.
                 Event::ReferenceSpaceChangePending(change) => {
-                    log(false, &format!("reference space {:?} changes (a recenter)", change.reference_space_type()));
+                    log(
+                        false,
+                        &format!(
+                            "reference space {:?} changes (a recenter)",
+                            change.reference_space_type()
+                        ),
+                    );
                     if let Some(controls) = &mut self.controls {
                         controls.recentered();
                     }
@@ -956,10 +819,16 @@ impl Headset {
             return;
         }
         let Some(perf) = self.instance.exts().ext_performance_settings else {
-            log(true, "fixed-levels: the runtime has no XR_EXT_performance_settings");
+            log(
+                true,
+                "fixed-levels: the runtime has no XR_EXT_performance_settings",
+            );
             return;
         };
-        for domain in [xr::sys::PerfSettingsDomainEXT::CPU, xr::sys::PerfSettingsDomainEXT::GPU] {
+        for domain in [
+            xr::sys::PerfSettingsDomainEXT::CPU,
+            xr::sys::PerfSettingsDomainEXT::GPU,
+        ] {
             // SAFETY: the extension's function on this live session.
             let result = unsafe {
                 (perf.perf_settings_set_performance_level)(
@@ -968,7 +837,10 @@ impl Headset {
                     xr::sys::PerfSettingsLevelEXT::SUSTAINED_HIGH,
                 )
             };
-            log(true, &format!("fixed-levels: {domain:?} sustained high ({result:?})"));
+            log(
+                true,
+                &format!("fixed-levels: {domain:?} sustained high ({result:?})"),
+            );
         }
     }
 
@@ -978,18 +850,34 @@ impl Headset {
         // SAFETY: the extension's functions on this session.
         unsafe {
             let session = self.session.as_raw();
-            if (refresh.enumerate_display_refresh_rates)(session, 0, &mut count, std::ptr::null_mut()).into_raw() < 0 {
+            if (refresh.enumerate_display_refresh_rates)(
+                session,
+                0,
+                &mut count,
+                std::ptr::null_mut(),
+            )
+            .into_raw()
+                < 0
+            {
                 return;
             }
             let mut rates = vec![0f32; count as usize];
-            (refresh.enumerate_display_refresh_rates)(session, count, &mut count, rates.as_mut_ptr());
+            (refresh.enumerate_display_refresh_rates)(
+                session,
+                count,
+                &mut count,
+                rates.as_mut_ptr(),
+            );
             let rate = if rates.iter().any(|r| (r - REFRESH_HZ).abs() < 0.5) {
                 REFRESH_HZ
             } else {
                 rates.iter().copied().fold(0.0, f32::max)
             };
             let result = (refresh.request_display_refresh_rate)(session, rate);
-            log(false, &format!("display rates {rates:?}: asked for {rate} Hz ({result:?})"));
+            log(
+                false,
+                &format!("display rates {rates:?}: asked for {rate} Hz ({result:?})"),
+            );
         }
     }
 
@@ -1001,16 +889,25 @@ impl Headset {
                 .contains(&xr::ReferenceSpaceType::LOCAL_FLOOR);
             let space = if floor {
                 log(false, "reference space LOCAL_FLOOR");
-                self.session
-                    .create_reference_space(xr::ReferenceSpaceType::LOCAL_FLOOR, xr::Posef::IDENTITY)?
+                self.session.create_reference_space(
+                    xr::ReferenceSpaceType::LOCAL_FLOOR,
+                    xr::Posef::IDENTITY,
+                )?
             } else {
                 // The floor 1.6 m under where the head started.
-                log(false, "reference space LOCAL, the floor 1.6 m under the head");
+                log(
+                    false,
+                    "reference space LOCAL, the floor 1.6 m under the head",
+                );
                 self.session.create_reference_space(
                     xr::ReferenceSpaceType::LOCAL,
                     xr::Posef {
                         orientation: xr::Quaternionf::IDENTITY,
-                        position: xr::Vector3f { x: 0.0, y: -1.6, z: 0.0 },
+                        position: xr::Vector3f {
+                            x: 0.0,
+                            y: -1.6,
+                            z: 0.0,
+                        },
                     },
                 )?
             };
@@ -1026,21 +923,36 @@ impl Headset {
         let gpu = module.gpu().ok_or("no device")?;
         let views = self
             .instance
-            .enumerate_view_configuration_views(self.system, xr::ViewConfigurationType::PRIMARY_STEREO)
+            .enumerate_view_configuration_views(
+                self.system,
+                xr::ViewConfigurationType::PRIMARY_STEREO,
+            )
             .map_err(|e| format!("views: {e}"))?;
         let view = views.first().ok_or("no views")?;
-        let mut size = (view.recommended_image_rect_width, view.recommended_image_rect_height);
+        let mut size = (
+            view.recommended_image_rect_width,
+            view.recommended_image_rect_height,
+        );
         // `eye-scale-<k>` (a measuring switch, docs/quest.md): eyes of k times
         // the recommended size, to price the resolution against the picture.
         let scale = DEBUG_SCALE.get_or_init(|| {
-            crate::DEBUG_SWITCHES
+            crate::headset::DEBUG_SWITCHES
                 .get()
-                .and_then(|w| w.split_whitespace().find_map(|w| w.strip_prefix("eye-scale-")?.parse::<f32>().ok()))
+                .and_then(|w| {
+                    w.split_whitespace()
+                        .find_map(|w| w.strip_prefix("eye-scale-")?.parse::<f32>().ok())
+                })
                 .filter(|k| (0.25..=1.5).contains(k))
         });
         if let Some(k) = *scale {
-            size = ((size.0 as f32 * k).round() as u32, (size.1 as f32 * k).round() as u32);
-            log(false, &format!("applied: eye-scale {k}: {}x{}", size.0, size.1));
+            size = (
+                (size.0 as f32 * k).round() as u32,
+                (size.1 as f32 * k).round() as u32,
+            );
+            log(
+                false,
+                &format!("applied: eye-scale {k}: {}x{}", size.0, size.1),
+            );
         }
         let formats = self
             .session
@@ -1049,9 +961,10 @@ impl Headset {
         // The canvas's own format when it is sRGB and offered (its renderer
         // is kept), else sRGB RGBA, else sRGB BGRA.
         let page = module.render_format(id);
-        let candidates = page
-            .into_iter()
-            .chain([wgpu::TextureFormat::Rgba8UnormSrgb, wgpu::TextureFormat::Bgra8UnormSrgb]);
+        let candidates = page.into_iter().chain([
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::TextureFormat::Bgra8UnormSrgb,
+        ]);
         let (format, vk_format) = candidates
             .filter(|f| f.is_srgb())
             .filter_map(|f| Some((f, vk_format(f)?)))
@@ -1098,7 +1011,9 @@ impl Headset {
         } else {
             wgpu::TextureUsages::RENDER_ATTACHMENT
         };
-        let images = handle.enumerate_images().map_err(|e| format!("images: {e}"))?;
+        let images = handle
+            .enumerate_images()
+            .map_err(|e| format!("images: {e}"))?;
         let extent = wgpu::Extent3d {
             width: size.0,
             height: size.1,
@@ -1134,20 +1049,21 @@ impl Headset {
                 // SAFETY: as above; acquired images arrive in
                 // COLOR_ATTACHMENT_OPTIMAL (XR_KHR_vulkan_enable2).
                 Ok(unsafe {
-                    gpu.device.create_texture_from_hal::<wgpu::hal::api::Vulkan>(
-                        hal,
-                        &wgpu::TextureDescriptor {
-                            label: Some("exact xr swapchain"),
-                            size: extent,
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format,
-                            usage,
-                            view_formats: &[],
-                        },
-                        wgpu::TextureUses::COLOR_TARGET,
-                    )
+                    gpu.device
+                        .create_texture_from_hal::<wgpu::hal::api::Vulkan>(
+                            hal,
+                            &wgpu::TextureDescriptor {
+                                label: Some("exact xr swapchain"),
+                                size: extent,
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format,
+                                usage,
+                                view_formats: &[],
+                            },
+                            wgpu::TextureUses::COLOR_TARGET,
+                        )
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
@@ -1158,7 +1074,11 @@ impl Headset {
                 size.0,
                 size.1,
                 textures.len(),
-                if full { "colour+sampled+copy" } else { "colour" }
+                if full {
+                    "colour+sampled+copy"
+                } else {
+                    "colour"
+                }
             ),
         );
         self.swapchain = Some(Swapchain {
@@ -1205,7 +1125,10 @@ impl Headset {
                 flags: xr::sys::SwapchainStateFoveationFlagsFB::EMPTY,
                 profile,
             };
-            let updated = (f.update.update_swapchain)(swapchain.handle.as_raw(), &state as *const _ as *const _);
+            let updated = (f.update.update_swapchain)(
+                swapchain.handle.as_raw(),
+                &state as *const _ as *const _,
+            );
             log(false, &format!("foveation HIGH, dynamic: {updated:?} (no effect without a fragment density map)"));
             let _ = (f.fov.destroy_foveation_profile)(profile);
             let _ = &f.config;
@@ -1243,7 +1166,12 @@ fn hal_uses(usage: wgpu::TextureUsages) -> wgpu::TextureUses {
 /// Eye → clip from an OpenXR view's field of view (0–1 depth).
 fn projection(fov: xr::Fovf, near: f32, far: f32) -> [f32; 16] {
     crate::xr::fov_projection(
-        [fov.angle_left, fov.angle_right, fov.angle_up, fov.angle_down],
+        [
+            fov.angle_left,
+            fov.angle_right,
+            fov.angle_up,
+            fov.angle_down,
+        ],
         near,
         far,
     )
@@ -1286,7 +1214,12 @@ pub(crate) fn render(module: &mut Module, id: u32, host_now_ms: f64) -> Option<u
     }
 }
 
-fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) -> Result<(), String> {
+fn frame(
+    headset: &mut Headset,
+    module: &mut Module,
+    id: u32,
+    host_now_ms: f64,
+) -> Result<(), String> {
     let waited = Instant::now();
     let state = headset.waiter.wait().map_err(|e| format!("wait: {e}"))?;
     let wait_ms = waited.elapsed().as_secs_f64() * 1e3;
@@ -1303,7 +1236,9 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
         return Ok(());
     }
     if let Err(e) = headset.swapchain(module, id) {
-        let _ = headset.stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &[]);
+        let _ = headset
+            .stream
+            .end(time, xr::EnvironmentBlendMode::OPAQUE, &[]);
         return Err(e);
     }
     headset.space().map_err(|e| format!("space: {e}"))?;
@@ -1313,7 +1248,9 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
         .locate_views(xr::ViewConfigurationType::PRIMARY_STEREO, time, space)
         .map_err(|e| format!("views: {e}"))?;
     if views.len() < 2 {
-        let _ = headset.stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &[]);
+        let _ = headset
+            .stream
+            .end(time, xr::EnvironmentBlendMode::OPAQUE, &[]);
         return Err(format!("{} views", views.len()));
     }
     // A capture from a fixed pose: both eyes look at the stage from it, for
@@ -1324,19 +1261,40 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
         let focus = module.xr_focus(id).unwrap_or([0.0, 1.0, -0.8]);
         for (view, (q, p)) in views.iter_mut().zip(pose.eyes(focus)) {
             view.pose = xr::Posef {
-                orientation: xr::Quaternionf { x: q[0], y: q[1], z: q[2], w: q[3] },
-                position: xr::Vector3f { x: p[0], y: p[1], z: p[2] },
+                orientation: xr::Quaternionf {
+                    x: q[0],
+                    y: q[1],
+                    z: q[2],
+                    w: q[3],
+                },
+                position: xr::Vector3f {
+                    x: p[0],
+                    y: p[1],
+                    z: p[2],
+                },
             };
             let f = view.fov;
-            if [f.angle_left, f.angle_right, f.angle_up, f.angle_down].iter().all(|a| *a == 0.0) {
+            if [f.angle_left, f.angle_right, f.angle_up, f.angle_down]
+                .iter()
+                .all(|a| *a == 0.0)
+            {
                 let a = 45f32.to_radians();
-                view.fov = xr::Fovf { angle_left: -a, angle_right: a, angle_up: a, angle_down: -a };
+                view.fov = xr::Fovf {
+                    angle_left: -a,
+                    angle_right: a,
+                    angle_up: a,
+                    angle_down: -a,
+                };
             }
         }
         let focus = pose.focus.unwrap_or(focus);
         format!(
             "{} pose {:.2} m, {:.0}° down, {:.0}° turned, looking at {focus:?}",
-            if pose.focus.is_some() { "look" } else { "stage" },
+            if pose.focus.is_some() {
+                "look"
+            } else {
+                "stage"
+            },
             pose.distance,
             pose.pitch_deg,
             pose.yaw_deg
@@ -1353,7 +1311,10 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
             .end(time, xr::EnvironmentBlendMode::OPAQUE, &[])
             .map_err(|e| format!("end: {e}"))?;
         if !headset.untracked {
-            log(true, "tracking lost: frames show nothing until the head is tracked again");
+            log(
+                true,
+                "tracking lost: frames show nothing until the head is tracked again",
+            );
         }
         headset.untracked = true;
         headset.perf.frame(wait_ms, 0.0, 0.0, false, None);
@@ -1385,7 +1346,11 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
     let offset = *headset.clock_offset.get_or_insert_with(|| {
         let offset = host_now_ms - xr_ms;
         log(false, &format!("clocks: host − headset = {offset:.1} ms"));
-        if offset.abs() < 1000.0 { 0.0 } else { offset }
+        if offset.abs() < 1000.0 {
+            0.0
+        } else {
+            offset
+        }
     });
     if headset.canvas.is_none() {
         log(false, &format!("canvas {id} draws in the headset"));
@@ -1397,7 +1362,9 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
     let now_ms = xr_ms + offset;
     if let Some(controls) = headset.controls.as_mut() {
         let at_ms = headset.last_frame_ms.unwrap_or(now_ms).min(now_ms);
-        let (input, messages) = controls.frame(&headset.session, space, time, || JAVA.get().and_then(external_files_dir));
+        let (input, messages) = controls.frame(&headset.session, space, time, || {
+            JAVA.get().and_then(external_files_dir)
+        });
         if let Some(input) = input {
             module.input(id, &crate::InputEvent::Xr { input, at_ms });
         }
@@ -1419,9 +1386,11 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
     }
     // Hand the image back in the layout the runtime expects.
     if let Some(gpu) = module.gpu() {
-        let mut encoder = gpu.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("exact xr release"),
-        });
+        let mut encoder = gpu
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("exact xr release"),
+            });
         encoder.transition_resources(
             std::iter::empty::<wgpu::BufferTransition<&wgpu::Buffer>>(),
             std::iter::once(wgpu::TextureTransition {
@@ -1438,7 +1407,9 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
         .map_err(|e| format!("release: {e}"))?;
     if drawn.is_none() {
         let why = module.error.clone();
-        let _ = headset.stream.end(time, xr::EnvironmentBlendMode::OPAQUE, &[]);
+        let _ = headset
+            .stream
+            .end(time, xr::EnvironmentBlendMode::OPAQUE, &[]);
         return Err(format!("canvas {id}: {why}"));
     }
     let (w, h) = swapchain.size;
@@ -1473,7 +1444,9 @@ fn frame(headset: &mut Headset, module: &mut Module, id: u32, host_now_ms: f64) 
     }
     let cpu_ms = started.elapsed().as_secs_f64() * 1e3;
     let mode = module.xr_stereo_mode(id);
-    headset.perf.frame(wait_ms, cpu_ms, encode_ms, true, Some(mode));
+    headset
+        .perf
+        .frame(wait_ms, cpu_ms, encode_ms, true, Some(mode));
     let _ = (&headset.vk_instance, headset.hal_device_ready);
     Ok(())
 }

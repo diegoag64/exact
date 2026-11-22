@@ -62,6 +62,28 @@ export async function offer(host) {
   return state;
 }
 
+/**
+ * Offer sessions for gpu-glue.js's world. `glue` is its side: the module
+ * (`gpu()`), its `surfaces` and the frame work around them; `pause()` stops
+ * the page's frames and `period(ms)` sets the frame period (0: the page's).
+ */
+export function connect(glue) {
+  return offer({
+    module: () => glue.gpu(),
+    target: () => [...glue.surfaces.values()].find(e => e.id && !e.terminal && glue.live(e.view) === e) ?? null,
+    clock: now => { glue.gpu()?.gpu_host_frame?.(now, performance.now(), 0, 0); return glue.clockFor(now); },
+    started: session => { glue.pause(); if (session.frameRate > 0) glue.period(1000 / session.frameRate); },
+    after: entry => { if (!glue.trapped()) { glue.messages(entry); glue.flush(); } },
+    ended: () => {
+      glue.period(0);
+      for (const entry of glue.surfaces.values()) entry.wants = true;
+      glue.lifecycle(document.hidden ? 0 : 1);
+      glue.schedule();
+    },
+    lost: () => glue.recoverDevice(),
+  }).then(state => { if (state) glue.api.immersive = state; }, error => console.error("exact xr:", error));
+}
+
 // A WebGPU session's projections are 0–1 depth (the WebXR-WebGPU binding);
 // one that maps the near plane to −1 is WebGL's, remapped here: z' = (z + w) / 2.
 function clipDepth(matrix, near, state) {
