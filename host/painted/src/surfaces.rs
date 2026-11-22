@@ -546,7 +546,7 @@ pub(crate) struct Surfaces {
     posts: BTreeMap<String, Vec<Value>>,
     // Independent lifecycle causes; also applied before a newly mounted surface
     // can bind or render, including replacement while the window is suspended.
-    hidden: bool,
+    pub(crate) hidden: bool,
     interrupted: bool,
     /// Windows readers gave canvases, by view (Android).
     #[cfg(target_os = "android")]
