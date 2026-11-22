@@ -341,10 +341,12 @@ fn physical_cpu_placement_uses_all_x_bins_and_only_zero_y_bin() {
     for scale in [0.75, 1.0, 1.25, 2.0] {
         for i in -32..32 {
             let offset = (i as f32 / 16.0, i as f32 / 13.0);
-            let (key, _, y) = ink::physical(&g, 0, offset, scale);
+            let (key, x, y) = ink::physical(&g, 0, offset, scale);
             x_bins.insert(key.x_bin);
             assert_eq!(key.y_bin, 0);
-            assert_eq!(y, g.y.mul_add(scale, offset.1).trunc() as i32);
+            assert_eq!(y, g.y.mul_add(scale, offset.1).floor() as i32);
+            // Where a stroke's band is cached by.
+            assert_eq!(g.pixel(offset, scale), (x, key.x_bin, y));
         }
     }
     assert_eq!(x_bins.len(), 4);
@@ -928,6 +930,7 @@ fn typing_at_the_start_of_a_textarea_shapes_places_and_indexes_only_the_edited_l
     p.frame();
     for (i, ch) in "abcd".chars().enumerate() {
         let before = ink::build_work();
+        let split = shaping::SPLIT_BYTES.get();
         let shaped = shaping::shape_line_calls();
         let broken = shaping::break_calls().1;
         let placed = lines::EXTRACTED.with(std::cell::Cell::get);
@@ -943,6 +946,13 @@ fn typing_at_the_start_of_a_textarea_shapes_places_and_indexes_only_the_edited_l
             .unwrap();
         assert!(value.starts_with(&"abcd"[..=i]));
         assert_eq!(value.len(), document.len() + i + 1);
+        let caret = p.field_selection(field);
+        assert_eq!((caret.start, caret.end), ((i + 1) as u32, (i + 1) as u32));
+        assert_eq!(
+            shaping::SPLIT_BYTES.get() - split,
+            65 + i,
+            "split bytes after {ch}"
+        );
         assert_eq!(shaping::shape_line_calls() - shaped, 1, "shapes after {ch}");
         assert_eq!(shaping::break_calls().1 - broken, 1, "breaks after {ch}");
         assert_eq!(

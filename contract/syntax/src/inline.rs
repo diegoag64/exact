@@ -25,12 +25,15 @@ use std::rc::Rc;
 
 pub mod calls;
 mod derives;
+mod place;
 mod subst;
 #[cfg(test)]
 mod tests;
 mod use_node;
 
 pub use derives::resolved_derives;
+use place::{Siblings, Steps};
+pub use place::{SourceKind, SourceStep};
 use subst::{renamed_locals, subst_expr, subst_stmts, Subst};
 
 fn err<T>(
@@ -43,12 +46,6 @@ fn err<T>(
         message: message.into(),
         span,
     })
-}
-
-/// A name use `n` gives a child's declaration. `#` cannot
-/// appear in an authored identifier, so no author's name can collide with it.
-pub fn lifted(name: &str, n: u32) -> String {
-    format!("{name}#{n}")
 }
 
 /// The sources a child may read itself: the device's facts, which hold no
@@ -77,7 +74,7 @@ pub fn inline(file: &File) -> Result<Vec<Node>, SyntaxError> {
 
 /// The expanded root (LLP 1017 P4c): its view inlined, plus the
 /// `state`s and `action`s of every stateful child use, renamed apart with
-/// the use's number, each owned by the instance it belongs to ([`Owner`]);
+/// the use's place, each owned by its instance ([`Owner`]);
 /// a child's `derive` is substituted at each read in this view. Lowering may
 /// replace those reads with loads of one executable row per use.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -123,6 +120,10 @@ pub struct Expanded {
     pub owned_uses: Vec<OwnedUse>,
     /// Each region tag's declaring instance, for compile-time cost reports.
     pub region_instances: BTreeMap<u32, u32>,
+    /// Local source steps shared by rendered elements and keyed regions.
+    pub steps: Vec<SourceStep>,
+    /// The source step of each keyed region, indexed by its expansion tag.
+    pub each_steps: BTreeMap<u32, u32>,
 }
 
 /// One instance expression. Source expansion keeps substitution; lowering
@@ -204,6 +205,17 @@ pub struct Instance {
     pub span: crate::Span,
 }
 
+impl Expanded {
+    /// Each runner action name and the instance that declared it, including the root.
+    pub fn component_actions(&self) -> impl Iterator<Item = (&Instance, &str)> {
+        self.root
+            .actions
+            .iter()
+            .zip(&self.action_instances)
+            .map(|(action, &instance)| (&self.instances[instance as usize], action.name.as_str()))
+    }
+}
+
 /// Expand the file's root: inline every use and lift every child's own
 /// declarations into it, every action call expanded (LLP 1089).
 pub fn expand(file: &File) -> Result<Expanded, SyntaxError> {
@@ -230,15 +242,20 @@ fn first((expanded, mut errors): (Expanded, Vec<SyntaxError>)) -> Result<Expande
 /// when no error is returned; a file without a component returns an empty
 /// expansion and a refusal. `mapped` keeps source provenance.
 pub fn expand_all(file: &File, mapped: bool) -> (Expanded, Vec<SyntaxError>) {
-    let (mut expanded, errors) = expand_with_sites(file, mapped, false);
+    let (mut expanded, errors) = expand_with_sites(file, mapped, false, &BTreeSet::new());
     hygiene(&mut expanded, file);
     (expanded, errors)
 }
 
 /// [`expand_all`] before [`hygiene`]: what the type pass checks, so a
 /// caller's own names are still the author's when a `let` is refused.
-pub fn expand_checked(file: &File, mapped: bool) -> (Expanded, Vec<SyntaxError>) {
-    expand_with_sites(file, mapped, false)
+/// Prop arguments and providers refused in their own scope read as missing.
+pub fn expand_checked(
+    file: &File,
+    mapped: bool,
+    refused_bindings: &BTreeSet<crate::Span>,
+) -> (Expanded, Vec<SyntaxError>) {
+    expand_with_sites(file, mapped, false, refused_bindings)
 }
 
 /// [`expand_all`] with every typed prop's and inject's argument ascribed
@@ -247,7 +264,7 @@ pub fn expand_checked(file: &File, mapped: bool) -> (Expanded, Vec<SyntaxError>)
 /// semantics' checker to judge. The plan compiler expands without it.
 /// Its calls are renamed apart as the plan's are ([`hygiene`]).
 pub fn expand_typed(file: &File) -> (Expanded, Vec<SyntaxError>) {
-    let (mut expanded, errors) = expand_with_sites(file, false, true);
+    let (mut expanded, errors) = expand_with_sites(file, false, true, &BTreeSet::new());
     hygiene(&mut expanded, file);
     (expanded, errors)
 }
@@ -379,6 +396,7 @@ fn expand_with_sites(
     file: &File,
     _capture_sites: bool,
     typed_props: bool,
+    refused_bindings: &BTreeSet<crate::Span>,
 ) -> (Expanded, Vec<SyntaxError>) {
     // Same-component calls first, each in its own component's scope (LLP
     // 1089 D7): lifting then substitutes caller and callee alike.
@@ -441,6 +459,13 @@ fn expand_with_sites(
     let mut counter = 0u32;
     let records = record_constructors(file);
     let discarded_slots = use_node::discarded_slots(file);
+    let mut steps = Steps::default();
+    let entry = steps.intern(SourceStep {
+        outer: None,
+        kind: SourceKind::Component(source.name.clone()),
+        ordinal: 0,
+        shared_id: false,
+    });
     let mut ctx = Ctx {
         file,
         records: &records,
@@ -453,6 +478,11 @@ fn expand_with_sites(
             .map(|c| c.name.clone())
             .into_iter()
             .collect(),
+        place: place::root(&source.name),
+        outer_step: Some(entry),
+        steps,
+        source_keys: BTreeMap::new(),
+        each_steps: BTreeMap::new(),
         site_depth: 0,
         provides: Vec::new(),
         fill: None,
@@ -472,6 +502,7 @@ fn expand_with_sites(
         instance: 0,
         capture_sites: true,
         typed_props,
+        refused_bindings,
         errors: Vec::new(),
         instances: vec![Instance {
             component: file.components[0].name.clone(),
@@ -481,10 +512,7 @@ fn expand_with_sites(
     };
     let none = BTreeMap::new();
     let mut subst = Subst::new(&none, &records);
-    for b in &source.provides {
-        ctx.provides
-            .push((b.name.clone(), subst_expr(&b.expr, &mut subst)));
-    }
+    ctx.provides = substitute_providers(&source.provides, &mut subst);
     // @ref LLP 1116.009 D2 — an app with no `notfound` route is given one, and
     // its screen where the app draws a route per stack entry.
     let screen = implicit_notfound(file)
@@ -501,8 +529,14 @@ fn expand_with_sites(
         }
         None => &source.view,
     };
-    let renamed = rename_nodes(source_view, &BTreeMap::new(), 0, &discarded_slots);
-    let view = inline_nodes(&renamed, &mut subst, &mut ctx).unwrap_or_default();
+    let renamed = rename_nodes(
+        source_view,
+        &BTreeMap::new(),
+        0,
+        &discarded_slots,
+        &mut ctx.source_keys,
+    );
+    let view = inline_nodes(&renamed, &mut subst, &mut ctx, None).unwrap_or_default();
     root.view = view;
     let mut owners = vec![Owner::Root; root.states.len()];
     let mut state_instances = vec![0; root.states.len()];
@@ -550,6 +584,8 @@ fn expand_with_sites(
         owners,
         instances: ctx.instances,
         region_instances: ctx.region_instances,
+        steps: ctx.steps.into_rows(),
+        each_steps: ctx.each_steps,
         state_instances,
         action_instances,
         resource_owners,
@@ -577,12 +613,18 @@ struct Ctx<'a> {
     /// The components whose views are being inlined, outermost first: a use
     /// of one of them is recursion, which never terminates.
     path: Vec<String>,
+    /// The structural name of the rendering site (LLP 1029.000.002 D1).
+    place: String,
+    outer_step: Option<u32>,
+    steps: Steps,
+    source_keys: BTreeMap<crate::Span, String>,
+    each_steps: BTreeMap<u32, u32>,
     /// Emitted view/region sites above the node being expanded. A component
     /// use and a slot's `children` are replaced, so neither consumes a site.
     site_depth: usize,
     /// Provided bindings in force, outermost component first, each already
     /// substituted into the scope of the component that provides it.
-    provides: Vec<(String, Expr)>,
+    provides: Vec<Binding>,
     /// What fills `children` here: `Some` inside a slot view that can render
     /// the supplied nodes, `None` elsewhere.
     fill: Option<Rc<Fill>>,
@@ -618,6 +660,7 @@ struct Ctx<'a> {
     capture_sites: bool,
     /// Ascribe every typed prop's and inject's argument (`expand_typed`).
     typed_props: bool,
+    refused_bindings: &'a BTreeSet<crate::Span>,
     /// Every instantiation so far, the root first (LLP 1035.005 D3).
     instances: Vec<Instance>,
     /// Uses that could not be expanded, in the order met.
@@ -634,11 +677,22 @@ struct Fill {
     nodes: Vec<Node>,
     subst: BTreeMap<String, Expr>,
     value_only: BTreeSet<String>,
-    provides: Vec<(String, Expr)>,
+    provides: Vec<Binding>,
     outer: Option<Rc<Fill>>,
     instance: u32,
     /// The use site's component path: a use in the fill is that site's.
     path: Vec<String>,
+}
+
+fn substitute_providers(bindings: &[Binding], subst: &mut Subst<'_, Expr>) -> Vec<Binding> {
+    bindings
+        .iter()
+        .map(|b| Binding {
+            name: b.name.clone(),
+            expr: subst_expr(&b.expr, subst),
+            span: b.span,
+        })
+        .collect()
 }
 
 impl Ctx<'_> {
@@ -678,7 +732,16 @@ fn inline_nodes(
     nodes: &[Node],
     subst: &mut Subst<'_, Expr>,
     ctx: &mut Ctx<'_>,
+    siblings: Option<&mut Siblings>,
 ) -> Result<Vec<Node>, SyntaxError> {
+    let mut fresh;
+    let siblings = match siblings {
+        Some(siblings) => siblings,
+        None => {
+            fresh = Siblings::for_nodes(nodes, subst);
+            &mut fresh
+        }
+    };
     let mut out = Vec::with_capacity(nodes.len());
     for n in nodes {
         let is_site = !matches!(n, Node::Use { .. } | Node::Children { .. });
@@ -691,6 +754,16 @@ fn inline_nodes(
             continue;
         }
         ctx.site_depth += usize::from(is_site);
+        let parent = ctx.place.len();
+        let outer = ctx.outer_step;
+        let place = siblings
+            .append_step(&mut ctx.place, n, subst, outer, &ctx.source_keys)
+            .map(|step| ctx.steps.intern(step));
+        ctx.outer_step = match n {
+            Node::Use { .. } | Node::Children { .. } => place,
+            Node::Element { .. } | Node::Each { .. } => None,
+            Node::When { .. } | Node::Match { .. } => outer,
+        };
         match n {
             Node::Use { .. } => out.extend(use_node::inline_use(n, subst, ctx)?),
             Node::Children { span } => match ctx.fill.clone() {
@@ -703,7 +776,7 @@ fn inline_nodes(
                     let outer_path = std::mem::replace(&mut ctx.path, fill.path.clone());
                     let mut site =
                         Subst::new(&fill.subst, ctx.records).with_value_only(&fill.value_only);
-                    let nodes = inline_nodes(&fill.nodes, &mut site, ctx);
+                    let nodes = inline_nodes(&fill.nodes, &mut site, ctx, None);
                     ctx.provides = provides;
                     ctx.fill = outer_fill;
                     ctx.instance = outer_instance;
@@ -773,7 +846,7 @@ fn inline_nodes(
                 // arm does, so that state starts when the tab is built.
                 let children = if panel {
                     let tag = ctx.tag();
-                    let then = ctx.in_arm(tag, 0, |ctx| inline_nodes(children, subst, ctx));
+                    let then = ctx.in_arm(tag, 0, |ctx| inline_nodes(children, subst, ctx, None));
                     then.map(|then| {
                         vec![Node::When {
                             tag,
@@ -784,7 +857,7 @@ fn inline_nodes(
                         }]
                     })
                 } else {
-                    inline_nodes(children, subst, ctx)
+                    inline_nodes(children, subst, ctx, None)
                 };
                 ctx.tabs = tabs;
                 if windowed {
@@ -800,6 +873,7 @@ fn inline_nodes(
                     children: children?,
                     span: *span,
                     instance: ctx.instance,
+                    place,
                 })
             }
             Node::When {
@@ -810,8 +884,10 @@ fn inline_nodes(
                 ..
             } => {
                 let tag = ctx.tag();
-                let then = ctx.in_arm(tag, 0, |ctx| inline_nodes(then, subst, ctx));
-                let otherwise = ctx.in_arm(tag, 1, |ctx| inline_nodes(otherwise, subst, ctx));
+                let then = ctx.in_arm(tag, 0, |ctx| inline_nodes(then, subst, ctx, Some(siblings)));
+                let otherwise = ctx.in_arm(tag, 1, |ctx| {
+                    inline_nodes(otherwise, subst, ctx, Some(siblings))
+                });
                 out.push(Node::When {
                     tag,
                     cond: subst_expr(cond, subst),
@@ -830,6 +906,7 @@ fn inline_nodes(
                 ..
             } => {
                 let tag = ctx.tag();
+                ctx.each_steps.insert(tag, place.expect("for source step"));
                 let list = subst_expr(list, subst);
                 // A row of a router's tabs or stack is a tab or a screen
                 // someone opened; any other `for` repeats as its data does
@@ -840,7 +917,7 @@ fn inline_nodes(
                     Some(false) => {}
                     None => ctx.repeats.push(Repeat::Each(*span)),
                 }
-                let body = ctx.in_arm(tag, 0, |ctx| inline_nodes(body, subst, ctx));
+                let body = ctx.in_arm(tag, 0, |ctx| inline_nodes(body, subst, ctx, None));
                 match routed {
                     Some(true) => drop(ctx.router_rows.pop()),
                     Some(false) => {}
@@ -864,8 +941,10 @@ fn inline_nodes(
                 ..
             } => {
                 let tag = ctx.tag();
-                let body = ctx.in_arm(tag, 0, |ctx| inline_nodes(&some.1, subst, ctx));
-                let none = ctx.in_arm(tag, 1, |ctx| inline_nodes(none, subst, ctx));
+                let body = ctx.in_arm(tag, 0, |ctx| {
+                    inline_nodes(&some.1, subst, ctx, Some(siblings))
+                });
+                let none = ctx.in_arm(tag, 1, |ctx| inline_nodes(none, subst, ctx, Some(siblings)));
                 out.push(Node::Match {
                     tag,
                     subject: subst_expr(subject, subst),
@@ -875,6 +954,8 @@ fn inline_nodes(
                 })
             }
         }
+        ctx.outer_step = outer;
+        ctx.place.truncate(parent);
         ctx.site_depth -= usize::from(is_site);
     }
     Ok(out)
@@ -909,6 +990,7 @@ fn rename_nodes(
     map: &BTreeMap<String, String>,
     n: u32,
     discarded_slots: &BTreeSet<String>,
+    source_keys: &mut BTreeMap<crate::Span, String>,
 ) -> Vec<Node> {
     let binder = |name: &str| format!("{name}#view{n}");
     nodes
@@ -921,6 +1003,7 @@ fn rename_nodes(
                 children,
                 span,
                 instance,
+                place,
             } => Node::Element {
                 tag: tag.clone(),
                 positional: positional
@@ -936,9 +1019,10 @@ fn rename_nodes(
                         written: a.written,
                     })
                     .collect(),
-                children: rename_nodes(children, map, n, discarded_slots),
+                children: rename_nodes(children, map, n, discarded_slots, source_keys),
                 span: *span,
                 instance: *instance,
+                place: *place,
             },
             Node::Use {
                 name,
@@ -965,7 +1049,7 @@ fn rename_nodes(
                         .into_iter()
                         .collect()
                 } else {
-                    rename_nodes(children, map, n, discarded_slots)
+                    rename_nodes(children, map, n, discarded_slots, source_keys)
                 },
                 span: *span,
             },
@@ -979,8 +1063,8 @@ fn rename_nodes(
             } => Node::When {
                 tag: *tag,
                 cond: renamed_locals(cond, map),
-                then: rename_nodes(then, map, n, discarded_slots),
-                otherwise: rename_nodes(otherwise, map, n, discarded_slots),
+                then: rename_nodes(then, map, n, discarded_slots, source_keys),
+                otherwise: rename_nodes(otherwise, map, n, discarded_slots, source_keys),
                 span: *span,
             },
             Node::Each {
@@ -992,6 +1076,12 @@ fn rename_nodes(
                 body,
                 span,
             } => {
+                // All uses of the same written loop compare its original key,
+                // before this use gives each bound variable a fresh name.
+                source_keys.entry(*span).or_insert_with(|| {
+                    use sha2::{Digest, Sha256};
+                    format!("{:x}", Sha256::digest(crate::share::canonical(key)))
+                });
                 let mut inner = map.clone();
                 let fresh = binder(var);
                 inner.insert(var.clone(), fresh.clone());
@@ -1006,7 +1096,7 @@ fn rename_nodes(
                     index,
                     list: renamed_locals(list, map),
                     key: renamed_locals(key, &inner),
-                    body: rename_nodes(body, &inner, n, discarded_slots),
+                    body: rename_nodes(body, &inner, n, discarded_slots, source_keys),
                     span: *span,
                 }
             }
@@ -1023,8 +1113,11 @@ fn rename_nodes(
                 Node::Match {
                     tag: *tag,
                     subject: renamed_locals(subject, map),
-                    some: (fresh, rename_nodes(&some.1, &inner, n, discarded_slots)),
-                    none: rename_nodes(none, map, n, discarded_slots),
+                    some: (
+                        fresh,
+                        rename_nodes(&some.1, &inner, n, discarded_slots, source_keys),
+                    ),
+                    none: rename_nodes(none, map, n, discarded_slots, source_keys),
                     span: *span,
                 }
             }

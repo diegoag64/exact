@@ -110,8 +110,7 @@ pub struct LayoutGlyph {
     pub font_size: f32,
     /// In its face.
     pub glyph_id: u32,
-    /// The canonical run index ([`super::Spec`]'s runs), kept across font
-    /// fallback and wrapping.
+    /// The glyph's run relative to the hard line's first run.
     pub metadata: u32,
     /// Its face, an index into [`Lines::faces`].
     pub face: u16,
@@ -121,19 +120,19 @@ pub struct LayoutGlyph {
 
 impl LayoutGlyph {
     /// The canonical run index.
-    pub fn run(&self) -> usize {
-        self.metadata as usize
+    pub fn run(&self, run_base: u32) -> usize {
+        (run_base + self.metadata) as usize
     }
     /// The cluster's byte range in [`super::LayoutRun::text`].
     pub fn range(&self) -> std::ops::Range<usize> {
         self.start as usize..self.end as usize
     }
     /// Where the CPU raster places it with the pen at `offset` (device
-    /// pixels) at `scale`: whole pixel x, its quarter-pixel phase, and
-    /// whole pixel y.
+    /// pixels) at `scale`: whole pixel x and its quarter-pixel phase, and
+    /// whole pixel y rounded down.
     pub fn pixel(&self, offset: (f32, f32), scale: f32) -> (i32, u8, i32) {
         let (x, bin) = super::catalog::subpixel(self.x.mul_add(scale, offset.0));
-        let (y, _) = super::catalog::subpixel(self.y.mul_add(scale, offset.1).trunc());
+        let (y, _) = super::catalog::subpixel(self.y.mul_add(scale, offset.1).floor());
         (x, bin, y)
     }
 }
@@ -167,6 +166,8 @@ impl Face {
 /// One visual line.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LayoutLine {
+    /// The canonical run of a glyph whose brush is zero.
+    pub run_base: u32,
     /// The hard line (text between line feeds) it belongs to.
     pub hard: u32,
     /// Its glyphs, a range of [`Lines::glyphs`], in visual order.

@@ -11,7 +11,10 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 mod build_advice;
-pub use build_advice::{compile_path_advised, resource_clock_warnings, surface_findings, Advised};
+pub use build_advice::{
+    compile_path_advised, information, resource_clock_warnings, surface_findings, warning_rank,
+    web_only, web_only_line, web_only_said, Advised,
+};
 
 mod activities;
 mod excerpt;
@@ -61,8 +64,11 @@ mod surface;
 use surface::fact_shape;
 mod symbols;
 pub use contract_analyze::SuggestionCheck;
-pub use properties::check_test_states_path;
-pub use properties::{check_properties_path, check_suggestions_path, properties, tests};
+pub use properties::resolve_test_states_path;
+pub use properties::{
+    check_properties, check_properties_path, check_suggestions_path, properties, property_program,
+    resolve_properties_path, tests,
+};
 mod tests_json;
 pub use tests_json::{authored_json, tests_json};
 pub mod forma_levels;
@@ -97,7 +103,9 @@ pub use sources::{
 pub use symbols::{
     editor_elements_json, editor_symbols_json, symbols_json, ElementFilters, PartialSymbols,
 };
-pub use typescript::{design_exports, typescript, typescript_exporting, typescript_sources};
+pub use typescript::{
+    design_exports, typescript, typescript_entry_answer, typescript_exporting, typescript_sources,
+};
 /// The app's strings tables (LLP 1060 D1), `None` for an app without a
 /// `strings` directory, every refusal in one message: the bake reads grant
 /// purposes from them (LLP 1069.008 D1).
@@ -360,7 +368,10 @@ pub fn compile_warned(src: &str) -> (Result<Plan, CompileError>, Vec<CompileErro
                 None,
                 false,
                 contract_lower::Profile::Web,
-                Some(&mut warned),
+                Some((
+                    &contract_lower::WarningSelection::new(contract_lower::MAX_WARNINGS, [src]),
+                    &mut warned,
+                )),
             )
             .map(|(plan, _)| plan)
             .map_err(first)
@@ -471,6 +482,15 @@ pub fn source_graph(path: &Path) -> SourceGraph {
 /// [`source_graph`]'s Contract half ([`sources::GraphBase`]), which reads no design file, or its refusal (the root
 /// unreadable) as the whole graph: the design server's walk keeps it across a design-only edit.
 pub fn source_graph_base(path: &Path) -> Result<GraphBase, SourceGraph> {
+    graph_base_for(path, None)
+}
+
+/// The inputs to a web frame built in its owning app.
+pub fn frame_source_graph(path: &Path, frame: &Path) -> SourceGraph {
+    graph_base_for(path, Some(frame)).map_or_else(|refused| refused, |base| base.tail())
+}
+
+fn graph_base_for(path: &Path, frame: Option<&Path>) -> Result<GraphBase, SourceGraph> {
     // The server's planned text of the root, where it has one (stage 8 D).
     let refused = |message: String| SourceGraph {
         sources: Vec::new(),
@@ -495,7 +515,7 @@ pub fn source_graph_base(path: &Path) -> Result<GraphBase, SourceGraph> {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
     match source_root.canonicalize() {
-        Ok(app_root) => Ok(sources::graph_base(path, &src, &app_root)),
+        Ok(app_root) => Ok(sources::graph_base(path, &src, &app_root, frame)),
         Err(e) => Err(refused(format!("{}: {e}", source_root.display()))),
     }
 }
@@ -790,7 +810,7 @@ pub type Warned = (
 /// [`contract_lower::MAX_WARNINGS`], whether lowering then succeeded or
 /// refused. A file the type checker refuses has none.
 pub fn compile_path_all_warned(path: &Path, mapped: bool) -> Warned {
-    compile_path_all_warned_with(path, mapped, false)
+    compile_path_all_warned_with(path, mapped, false, None)
 }
 
 /// [`compile_path_all`], surface arguments checked, with the warnings beside
@@ -798,10 +818,20 @@ pub fn compile_path_all_warned(path: &Path, mapped: bool) -> Warned {
 /// web's, a bake) prints, so they reach whoever ran it and not only
 /// `contract build` (LLP 1116.004 D7).
 pub fn compile_path_all_with_warnings(path: &Path, mapped: bool) -> Warned {
-    compile_path_all_warned_with(path, mapped, true)
+    compile_path_all_warned_with(path, mapped, true, None)
 }
 
-fn compile_path_all_warned_with(path: &Path, mapped: bool, surfaces: bool) -> Warned {
+/// Compile the frame's component tree with the declarations and data of the app at `path`.
+pub fn compile_frame_with_warnings(path: &Path, frame: &Path, mapped: bool) -> Warned {
+    compile_path_all_warned_with(path, mapped, true, Some(frame))
+}
+
+fn compile_path_all_warned_with(
+    path: &Path,
+    mapped: bool,
+    surfaces: bool,
+    frame: Option<&Path>,
+) -> Warned {
     let mut warned = Vec::new();
     let result = read_source(path).map_err(|e| vec![e]).and_then(|src| {
         compile_path_warned(
@@ -811,50 +841,11 @@ fn compile_path_all_warned_with(path: &Path, mapped: bool, surfaces: bool) -> Wa
             surfaces,
             contract_lower::Profile::Web,
             Some(&mut warned),
+            frame,
         )
     });
     warned.sort_by_key(warning_rank);
     (result, warned)
-}
-
-/// Where a warning stands among a build's: lowering's order
-/// ([`contract_lower::warning_rank::rank`]), which also chose which warnings
-/// its cap kept.
-pub fn warning_rank(warning: &CompileError) -> u8 {
-    contract_lower::warning_rank::rank(&warning.id, &warning.message)
-}
-
-/// A warning only the web's picture shows
-/// ([`contract_lower::warning_rank::web_only`]).
-pub fn web_only(warning: &CompileError) -> bool {
-    contract_lower::warning_rank::web_only(&warning.id, &warning.message)
-}
-
-/// A warning that is information, not a problem
-/// ([`contract_lower::warning_rank::information`]).
-pub fn information(warning: &CompileError) -> bool {
-    contract_lower::warning_rank::information(&warning.id)
-}
-
-/// [`web_only`] for a warning as it is said (`file:line:col warning [id] message`).
-pub fn web_only_said(said: &str) -> bool {
-    said.split_once(" warning [")
-        .and_then(|(_, rest)| rest.split_once("] "))
-        .is_some_and(|(id, message)| contract_lower::warning_rank::web_only(id, message))
-}
-
-/// The one line a build's text says for its [`web_only`] warnings, the
-/// first as said and their number, at the first's place: the euxy port's
-/// 21 of them buried the warnings above them. `contract build --json`
-/// lists each.
-pub fn web_only_line(first: &str, count: usize) -> String {
-    let at = first.split_once(" warning [").map_or("", |(at, _)| at);
-    let one = count == 1;
-    format!(
-        "{at} warning [lower-symbol-platform] {count} SF Symbol use{} draw{} blank on the web, here first: an icon token or a role draws on every host (`contract build --json` says each, and how)",
-        if one { "" } else { "s" },
-        if one { "s" } else { "" },
-    )
 }
 
 pub(crate) fn app_root(path: &Path) -> Result<PathBuf, Vec<CompileError>> {
@@ -889,7 +880,7 @@ fn compile_path_checked(
     surfaces: bool,
     profile: contract_lower::Profile,
 ) -> Result<(Plan, Option<SourceMap>), Vec<CompileError>> {
-    compile_path_warned(path, src, mapped, surfaces, profile, None)
+    compile_path_warned(path, src, mapped, surfaces, profile, None, None)
 }
 
 fn compile_path_warned(
@@ -899,15 +890,18 @@ fn compile_path_warned(
     surfaces: bool,
     profile: contract_lower::Profile,
     warned: Option<&mut Vec<CompileError>>,
+    frame: Option<&Path>,
 ) -> Result<(Plan, Option<SourceMap>), Vec<CompileError>> {
     let app_root = app_root(path)?;
     // A file's syntax refusals do not stop the passes after it: they check
     // what parsed, and the refusals lead what they report (`Refused::join`).
     let mut refused = sources::Refused::default();
-    let loaded = sources::load_partial(path, src, &app_root, &mut refused);
+    let loaded = sources::load_partial_with(path, src, &app_root, &mut refused, None, frame);
     let mut own = Vec::new();
     let compiled = loaded.and_then(|(file, sources)| {
-        let warned = warned.is_some().then_some(&mut own);
+        let warned = warned
+            .is_some()
+            .then_some((contract_lower::MAX_WARNINGS, &mut own));
         compile_loaded(
             path, &app_root, file, sources, mapped, surfaces, profile, warned,
         )
@@ -929,7 +923,7 @@ fn compile_loaded(
     mapped: bool,
     surfaces: bool,
     profile: contract_lower::Profile,
-    warned: Option<&mut Vec<CompileError>>,
+    warned: Option<(usize, &mut Vec<CompileError>)>,
 ) -> Result<(Plan, Option<SourceMap>), Vec<CompileError>> {
     let app_root = app_root.to_path_buf();
     let views = native::check(&file, &app_root).map_err(|all| {
@@ -980,15 +974,18 @@ fn compile_loaded(
         let undeclared = contract_lower::var_tokens::undeclared_warning(&sources.var_undeclared);
         own.extend(undeclared.map(CompileError::warning));
     }
+    let selection = warned.as_ref().map(|(limit, _)| {
+        contract_lower::WarningSelection::new(*limit, sources.texts.iter().map(AsRef::as_ref))
+    });
     let compiled = compile_file_warned(
         &file,
         Some(&app_root),
         strings,
         mapped,
         profile,
-        warned.is_some().then_some(&mut own),
+        selection.as_ref().map(|selection| (selection, &mut own)),
     );
-    if let Some(warned) = warned {
+    if let Some((_, warned)) = warned {
         warned.extend(own.into_iter().map(|e| sources.resolve(e)));
     }
     let (mut plan, sites) = compiled.map_err(|all| {
@@ -1060,7 +1057,7 @@ fn compile_file_warned(
     strings: Option<std::sync::Arc<contract_types::strings::Strings>>,
     mapped: bool,
     profile: contract_lower::Profile,
-    warned: Option<&mut Vec<CompileError>>,
+    warned: Option<(&contract_lower::WarningSelection, &mut Vec<CompileError>)>,
 ) -> Result<(Plan, Option<contract_lower::Sites>), Vec<CompileError>> {
     // Each pass runs on what the one before it accepted, and reports all of
     // its own refusals.
@@ -1122,7 +1119,9 @@ fn compile_file_warned(
             asset_root,
             mapped,
             profile,
-            warned.as_ref().map(|_| &mut lower_warnings),
+            warned
+                .as_ref()
+                .map(|(selection, _)| (*selection, &mut lower_warnings)),
         )
         .map_err(|all| each(all, |e| e))
         .and_then(|built| {
@@ -1143,13 +1142,13 @@ fn compile_file_warned(
             Ok(built)
         }),
         Err(all) => {
-            if warned.is_some() {
-                lower_warnings = contract_lower::warnings(&checked);
+            if let Some((selection, _)) = &warned {
+                lower_warnings = contract_lower::warnings(&checked, selection);
             }
             Err(with_lint(each(all, hint)))
         }
     };
-    if let Some(warned) = warned {
+    if let Some((_, warned)) = warned {
         warned.extend(lower_warnings.into_iter().map(CompileError::warning));
     }
     retained::keep(file, &held, mapped, checked);

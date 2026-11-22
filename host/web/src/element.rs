@@ -381,7 +381,7 @@ pub fn tag_of<'a>(node: &NodeFacts<'a>, in_button: bool) -> &'a str {
     }
     match element(node) {
         "div" | "main" | "header" | "nav" | "section" | "footer" | "article" | "aside" | "hr"
-        | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
+        | "p" | "blockquote" | "ul" | "ol" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6"
             if in_button =>
         {
             "span"
@@ -648,16 +648,9 @@ pub fn css_style_of<'a>(
 ) -> std::borrow::Cow<'a, exact_kernel::StyleProps> {
     let as_attributes = attribute_rows(node.node_type);
     let url = |p: &Paint| matches!(p, Paint::Url(..));
-    // @ref LLP 1069.001 D2 — an option is `display: none` to layout, never
-    // to the browser's menu, which a hidden `<option>` leaves out.
-    if exact_kernel::control::is_option_node(node.node_type, node.props) {
-        let mut style = node.style.clone();
-        let mut mask = exact_kernel::StyleMask::EMPTY;
-        mask.set(exact_kernel::StyleId::Display);
-        style.clear(mask);
-        return std::borrow::Cow::Owned(style);
-    }
+    let browser_row = semantic::browser_row(node);
     if as_attributes.is_empty()
+        && browser_row.is_none()
         && node.node_type != NodeType::Video
         && !url(&node.style.fill)
         && !url(&node.style.stroke)
@@ -685,6 +678,9 @@ pub fn css_style_of<'a>(
     let mut mask = exact_kernel::StyleMask::EMPTY;
     for row in as_attributes {
         mask.set(row.0);
+    }
+    if let Some(row) = browser_row {
+        mask.set(row);
     }
     style.clear(mask);
     // @ref LLP 1055.000 D10 — a clipPath by the id the page gives it.
@@ -1104,6 +1100,8 @@ pub fn props_of(node: &NodeFacts<'_>) -> SortedMap<String, String> {
             PropId::LightY => "y",
             PropId::LightZ => "z",
             PropId::ButtonStyle => "data-button-style",
+            // @ref LLP 1094.000 D6 — the browser's drag; `drag-out.js` fills it.
+            PropId::Draggable => "draggable",
             other if matches!(node.node_type, NodeType::SvgFe | NodeType::SvgFilter) => {
                 other.name()
             }

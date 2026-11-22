@@ -131,7 +131,7 @@ structs! {
     SoundDecl { source, span }
     FontFaceDecl { weight, italic, source, span }
     TestDecl { name, hosts, steps, span }
-    PropertyDecl { span, kind, name, lines }
+    PropertyDecl { span, kind, name, lines, actions }
     PropertyLine { span, form }
     FnDecl { name, params, ret, body, span }
     SourceDecl { name, params, shape, lines, span }
@@ -158,7 +158,7 @@ structs! {
     ComponentParam { name, kind, default, default_span, attrs, span }
     ParamAttr { name, value, span }
     Sequence { name, gate, key, tracks, options, ended, span }
-    Persist { name, span }
+    Persist { name, window, span }
     Binding { name, expr, span }
     ResourceDecl { name, source, args, identity, shape, placeholder, each, transient, keep, gate, span }
     ResourceEach { item, list, key, span }
@@ -185,7 +185,7 @@ record_variants! {
     Step {
         Scroll { target, span }, Tap { target, form, modifiers, span }, Drag { target, dx, dy, to, from, mouse, into, press, over, hold, during, span },
         Size { width, height, span }, At { location, span }, Epoch { value, span }, TimeZone { zone, span },
-        Locale { tag, span }, Prefer { name, value, span }, Seed { seed, span }, Stored { name, value, span }, Fresh { seed, span }, BeforeData { span }, FailFetch { prefix, times, span }, AnswerFetch { prefix, response, span }, PassFetch { prefix, span }, Request { method, path, body, persona, status, span }, Type { target, text, append, span }, Key { target, key, phase, duration, span },
+        Locale { tag, span }, Prefer { name, value, span }, Seed { seed, span }, SignedIn { key, account, span }, Stored { name, value, window, span }, Fresh { seed, span }, BeforeData { span }, FailFetch { prefix, times, span }, AnswerFetch { prefix, method, response, span }, AnswerSource { source, value, span }, PassFetch { prefix, span }, Request { method, path, body, persona, status, span }, Type { target, text, append, span }, Key { target, key, phase, duration, span },
         DropStream { prefix, span }, Pick { target, paths, span }, Authorize { cancel, span }, Presence { answer, span }, Clipboard { target, edit, text, span },
         Clock { arg, span }, Background { ms, span }, Reload { span }, Close { span }, Back { span }, Resize { width, height, span }, Screenshot { path, span }, ExpectRefusal { target, span }, ExpectTree { target, present, span }, ExpectDisabled { target, disabled, span }, ExpectFocused { target, span },
         ExpectSample { target, x, y, color, tolerance, span }, ExpectScreenshot { target, reference, span },
@@ -193,7 +193,7 @@ record_variants! {
         ExpectText { target, value, span }, ExpectState { name, comparison, value, span },
         ExpectSound { src, present, at, gain, ends, playback_rate, pan, by, span },
         ExpectMediaSession { field, value, span }, ExpectMediaSessionAction { action, present, span },
-        Midi { step, span }, ExpectWakelock { held, span },
+        Midi { step, span }, ExpectWakelock { held, span }, ExpectDrag { target, kind, present, value, name, span },
         Perf { steps, span }, ExpectPerf { subject, target, at_most, value, span }, ExpectNoFailures { span },
     }
 }
@@ -211,7 +211,7 @@ record_variants! {
 }
 record_variants! {
     Node {
-        Element { tag, positional, attrs, children, span, instance }, Use { name, args, children, span },
+        Element { tag, positional, attrs, children, span, instance, place }, Use { name, args, children, span },
         Children { span },
         When { tag, cond, then, otherwise, span }, Each { tag, var, index, list, key, body, span },
         Match { tag, subject, some, none, span },
@@ -323,11 +323,13 @@ impl Step {
             | Step::Locale { span, .. }
             | Step::Prefer { span, .. }
             | Step::Seed { span, .. }
+            | Step::SignedIn { span, .. }
             | Step::Stored { span, .. }
             | Step::Fresh { span, .. }
             | Step::BeforeData { span }
             | Step::FailFetch { span, .. }
             | Step::AnswerFetch { span, .. }
+            | Step::AnswerSource { span, .. }
             | Step::PassFetch { span, .. }
             | Step::DropStream { span, .. }
             | Step::Request { span, .. }
@@ -354,6 +356,7 @@ impl Step {
             | Step::ExpectText { span, .. }
             | Step::ExpectState { span, .. }
             | Step::ExpectWakelock { span, .. }
+            | Step::ExpectDrag { span, .. }
             | Step::ExpectSound { span, .. }
             | Step::Midi { span, .. }
             | Step::ExpectMediaSession { span, .. }

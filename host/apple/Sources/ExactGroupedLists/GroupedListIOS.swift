@@ -236,8 +236,19 @@ final class GroupedListHost: GroupedLists {
     /// Before a batch: every carried row back where the presenter put it.
     func prepare() { for list in lists.values { list.restore() } }
 
+    /// The owner's frame moved outside a batch: the list mounts again by it, seats its custom headers by the settled
+    /// layout, and tells the kernel the margins that layout gives.
+    func geometryChanged(_ id: UInt32) {
+        guard let list = lists[id] else { return }
+        list.mount(looks: false)
+        list.collection.layoutIfNeeded()
+        list.carryHeaders()
+        tellSoon()
+    }
+
     /// After a batch. `changed` is the touched views and their ancestors; a
     /// list outside it keeps its model and only carries its rows again.
+
     func sync(changed: Set<UInt32>? = nil) {
         var live = Set<UInt32>()
         // A live edit of the theme's roles (LLP 1121 stage 5) changes no row,
@@ -494,6 +505,8 @@ final class GroupedListView: NSObject, UICollectionViewDelegate {
     /// 1115 §2), as it replaces the sheet's grouped ground on the other hosts (LLP 1084 D7): the list's own layer paints
     /// it in its box and UIKit's grounds are clear, so `transparent` shows what is behind the list around its cards.
     private var writesGround = false
+    /// In a split's list column beside its detail: UIKit's sidebar list (GroupedSidebarIOS.swift).
+    var sidebar = false
     /// The theme's roles this list last drew with (LLP 1095 D4): a new table
     /// (an update, a dev reload) configures every row and the layout again.
     private var theme = ThemeRoles.generation
@@ -529,7 +542,7 @@ final class GroupedListView: NSObject, UICollectionViewDelegate {
     /// Of `reach`, what is a fold's half band: UIKit counts it as safe area
     /// but sets no margin past it there, where a hand-built split view's
     /// card has its 20 (`section`).
-    private var foldReach: (left: CGFloat, right: CGFloat) = (0, 0)
+    var foldReach: (left: CGFloat, right: CGFloat) = (0, 0)
     /// Only the host-hidden bit: CSS display remains authoritative.
     private var hiddenRoots: [UInt32: (node: NodeView, hidden: Bool)] = [:]
     /// The list's padding and final footer space, independent of other insets.
@@ -634,14 +647,14 @@ final class GroupedListView: NSObject, UICollectionViewDelegate {
     private func layout() -> UICollectionViewLayout {
         let layout = UICollectionViewCompositionalLayout { [weak self] index, environment in
             guard let self else { return nil }
-            var c = UICollectionLayoutListConfiguration(appearance: model.appearance)
-            // Clear where the author wrote one (`writesGround`), else the theme's; nil leaves UIKit's.
-            if let ground = writesGround ? .clear : themeGround { c.backgroundColor = ground }
+            var c = UICollectionLayoutListConfiguration(appearance: listAppearance)
+            // Clear where the author wrote one (`writesGround`), else the theme's; nil leaves UIKit's, a sidebar's always.
+            if !sidebar, let ground = writesGround ? .clear : themeGround { c.backgroundColor = ground }
             let s = section(at: index)
             c.headerMode = s?.hasHeader == true ? .supplementary : .none
             c.footerMode = s?.footer == nil ? .none : .supplementary
             #if !os(tvOS)
-            c.showsSeparators = s?.card ?? true
+            c.showsSeparators = !sidebar && (s?.card ?? true)
             // Where a row's author wrote the edge under it, a carried row
             // shows that edge instead of UIKit's line (LLP 1084 D7), as a
             // hand-built cell hides its separator. A standard cell draws no
@@ -722,8 +735,8 @@ final class GroupedListView: NSObject, UICollectionViewDelegate {
         let previous = model, old = rows
         let rethemed = theme != ThemeRoles.generation
         theme = ThemeRoles.generation
-        let writes = owner.wrote("background_color")
-        let restyled = next.style != previous.style || rethemed || writes != writesGround
+        let writes = owner.wrote("background_color"), flipped = followSidebar()
+        let restyled = next.style != previous.style || rethemed || writes != writesGround || flipped
         writesGround = writes
         model = next
         rows = Dictionary(next.sections.flatMap { $0.rows }.map { ($0.view, $0) }, uniquingKeysWith: { a, _ in a })
@@ -748,7 +761,7 @@ final class GroupedListView: NSObject, UICollectionViewDelegate {
         // row moved between sections) is configured again.
         let wasCarded = Dictionary(previous.sections.flatMap { s in s.rows.map { ($0.view, s.card) } }, uniquingKeysWith: { a, _ in a })
         let recarded = Set(next.sections.flatMap { s in s.rows.compactMap { r in wasCarded[r.view].flatMap { $0 != s.card ? r.view : nil } } })
-        let changed = snapshot.itemIdentifiers.filter { id in rethemed || old[id].map { $0 != rows[id] || looking[id] != looks[id] || recarded.contains(id) } ?? false }
+        let changed = snapshot.itemIdentifiers.filter { id in rethemed || flipped || old[id].map { $0 != rows[id] || looking[id] != looks[id] || recarded.contains(id) } ?? false }
         looks = looking
         // A row whose switch is firing is reconfigured once its action has
         // returned: rebuilding its accessories would take the switch out of
@@ -781,7 +794,7 @@ final class GroupedListView: NSObject, UICollectionViewDelegate {
         #if os(iOS)
         // The collection view's own background shows through a clear section ground and below a short list, and UIKit
         // gives it the appearance's ground only for a layout with none of its own, so it is set here.
-        let ground = writesGround ? .clear : platformGround
+        let ground: UIColor? = sidebar ? nil : writesGround ? .clear : platformGround
         if collection.backgroundColor != ground { collection.backgroundColor = ground }
         #endif
         // An unchanged snapshot can reset UIKit's estimated geometry and
@@ -814,6 +827,7 @@ final class GroupedListView: NSObject, UICollectionViewDelegate {
             }
             collection.collectionViewLayout.invalidateLayout()
         } else if regapped { collection.collectionViewLayout.invalidateLayout() }
+        selectDetailRow()
         mount()
     }
 
@@ -854,15 +868,18 @@ final class GroupedListView: NSObject, UICollectionViewDelegate {
         // A short settings list bounces, as UIKit's collection default would not.
         assign(collection, \.alwaysBounceVertical, owner.scrollsVertically)
         assign(collection, \.bounces, owner.style["overscroll_behavior_y"]?.string != "none")
-        // With the page's bands it reaches (LLP 1130 D3), and the side safe
-        // areas its edges meet, where UIKit insets the cards by its own rule.
+        // With the page's bands it reaches (LLP 1130 D3), and the side safe areas its edges meet, where UIKit insets
+        // the cards by its own rule. Once the kernel gives the owner its reach (LLP 1123 D13), zero included, the frame
+        // already lies over them and the list's own reach, a fold's half band among it, gives way to the kernel's
+        let fold = foldReach
+        if owner.reachGiven { reach = (owner.reach.left, owner.reach.right); foldReach = (0, 0) }
         #if os(iOS)
-        reach = sideReach()
+        if !owner.reachGiven { reach = sideReach() }
         (collection as? GroupedCollectionView)?.sideSafeArea = reach
         #endif
+        if foldReach != fold { collection.collectionViewLayout.invalidateLayout() }
         var frame = owner.scrollFrame
-        frame.origin.x -= reach.left
-        frame.size.width += reach.left + reach.right
+        if !owner.reachGiven { frame.origin.x -= reach.left; frame.size.width += reach.left + reach.right }
         assign(collection, \.frame, frame)
         if looks { refreshLooks() }
         for cell in collection.visibleCells {
@@ -1014,41 +1031,6 @@ final class GroupedListView: NSObject, UICollectionViewDelegate {
     func cell(_ id: UInt32) -> UICollectionViewCell? {
         source.indexPath(for: id).flatMap { collection.cellForItem(at: $0) }
     }
-
-    #if os(iOS)
-    /// How far past each side the list's edge meets the collection reaches,
-    /// a safe area there, where nothing between the list and the window
-    /// transforms or clips it away. The window's side safe area: Exact's
-    /// layout keeps a route's content inside it (LLP 1123), where UIKit puts
-    /// an inset-grouped list's cards 20 in, and 16 past it when the list
-    /// spans the screen, as a hand-built one does. Half a fold's band (LLP
-    /// 1078): a hand-built split view's column reaches the band's middle,
-    /// that half its safe area, and its card ends 20 short of the band, where
-    /// a list ending at the band has its card run into it (iPhone Duo, iOS
-    /// 27.1, `~/audits/exact2-no-tells-2026-10-11/duo-fold-probe/`).
-    private func sideReach() -> (left: CGFloat, right: CGFloat) {
-        foldReach = (0, 0)
-        guard let window = owner.window else { return (0, 0) }
-        let safe = window.safeAreaInsets, r = owner.convert(owner.bounds, to: window)
-        let meets = { (inset: CGFloat, edge: CGFloat) in inset > 0 && abs(edge - inset) < 0.5 ? inset : 0 }
-        var reach = (left: meets(safe.left, r.minX), right: meets(safe.right, window.bounds.width - r.maxX))
-        for band in (ReservedRegions.divisions(of: window) ?? []).filter(\.active).map(\.frame) where band.height > band.width {
-            if abs(r.maxX - band.minX) < 0.5 { reach.right = band.width / 2; foldReach.right = reach.right }
-            if abs(r.minX - band.maxX) < 0.5 { reach.left = band.width / 2; foldReach.left = reach.left }
-        }
-        guard reach.left > 0 || reach.right > 0 else { return reach }
-        let reached = r.inset(by: UIEdgeInsets(top: 0, left: -reach.left, bottom: 0, right: -reach.right))
-        var at: UIView? = owner.superview
-        while let v = at, v !== window {
-            if !v.transform.isIdentity || v.clipsToBounds && !v.convert(v.bounds, to: window).insetBy(dx: -0.5, dy: -0.5).contains(reached) {
-                foldReach = (0, 0)
-                return (0, 0)
-            }
-            at = v.superview
-        }
-        return reach
-    }
-    #endif
 
     /// Row `id`'s middle, or the middle of `inner` (a box in the row's own
     /// space), scrolled to the middle of `port` when outside it, unanimated
@@ -1209,7 +1191,7 @@ final class GroupedListView: NSObject, UICollectionViewDelegate {
 
     func accessories(_ row: GroupedListModel.Row, cell: GroupedCell) -> [UICellAccessory] {
         switch row.accessory {
-        case "disclosure": return [.disclosureIndicator()]
+        case "disclosure": return sidebar ? [] : [.disclosureIndicator()]
         case "checkmark": return [.checkmark()]
         // A radio is the chosen row's checkmark, as a list of choices in
         // Settings has it (LLP 1115.000 D13.2); UIKit has no radio.

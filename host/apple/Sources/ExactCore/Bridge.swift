@@ -31,6 +31,7 @@ public struct Batch {
     public var landing = false
     /// A store write this batch's commits made has landed: the app's other sessions refresh (LLP 1030.004 D2).
     public var stored = false
+    public var windowState: [String: String]?
     public var announced: [String] = []
     /// Store refresh acknowledged no runner commit; keep the current timers.
     public var unchanged = false
@@ -55,6 +56,8 @@ public struct Batch {
     public var canvasOwed = false
     /// A control's viewless contents changed (LLP 1069.011 §9).
     public var layoutProvisional = false
+    /// This batch applies over the previous generation’s presented tree.
+    public var replacesTree = false
     public var controls = false
     /// Image handles a 2D canvas asked for, to decode (LLP 1056 D9).
     public var canvasImages: [String] = []
@@ -78,6 +81,7 @@ public struct Batch {
     public var mustFinish: Bool? = nil
     /// Every navigation root's tabs, when they changed (LLP 1115.001 D11).
     public var rootTabs: [RootTabs]? = nil
+    public var routeInspectors: [RouteInspector]? = nil
     /// The kernel transactions it carries, while the runner measures (LLP 1079 D3).
     public var seq: (UInt64, UInt64)?
     /// When `ExactSession.applyInput` marked it as a person's input: on iOS
@@ -85,6 +89,7 @@ public struct Batch {
     public var input: Double? = nil
     /// Failure lines the session writes to the unified log, each once (LLP 1142 D4).
     public var alerts: [String] = []
+    public var budgetWarning: String?
     /// The journal's other lines, for the unified log at a lower level (LLP 1143).
     public var journal: [String] = []
     package var frameWorkTiming: FrameWorkTiming?
@@ -112,7 +117,7 @@ public struct Batch {
     /// viewless contents, page facts, the native control state it carries or
     /// the navigation roots' tabs, whose placement the views may not carry.
     /// The presenter resolves an orientation request separately.
-    package var changesScreen: Bool { !ops.isEmpty || controls || facts || rootTabs != nil || controlReads?.isEmpty == false }
+    package var changesScreen: Bool { !ops.isEmpty || controls || facts || rootTabs != nil || routeInspectors != nil || controlReads?.isEmpty == false }
     package init(ops: [BatchOp], timers: Bool, motion: Bool, clock: Double?, error: String?, timerDueMs: Double? = nil, pending: Bool = false, busy: Bool = false) {
         self.ops = ops; self.timers = timers; self.motion = motion; self.clock = clock
         self.error = error; self.timerDueMs = timerDueMs; self.pending = pending
@@ -172,6 +177,8 @@ package typealias TopLayerGeometry = (frames: [TopLayerFrame], modal: Int?, back
 /// one-shot at the C boundary; a call after it is refused by the library by
 /// name, never a trap.
 package final class Runtime {
+    private var launchWindowName = "main"
+    private var launchWindowRooted = false
     package let rt: ExactRuntime
     private(set) package var destroyed = false
     package let completions = RuntimeDoor()
@@ -827,7 +834,24 @@ package final class Runtime {
         return on { read(exact_host_back_to(rt, source, destination, now)) }
     }
     package func launch(_ location: String) { on { () -> Void in let n = write(location); _ = exact_set_launch_location(rt, n) } }
-    package func launchWindow(_ name: String, rooted: Bool) { on { () -> Void in let n = write(name); _ = exact_set_launch_window(rt, n, rooted ? 1 : 0) } }
+    package func restoreWindowState(_ archive: [String: String]) {
+        guard let state = try? JSONEncoder().encode(archive) else { return }
+        on { () -> Void in
+            var bytes = Data(launchWindowName.utf8)
+            let nameLength = bytes.count
+            bytes.append(state)
+            _ = write(bytes)
+            _ = exact_set_launch_window(rt, nameLength, launchWindowRooted ? 1 : 0, state.count)
+        }
+    }
+    package func launchWindow(_ name: String, rooted: Bool) {
+        on { () -> Void in
+            launchWindowName = name
+            launchWindowRooted = rooted
+            let n = write(name)
+            _ = exact_set_launch_window(rt, n, rooted ? 1 : 0, 0)
+        }
+    }
     /// `rtl` nil: the strings table's direction.
     package func launchDirection(rtl: Bool?) { on { () -> Void in _ = exact_set_launch_direction(rt, rtl.map { $0 ? 1 : 0 } ?? 2) } }
     package func naturalText(_ natural: Bool) { on { () -> Void in _ = exact_set_natural_text(rt, natural ? 1 : 0) } }
@@ -1184,6 +1208,7 @@ public struct OrientationRequest: Equatable {
 /// applies (host/apple/src/root_tabs.rs).
 public struct RootTabs: Equatable {
     public let root: UInt32, tablist: UInt32
+    public let footer: UInt32?
     /// The tabs that name a panel, and those panels, in tab order.
     public let tabs: [UInt32], panels: [UInt32]
     /// Whether each panel's tab needs a navigation controller, read from the
@@ -1193,15 +1218,21 @@ public struct RootTabs: Equatable {
     /// bar. One fixed route with no header is a plain view controller.
     public let navigation: [Bool]
     /// The app left the bar's placement unsaid, by the web's rule for its
-    /// own sidebar (LLP 1116.004 D1.1; `host/web/navigation.js` `unsaidBar`):
+    /// own sidebar (LLP 1116.004 D1.1; `host/web/navigation.js` `placeTabBar`):
     /// read from the kernel's layout rows, which do not cross to the views.
     public let unsaid: Bool
     /// The tablist is covered whole as the batch ends, so the kernel lays it
     /// out as `display: none`, as the boot covers one a tab bar replaces
     /// (host/apple/src/closed.rs); the first install reads it (`adoptBootCover`).
     public let covered: Bool
+    /// The element the tablist names as its tab bar's accessory
+    /// (`navigationTabAccessory`, LLP 1075.003 §9.17), and why it names none,
+    /// for a development build's journal.
+    public let accessory: UInt32?, accessoryNote: String?
 
-    public init(root: UInt32, tablist: UInt32, tabs: [UInt32], panels: [UInt32], navigation: [Bool] = [], unsaid: Bool, covered: Bool = false) {
+    public init(root: UInt32, tablist: UInt32, tabs: [UInt32], panels: [UInt32], footer: UInt32? = nil, navigation: [Bool] = [], unsaid: Bool, covered: Bool = false,
+                accessory: UInt32? = nil, accessoryNote: String? = nil) {
+        (self.footer, self.accessory, self.accessoryNote) = (footer, accessory, accessoryNote)
         (self.root, self.tablist, self.tabs, self.panels, self.navigation, self.unsaid, self.covered) = (root, tablist, tabs, panels, navigation, unsaid, covered)
     }
 
@@ -1209,8 +1240,9 @@ public struct RootTabs: Equatable {
         guard let root = o["root"]?.number, let tablist = o["tablist"]?.number else { return nil }
         let ids = { (key: String) in (o[key]?.array ?? []).compactMap { $0.number.map { UInt32($0) } } }
         self.init(root: UInt32(root), tablist: UInt32(tablist), tabs: ids("tabs"), panels: ids("panels"),
-                  navigation: (o["navigation"]?.array ?? []).map { $0 == .bool(true) },
-                  unsaid: o["unsaid"] == .bool(true), covered: o["covered"] == .bool(true))
+                  footer: o["footer"]?.number.map { UInt32($0) }, navigation: (o["navigation"]?.array ?? []).map { $0 == .bool(true) },
+                  unsaid: o["unsaid"] == .bool(true), covered: o["covered"] == .bool(true),
+                  accessory: o["accessory"]?.number.map { UInt32($0) }, accessoryNote: o["accessoryNote"]?.string)
     }
 }
 
@@ -1245,4 +1277,6 @@ package final class BatchSequence: @unchecked Sendable {
     private let lock = NSLock()
     private var last: UInt64 = 0
     package func next() -> UInt64 { lock.withLock { last += 1; return last } }
+    /// The newest number given, zero before the first.
+    package var newest: UInt64 { lock.withLock { last } }
 }

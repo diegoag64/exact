@@ -107,6 +107,7 @@ fn painted_boot_requests_no_images_below_the_first_screen() {
         "/",
         None,
         PainterBoot::selected(PainterChoice::Cpu),
+        crate::app::Services::default(),
     )
     .unwrap();
     assert!(error.is_none(), "{error:?}");
@@ -168,6 +169,17 @@ fn a_refused_boot_picture_is_settled_content() {
         !images.pending(),
         "a terminal refusal must not keep boot alive"
     );
+}
+
+#[test]
+fn a_local_image_service_decodes_a_replacement_asset_without_a_downloader() {
+    let k = kernel(1);
+    let images = Images::local(assets());
+    let mut next = images.candidate(assets());
+    next.sync(&k, &k.roots());
+    next.wait(SETTLED);
+    assert!(next.bitmaps.contains_key(&1));
+    assert!(next.backend.downloads.is_none());
 }
 
 #[test]
@@ -526,7 +538,7 @@ fn raster_demand_follows_the_content_box_fit_and_device_scale() {
     images.sync_visible(&k, &k.roots(), 2., |_| true);
     let view = images.views.get_mut(&1).unwrap();
     assert_eq!(view.desired, (760., 200.));
-    let header = png_decode::Header::jpeg(exact_raster::Metadata {
+    let header = png_decode::Header::platform(exact_raster::Metadata {
         natural: PixelSize {
             width: 1600,
             height: 900,

@@ -11,12 +11,12 @@ test('a save while a rebuild runs is built once more before the page is answered
   try {
     const app = join(root, 'app'), dist = join(app, 'dist'), source = join(app, 'app.contract'), marker = join(dist, '.exact-build.json');
     mkdirSync(dist, { recursive: true });
-    writeFileSync(join(app, 'app.json'), JSON.stringify({ app: { id: 'dev.exact.rebuild' } }));
+    writeFileSync(join(app, 'app.json'), JSON.stringify({ app: { id: 'dev.exact' }, env: ['BRAND'], variants: { red: { idSuffix: '.rebuild', env: { BRAND: 'red' } } } }));
     writeFileSync(source, 'one\n');
     const t = Date.now() / 1000 - 100;
     for (const file of [source, join(app, 'app.json')]) utimesSync(file, t, t);
     const receipt = (at) => {
-      writeFileSync(marker, JSON.stringify({ app: { id: 'dev.exact.rebuild' }, release: true, target: 'js', sources: appSources(app, dist).digest }));
+      writeFileSync(marker, JSON.stringify({ app: { id: 'dev.exact.rebuild' }, release: true, target: 'js', env: { BRAND: { value: 'red', source: 'variant' } }, sources: appSources(app, dist).digest }));
       utimesSync(marker, at, at);
     };
     receipt(t + 1);

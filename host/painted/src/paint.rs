@@ -71,6 +71,7 @@ mod placed;
 mod presented;
 mod shared;
 pub use shared::{SharedElement, SharedState};
+mod prose;
 mod region;
 pub mod rows;
 mod shadow;
@@ -245,8 +246,9 @@ impl BoxPaint {
                 gradient::paint(g, &back.outer, &clip, self.widths, backend, ts);
             }
         }
-        for band in self.inset_shadow_fills(geometry) {
-            backend.fill_border(&band, ts);
+        for s in self.shadows.iter().rev().filter(|s| s.inset()) {
+            let bands = || s.fills(&geometry.outer, self.widths);
+            backend.box_shadow(None, &geometry.outer, &bands, ts);
         }
         for part in self.borders(geometry) {
             backend.fill_border(&part, ts);
@@ -369,6 +371,7 @@ pub struct Scene<'a> {
 }
 
 mod frame;
+pub use crate::canvas2d::CanvasUpdate;
 pub use backend::{Backend, FrameTarget, WindowLayer, POINTER};
 pub use exact_ink::Rotation;
 pub use frame::Frame;
@@ -383,7 +386,8 @@ pub struct Painter {
     pub(crate) media: native::Media,
     boxless_audio: Option<Vec<ViewId>>,
     pub(crate) alert: Option<alert::Picture>,
-    /// The text engine, shared with the kernel's measurer.
+    markers: HashMap<ViewId, HashMap<ViewId, String>>,
+    /// Shared with the kernel measurer.
     pub text: Shared,
     /// Device pixels per point.
     pub scale: f32,
@@ -407,8 +411,8 @@ pub struct Painter {
     pub(crate) placements: BTreeMap<ViewId, crate::placement::Placement>,
     /// The canvases whose children their surfaces composite, and their pictures.
     pub(crate) composites: composite::Composites,
-    /// Each 2D canvas's latest bitmap (LLP 1056).
-    pub(crate) canvases: BTreeMap<ViewId, crate::canvas2d::CanvasPaint>,
+    /// Canvas 2D snapshots and GPU readbacks.
+    pub(crate) canvases: crate::canvas2d::CanvasPictures,
     /// Each hatched node's overlay as last published (LLP 1075.003.000.001 §2.2.1).
     pub(crate) overlays: BTreeMap<ViewId, Arc<Pixmap>>,
     pub(crate) top_surface: Option<TopSurface>,
@@ -422,8 +426,10 @@ pub struct Painter {
     pub(crate) shared: SharedState,
     // Accepted owners retain their paragraph leases while a subsequent backend frame fails.
     accepted_text: BTreeMap<exact_kernel::NodeKey, Rc<Paragraph>>,
+    pub(crate) reader_highlights:
+        BTreeMap<exact_kernel::NodeKey, inline_frame::selection::Highlight>,
     pub(crate) field_text: HashMap<ViewId, Rc<field::PaintedField>>,
-    pub(crate) caret_hidden: bool,
+    pub(crate) caret_opacity: u8,
     pub(crate) composition: Option<Rc<field::Composition>>,
     pub(crate) inline_text: HashMap<ViewId, Rc<inline_frame::PaintedInline>>,
     region_picture: Option<Rc<region::Picture>>,
@@ -453,6 +459,9 @@ pub struct Painter {
     pub(crate) feedback: (Option<ViewId>, Option<ViewId>),
     /// The control a held `active` presses (`presenter/held.rs`), beside a contact's.
     pub(crate) held_press: Option<ViewId>,
+    /// The focus is on something that presses, which Material shows by its
+    /// state layer (`ripple.rs`).
+    pub(crate) focus_presses: bool,
     /// Material's ripples, each from its press's touch (`ripple.rs`).
     pub(crate) ripples: ripple::Ripples,
     /// The background the last box painted shows, its states' over its own,
@@ -519,19 +528,6 @@ impl Painter {
         std::mem::take(&mut self.notes)
     }
 
-    pub(crate) fn replaced(&mut self) {
-        self.native_session = native::new_session();
-        // A fresh kernel can reuse both epochs and node keys: a row kept by
-        // key would replay the old tree's drawing.
-        self.paint_epoch = None;
-        self.discard_rows();
-        self.shared = SharedState::default();
-        self.svg_warned.clear();
-        // The old tree's presses: its view ids are another tree's now.
-        self.ripples.clear();
-        self.zoom.clear();
-    }
-
     /// A painter over a backend.
     pub fn new(text: Shared, scale: f32, backend: Box<dyn Backend>) -> Painter {
         Painter {
@@ -541,6 +537,7 @@ impl Painter {
             direct_canvases: Default::default(),
             media: Default::default(),
             boxless_audio: None,
+            markers: HashMap::new(),
             text,
             scale,
             dark: false,
@@ -566,7 +563,7 @@ impl Painter {
             decoration_warning: false,
             placements: BTreeMap::new(),
             composites: Default::default(),
-            canvases: BTreeMap::new(),
+            canvases: Default::default(),
             overlays: BTreeMap::new(),
             top_surface: None,
             scrollbars: Default::default(),
@@ -581,11 +578,13 @@ impl Painter {
             symbols: look::symbols(),
             feedback: (None, None),
             held_press: None,
+            focus_presses: false,
             ripples: Default::default(),
             clipped: None,
             field_content: HashMap::new(),
             field_text: HashMap::new(),
-            caret_hidden: false,
+            reader_highlights: BTreeMap::new(),
+            caret_opacity: 255,
             composition: None,
             inline_text: HashMap::new(),
             rows: Default::default(),
@@ -599,7 +598,7 @@ impl Painter {
         }
     }
 
-    /// The backend's name.
+    /// The active backend's name.
     pub fn backend(&self) -> &'static str {
         self.backend.name()
     }
@@ -803,6 +802,7 @@ impl Painter {
         if self.paint_epoch != Some(scene.kernel.epoch()) {
             self.svg_warned
                 .retain(|key| scene.kernel.node_by_key(*key).is_some());
+            self.markers.clear();
             self.refresh_ranks(scene.kernel);
             self.order_shared(scene);
             self.paint_epoch = Some(scene.kernel.epoch());
@@ -944,7 +944,7 @@ impl Painter {
         let f = node.frame;
         let (x, y, w, h) = paint_rect(f, offset);
         let p = (walk.scene.presented)(id);
-        self.row_node(walk.scene.kernel, node.key, f, &p);
+        self.row_node(walk.scene.kernel, &node, &p);
         // @ref LLP 1077 D8 — turned or moved in space: painted apart, warped.
         if self.spatial(walk, &node, &p, (x, y, w, h), ts, offset, clip_rect) {
             self.row_refuse();
@@ -1040,8 +1040,9 @@ impl Painter {
         // CSS opacity is paint only: a transparent subtree is still hit (the
         // walk records its boxes) and draws through a backend that draws nothing.
         // Visibility is not that: only this box's own paint is skipped.
-        let drawn = (opacity <= 0.0)
-            .then(|| self.replace_picture_backend(walk.scene.kernel, Box::new(layer::Unpainted)));
+        let drawn = (opacity <= 0.0).then(|| {
+            self.replace_picture_backend(walk.scene.kernel, Box::new(layer::Unpainted::<false>))
+        });
         if drawn.is_none() && opacity < 1.0 {
             self.backend.push_opacity(opacity);
         }
@@ -1098,14 +1099,8 @@ impl Painter {
         // its looks and a press's background (LLP 1061 D7, LLP 1121 D8).
         let mut paint = BoxPaint::capture(node, walk.scene.kernel, self.dark)
             .presented(&shown.colors)
-            .states(node, &shown, self.dark);
-        if let Some(section) = walk.scene.kernel.grouped_card_section(node.id) {
-            if let Some(owner) = walk.scene.kernel.node(section) {
-                paint = paint.section_shadow(&owner, &(walk.scene.presented)(section), self.dark);
-            }
-        } else if walk.scene.kernel.grouped_section_card(node.id).is_some() {
-            paint.shadows.clear();
-        }
+            .states(node, &shown, self.dark)
+            .grouped(walk, node.id, self.dark);
         self.split_row(node, &mut paint);
         if self.bare(node) {
             paint.background = [0; 4];
@@ -1120,8 +1115,10 @@ impl Painter {
         // and a text node still walks its runs so a visible inline paints.
         if paints_self {
             surface.bleed = self.bleed(walk.scene.kernel, node.id, &surface.outer, ts);
+            self.row_box_reach(&paint.shadows, surface.outer.rect, geometry.outer.rect, ts);
             paint.paint(self.backend.as_mut(), &surface, ts);
             self.column_rules(walk.scene.kernel, node, rect, ts);
+            self.prose_marker(walk, node, rect, ts);
             let (dark, feedback) = (
                 self.dark,
                 (self.feedback.0, self.presses(node.id).then_some(node.id)),
@@ -1136,7 +1133,8 @@ impl Painter {
                 dark,
                 feedback,
             );
-            self.pressable(node, &surface.outer, ts);
+            let focused = walk.scene.focus == Some(node.id);
+            self.pressable(node, &surface.outer, focused, ts);
         }
         let outer = geometry.outer;
         let content = geometry.content;
@@ -1153,7 +1151,8 @@ impl Painter {
                 if let Some(clip) = &clip {
                     self.backend.push_clip(clip, ts);
                 }
-                let baseline = self.text_node(walk, node, &geometry, rect, ts);
+                let clips = (clip.as_ref().map(|c| c.rect), clip_rect);
+                let baseline = self.text_node(walk, node, &geometry, rect, clips, ts);
                 walk.boxes[owner].baseline = baseline;
                 if clip.is_some() {
                     self.backend.pop_clip();
@@ -1175,7 +1174,8 @@ impl Painter {
                         content,
                         &walk.scene.kernel.env_of(node.id),
                     ) {
-                        self.backend.canvas(&c.pixels, rect, &clips, ts);
+                        self.backend
+                            .canvas_frame(&c.pixels, c.update, rect, &clips, ts);
                     }
                 } else {
                     self.native(walk, node, &clips[0], ts);
@@ -1286,7 +1286,8 @@ impl Painter {
                 control::paint(
                     backend, node, content, ts, self.dark, held, hovered, self.scale,
                 );
-                self.mark_ripple(node, content, held, ts);
+                let focused = walk.scene.focus == Some(node.id);
+                self.mark_ripple(node, content, held, focused, ts);
             }
             _ => {}
         }
@@ -1369,10 +1370,8 @@ pub fn object_fit(
     )
 }
 
-/// A text node's paragraph spec from its rows (the kernel's defaults are
-/// CSS's, so every row reads directly).
-/// Its white space is collapsed per CSS unless the row preserves it; the
-/// caller that replaces the runs collapses again ([`Spec::collapse_white_space`]).
+/// Paragraph style and CSS white-space handling for a text node. A caller that
+/// replaces its runs must repeat [`Spec::collapse_white_space`].
 pub fn text_spec(s: &StyleProps, text: &str) -> Spec {
     Spec {
         strut: Run::from_style("", exact_kernel::TextStyle::from_style(s)),
@@ -1453,7 +1452,7 @@ pub fn bbox(ts: Transform, r: Rect4) -> Rect4 {
     (x0, y0, x1 - x0, y1 - y0)
 }
 
-fn intersect(a: Rect4, b: Rect4) -> Rect4 {
+pub(crate) fn intersect(a: Rect4, b: Rect4) -> Rect4 {
     let x0 = a.0.max(b.0);
     let y0 = a.1.max(b.1);
     let x1 = (a.0 + a.2).min(b.0 + b.2);

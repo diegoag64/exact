@@ -78,6 +78,8 @@ mod midi;
 mod paint;
 #[path = "paragraph.rs"]
 mod paragraph;
+#[path = "replacement.rs"]
+mod replacement;
 #[path = "root_tabs.rs"]
 mod root_tabs;
 #[cfg(test)]
@@ -189,6 +191,7 @@ impl std::fmt::Display for HostError {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct Mirror {
+    kind: Option<&'static str>,
     props: exact_kernel::SortedMap<&'static str, String>,
     /// The style the presenter last heard, one allocation per text ([`paragraph::StyleTexts`]).
     style: std::rc::Rc<str>,
@@ -274,11 +277,15 @@ pub struct Host<D: DataSource> {
     /// Each table's and table part's record as the presenter last heard it
     /// (`tables.rs`).
     tables: IdMap<ViewId, String>,
+    changed_prose_lists: IdSet<ViewId>,
     ranks: IdMap<ViewId, i64>,
     roots: Vec<ViewId>,
     /// Last published common collection snapshot; refreshed only after layout.
     collections_json: String,
     collection_heads: Option<Vec<exact_runner::CollectionSnapshot>>,
+    /// Section indices and mounted cells in the last batch for Mac split lists.
+    #[cfg(target_os = "macos")]
+    section_tables: std::collections::BTreeMap<ViewId, exact_runner::list_api::SectionTable>,
     engine: Engine,
     paint: paint::Paint,
     holds: BTreeMap<u64, HoldToken>,
@@ -320,6 +327,7 @@ pub struct Host<D: DataSource> {
     pending_store_writes: Vec<exact_runner::StoreWrite>,
     /// A store write landed since the last batch was written (`Batch::stored`).
     stored: bool,
+    window_state_changed: bool,
     pending_store_stamps: std::collections::BTreeMap<String, exact_data::secrets::Stamp>,
     /// What the disk held for each owed name when its write first failed.
     pending_store_bases: std::collections::BTreeMap<String, Option<Vec<u8>>>,
@@ -352,8 +360,9 @@ pub struct Host<D: DataSource> {
     colors_seen: Option<u64>,
     /// The root font size and the window's modes as a batch last said them (`Host::facts_moved`).
     facts_told: Option<(f64, Vec<(String, String)>)>,
-    /// The navigation roots' tabs as a batch last said them (`Host::root_tabs_moved`).
+    /// The navigation roots' tabs as a batch last said them (`Host::navigation_shapes`).
     root_tabs_told: Option<String>,
+    route_inspectors_told: Vec<(ViewId, exact_runner::RouteInspector)>,
     /// The holds as a batch last said them (`Host::wakelock_moved`, `Host::orientation_moved`, `Host::finish_moved`).
     holds_told: colors::Told,
     /// The top-layer boxes covered while closed (`closed.rs`).
@@ -482,6 +491,7 @@ impl<D: DataSource> Host<D> {
             start_on_frame,
             region,
             None,
+            None,
             links,
             font_hook,
             prepare,
@@ -505,6 +515,7 @@ impl<D: DataSource> Host<D> {
         start_on_frame: bool,
         region: Option<crate::content_region::ContentRegionRegistration>,
         native: Option<crate::content_region::NativeProjectionLimits>,
+        previous: Option<&Self>,
         links: crate::link::Links<D>,
         font_hook: Option<(crate::measure::FontsFn, *mut std::ffi::c_void)>,
         prepare: impl FnOnce(&mut Runner<D>) -> Result<(), HostError>,
@@ -570,6 +581,15 @@ impl<D: DataSource> Host<D> {
         } else {
             exact_runner::page::Platform::Ios
         };
+        let window_state_changed = plan
+            .slots
+            .iter()
+            .any(|row| row.persist == exact_plan::PersistScope::Window)
+            || carried.is_some_and(|c| {
+                c.store
+                    .iter()
+                    .any(|(k, _)| k.starts_with(exact_runner::Store::WINDOW_STATE))
+            });
         let runner = platform.boot(|| {
             Runner::boot_with_delivery_linked(
                 links.runner,
@@ -658,10 +678,13 @@ impl<D: DataSource> Host<D> {
             timeline_scrolls: Default::default(),
             fragments: IdMap::default(),
             tables: IdMap::default(),
+            changed_prose_lists: IdSet::default(),
             ranks: IdMap::default(),
             roots: Vec::new(),
             collections_json: "[]".into(),
             collection_heads: Some(Vec::new()),
+            #[cfg(target_os = "macos")]
+            section_tables: Default::default(),
             engine: {
                 // Settled values only when the plan animates nothing (LLP 1047.001).
                 let mut engine = Engine::linked(links.engine);
@@ -716,6 +739,7 @@ impl<D: DataSource> Host<D> {
             secrets,
             pending_store_writes: Vec::new(),
             stored: false,
+            window_state_changed,
             pending_store_stamps: Default::default(),
             pending_store_bases: Default::default(),
             reported_store_failures: BTreeSet::new(),
@@ -724,6 +748,7 @@ impl<D: DataSource> Host<D> {
             colors_seen: None,
             facts_told: None,
             root_tabs_told: None,
+            route_inspectors_told: Vec::new(),
             holds_told: Default::default(),
             closed: Default::default(),
         };
@@ -733,16 +758,7 @@ impl<D: DataSource> Host<D> {
         host.close_top_layer(&order);
         host.cover_root_tablist();
         host.prepare_flat(&mut batch);
-        let handlers = host.runner.handlers();
-        for id in &order {
-            host.create(*id, handlers.get(id).map_or(&[], Vec::as_slice), &mut batch);
-        }
-        for id in &order {
-            host.emit_children(*id, &mut batch);
-        }
-        host.emit_paragraphs(&mut batch);
-        host.roots = host.runner.roots();
-        batch.roots(&host.roots.clone());
+        host.present_first_tree(previous, &order, &mut batch);
         host.emit_title(&mut batch);
         host.emit_language(&mut batch);
         colors::emit_roles(&mut batch);
@@ -786,6 +802,9 @@ impl<D: DataSource> Host<D> {
             (drag.emit_transforms)(&mut host, &mut batch);
         }
         host.present(&mut batch, true);
+        if let Some(old) = previous {
+            host.finish_replaced_motion(old, &order, &mut batch);
+        }
         let (mut batch, _) = host.resize_rounds(batch, None);
         host.state_onto(&mut batch);
         let batch = host.write(batch, None);

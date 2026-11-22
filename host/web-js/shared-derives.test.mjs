@@ -72,6 +72,82 @@ component Row
   });
 }, 60000);
 
+test('two bindings share a conditional program and follow its field in each keyed row', async () => {
+  await pageFor(`shape Item
+  id: number
+  level: number
+fn label(n: number): string = n > 1 ? "Large frame" : "Small frame"
+component App
+  state items = [Item(id=1, level=1), Item(id=2, level=2)]
+  action change
+    items = [Item(id=2, level=1), Item(id=1, level=2)]
+  view
+    column
+      button "Change" press=change testId="change"
+      for item in items key=item.id
+        text label(item.level) aria-label=label(item.level) testId=item.id.toString()
+`, async (page, js) => {
+    expect(js.split('"Large frame"')).toHaveLength(2);
+    const values = id => page.getByTestId(id).evaluate(e => [e.textContent, e.getAttribute('aria-label')]);
+    expect(await values('1')).toEqual(['Small frame', 'Small frame']);
+    expect(await values('2')).toEqual(['Large frame', 'Large frame']);
+    await page.getByTestId('change').click();
+    expect(await values('1')).toEqual(['Large frame', 'Large frame']);
+    expect(await values('2')).toEqual(['Small frame', 'Small frame']);
+  });
+}, 60000);
+
+test('two regions share their condition and update the right keyed row', async () => {
+  await pageFor(`shape Item
+  id: string
+  detail: string
+fn shows(item: Item): bool = item.detail == "expanded" ? item.id != "archived" : false
+component App
+  state items = [Item(id="one", detail="compact"), Item(id="two", detail="expanded")]
+  action change
+    items = [Item(id="two", detail="compact"), Item(id="one", detail="expanded")]
+  view
+    column
+      button "Change" press=change testId="change"
+      for item in items key=item.id
+        column testId=item.id
+          if shows(item)
+            text "Title"
+          if shows(item)
+            link href="/details"
+              text "Details"
+`, async (page, js) => {
+    expect(js.split('"archived"')).toHaveLength(2);
+    const content = id => page.getByTestId(id).textContent();
+    expect(await content('one')).toBe('');
+    expect(await content('two')).toBe('TitleDetails');
+    await page.getByTestId('change').click();
+    expect(await content('one')).toBe('TitleDetails');
+    expect(await content('two')).toBe('');
+  });
+}, 60000);
+
+test('a symbol uses its current colour through disabled state changes', async () => {
+  await pageFor(`component App
+  state off = false
+  action go
+    off = not off
+  view
+    column color="#0000ff"
+      button "Toggle" press=go testId="toggle"
+      button press=go appearance="none"
+        image "symbol:star" testId="stated" disabled=off -exact-tint-color="#ff0000"
+          :disabled
+            -exact-tint-color="#00ff00"
+`, async page => {
+    const image = page.getByTestId('stated');
+    const ink = () => image.evaluate(e => [e.hasAttribute('disabled'), e.style.getPropertyValue('--exact-tint').trim().toLowerCase()]);
+    expect(await ink()).toEqual([false, 'currentcolor']);
+    await page.getByTestId('toggle').click();
+    expect(await ink()).toEqual([true, 'currentcolor']);
+  });
+}, 60000);
+
 test('a metric keyword behind transitive shared rows writes CSS on each branch', async () => {
   await pageFor(`component App
   state wide = true
@@ -109,7 +185,7 @@ for (const stateful of [false, true]) {
     if (stateful) source = source.replace('  derive label', '  state suffix = "!"\n  derive label').replace('value + "!"', 'value + suffix');
     await pageFor(source, async (page, js) => {
       // The wrapper belongs to the owning arm, before its deeper when arm.
-      expect(js).toMatch(/(?:p|\(p\))=>\{(?:const \$a\d+=\{\};)?const d_L\d+_\d+=\(\$budget/);
+      expect(js).toMatch(/(?:p|\(p\))=>\{(?:const \$a\d+=\{\};)?const d_L\d+_\d+=\$atRead\(\$budget=>/);
       expect(await page.locator('#exact-root').textContent()).toContain('first!');
       expect(await page.locator('#exact-root').textContent()).toContain('a!');
       await page.getByTestId('change').click();
@@ -271,6 +347,105 @@ test('nested slot arms share mount code and keep each row and arm instance', asy
   expect(reports[0]).toEqual(reports[1]);
 }, 60000);
 
+test('a shared slot frame reads the getter declared for its card in each keyed row', async () => {
+  const source = `component App
+  state limit = 2
+  action overflow
+    limit = 65537
+  view
+    column
+      button "Overflow" press=overflow testId="overflow"
+      for n in [1, 4] key=n
+        column
+          Meter(count=range(limit + n).length)
+            text "A"
+          Meter(count=range(limit + n + 1).length)
+            text "B"
+            text n.toString()
+          Meter(count=range(limit + n + 2).length)
+            if n == 1
+              text "C"
+component Meter
+  props
+    count: number
+  slot
+  view
+    column aria-label="Row meter"
+      text \`(\${count})\`
+      children
+      for suffix in ["!"] key=suffix
+        Suffix(value=count + 1, suffix=suffix)
+component Suffix
+  props
+    value: number
+    suffix: string
+  view
+    text \`[\${value}]\${suffix}\`
+`;
+  const reports = [];
+  for (const sites of [false, true]) {
+    await pageFor(source, async (page, js) => {
+      if (!sites) expect(js.split('"Row meter"')).toHaveLength(2);
+      expect(await page.getByLabel('Row meter').allTextContents()).toEqual([
+        '(3)A[4]!', '(4)B1[5]!', '(5)C[6]!', '(6)A[7]!', '(7)B4[8]!', '(8)[9]!',
+      ]);
+      await page.getByTestId('overflow').click();
+      const trapped = await page.evaluate(async () => (await import('/rt.js')).journal
+        .filter(line => line.includes('IterationLimit')).map(line => line.replace(/^t=\S+ /, '')).sort());
+      expect(trapped).toHaveLength(12);
+      reports.push(trapped);
+    }, sites ? ['--sites'] : []);
+  }
+  expect(reports[0]).toEqual(reports[1]);
+}, 60000);
+
+test('a shared list reads state from the panel that mounted it', async () => {
+  await pageFor(`component App
+  state shown = true
+  state items = [1, 2]
+  action toggle
+    shown = !shown
+  view
+    column
+      button "Toggle" press=toggle testId="toggle"
+      if shown
+        Panel(id="left", numbers=items)
+      if shown
+        Panel(id="right", numbers=items)
+          text "Extra" testId="extra"
+
+component Panel
+  props
+    id: string
+    numbers: number[]
+  slot
+  state count = 0
+  derive label = id + " row"
+  action advance
+    count = count + 1
+  view
+    column testId=id
+      for n in numbers key=n
+        button press=advance aria-label="Increase row count"
+          text \`\${label} \${n}: \${count}\`
+      if count >= 0
+        children
+`, async (page, js) => {
+    expect(js.split('"Increase row count"')).toHaveLength(2);
+    const rows = id => page.getByTestId(id).getByRole('button', { name: 'Increase row count' });
+    await rows('left').nth(1).click();
+    expect(await rows('left').allTextContents()).toEqual(['left row 1: 1', 'left row 2: 1']);
+    expect(await rows('right').allTextContents()).toEqual(['right row 1: 0', 'right row 2: 0']);
+    expect(await page.getByTestId('right').getByTestId('extra').count()).toBe(1);
+    await rows('right').first().click();
+    expect(await rows('right').allTextContents()).toEqual(['right row 1: 1', 'right row 2: 1']);
+    await page.getByTestId('toggle').click();
+    expect(await rows('left').count()).toBe(0);
+    await page.getByTestId('toggle').click();
+    expect(await rows('left').allTextContents()).toEqual(['left row 1: 0', 'left row 2: 0']);
+  });
+}, 60000);
+
 test.each([true, false])('repeated components bind their own props, actions and state (conditional %s)', async conditional => {
   const source = `component App
   state left = "Left"
@@ -423,4 +598,92 @@ test('shared action code writes its own slot and reports the name of the failing
       }
     }, sites ? ['--sites'] : []);
   }
+}, 60000);
+
+test('cards with different slot contents share their frame and retain each row binding', async () => {
+  await pageFor(`component App
+  state active = ""
+  action choose(id: string)
+    active = id
+  view
+    column
+      for id in ["Alice", "Bob"] key=id
+        column
+          Card()
+            text id
+          Card()
+            text "Choose"
+            button id press=choose(id)
+          Card()
+            if active == id
+              text "Selected"
+            else
+              text "Waiting"
+          column aria-label="Row control"
+            row
+              button id press=choose(id)
+component Card
+  slot
+  view
+    column aria-label="Shared card"
+      text "Header"
+      children
+      text "Footer"
+`, async (page, js) => {
+    for (const fixed of ['"Shared card"', '"Header"', '"Footer"']) expect(js.split(fixed)).toHaveLength(2);
+    expect(js).not.toContain('((p,$slot)=>');
+    const cards = page.getByLabel('Shared card');
+    expect(await cards.allTextContents()).toEqual([
+      'HeaderAliceFooter', 'HeaderChooseAliceFooter', 'HeaderWaitingFooter',
+      'HeaderBobFooter', 'HeaderChooseBobFooter', 'HeaderWaitingFooter',
+    ]);
+    await cards.nth(4).getByRole('button', { name: 'Bob' }).click();
+    expect(await cards.nth(5).textContent()).toBe('HeaderSelectedFooter');
+    expect(await cards.nth(2).textContent()).toBe('HeaderWaitingFooter');
+    await page.getByLabel('Row control').getByRole('button', { name: 'Alice' }).click();
+    expect(await cards.nth(2).textContent()).toBe('HeaderSelectedFooter');
+  });
+}, 60000);
+
+test('content after a variable-length slot reports each binding at its plan site', async () => {
+  const source = `component App
+  state limit = 2
+  action overflow
+    limit = 65537
+  view
+    column
+      button "Overflow" press=overflow testId="overflow"
+      Meter(count=range(limit).length)
+        text "A"
+      Meter(count=range(limit).length)
+        text "B"
+        button "Again" press=overflow
+      Meter(count=range(limit).length)
+        if limit > 0
+          text "C"
+component Meter
+  props
+    count: number
+  slot
+  view
+    column aria-label="Slot meter"
+      text \`Before \${count}\`
+      children
+      text \`After \${count}\`
+`;
+  const reports = [];
+  for (const sites of [false, true]) {
+    await pageFor(source, async (page, js) => {
+      if (!sites) expect(js.split('"Slot meter"')).toHaveLength(2);
+      expect(await page.getByLabel('Slot meter').allTextContents()).toEqual([
+        'Before 2AAfter 2', 'Before 2BAgainAfter 2', 'Before 2CAfter 2',
+      ]);
+      await page.getByTestId('overflow').click();
+      const trapped = await page.evaluate(async () => (await import('/rt.js')).journal
+        .filter(line => line.includes('IterationLimit')).map(line => line.replace(/^t=\S+ /, '')).sort());
+      expect(trapped).toHaveLength(6);
+      reports.push(trapped);
+    }, sites ? ['--sites'] : []);
+  }
+  expect(reports[0]).toEqual(reports[1]);
 }, 60000);

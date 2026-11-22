@@ -621,7 +621,7 @@ export function surfaceGranted(op) {
   const need = `surface.${op.mode === "capture" ? "read" : "write"} ${op.name}`;
   return scoped?.entries.some(([, source]) => source === need) ?? false;
 }
-function fulfill(requestIncarnation, ticket, kind, status, headersText, body, elapsedMs) {
+function fulfill(requestIncarnation, ticket, kind, status, headersText, body, elapsedMs, askedAt = 0, afterMs = 0, timeoutMs = 0) {
   // Boot reuses ticket IDs; an old incarnation's completion must not land.
   if (!host.wasm || requestIncarnation !== host.incarnation) {
     return;
@@ -635,7 +635,7 @@ function fulfill(requestIncarnation, ticket, kind, status, headersText, body, el
   const mem = new Uint8Array(host.memory.buffer, ptr, h.length + body.length);
   mem.set(h);
   mem.set(body, h.length);
-  send(host.wasm.exact_fulfill(ticket, kind, status, h.length, body.length, now()));
+  send(host.wasm.exact_fulfill(ticket, kind, status, h.length, body.length, now(), askedAt, afterMs, timeoutMs));
 }
 export function safelyFulfill(...args) {
   try {
@@ -653,8 +653,10 @@ export const deferFulfill = deferredFulfill(safelyFulfill, inflight);
 // D3), and the GPU module's picture. `tap`, `type`, and `screenshot` are
 // the driver's, over CDP: real input, real pixels.
 export function ask(request) {
-  // entering an unloaded stage traps mid-call; callers load it first (LLP 1047.000 §9)
-  if (!stageLoaded("inspection")) {
+  // Entering an unloaded stage traps mid-call, so a caller loads it first (LLP 1047.000 §9). A picker's hold is the
+  // core's (`exact_runner::agent::answer` takes it before the stage's `handle`), so a press asks for it at once, inside
+  // its activation.
+  if (request.op !== "showPicker" && !stageLoaded("inspection")) {
     throw new Error("inspection is a stage that has not loaded (LLP 1047.000): load it before asking");
   }
   return JSON.parse(readOut(host.wasm.exact_agent(writeIn(JSON.stringify(request)))));

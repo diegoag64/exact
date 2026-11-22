@@ -19,9 +19,15 @@ mod document;
 mod find;
 mod foresee;
 mod keys;
+mod list_places;
 pub mod looks;
 mod owners;
+pub(crate) mod place;
+mod retained;
+pub(crate) use list_places::CandidateLists;
+pub use list_places::RetainedLists;
 pub use owners::OwnerInst;
+pub use retained::RetainedViews;
 mod rare;
 mod region;
 mod retire;
@@ -126,7 +132,9 @@ pub struct NodeInst {
     pub view: ViewId,
     /// Last emitted value per binding that can change, in binding order
     /// ([`NodeInst::slot`]); a constant binding's is the site index's.
-    last: Box<[Option<Value>]>,
+    /// Rollback snapshots share these values until a binding changes.
+    /// A node with only constant bindings needs no storage here.
+    last: Option<Rc<[Option<Value>]>>,
     /// Ordered children: static nodes and regions interleaved by `order`.
     children: Vec<Child>,
     /// Last emitted child list.
@@ -235,6 +243,7 @@ pub enum InstanceStep {
 #[derive(Debug, Default)]
 pub struct Ids {
     next: ViewId,
+    kept: std::vec::IntoIter<Option<ViewId>>,
     /// Every instance node's view and site, destroyed ones kept till [`Ids::retain`] drops them.
     sites: exact_kernel::id::IdMap<ViewId, NodesId>,
     /// Each plan site's work across its instances' lifetimes, by node
@@ -268,9 +277,26 @@ impl Ids {
         self.tabs = saved.tabs;
     }
 
-    fn fresh(&mut self) -> ViewId {
-        self.next += 1;
+    pub(crate) fn from_last(last: ViewId) -> Self {
+        Self {
+            next: last,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn last_issued(&self) -> ViewId {
         self.next
+    }
+
+    fn fresh(&mut self) -> Result<ViewId, InstanceError> {
+        if let Some(Some(view)) = self.kept.next() {
+            return Ok(view);
+        }
+        self.next = self
+            .next
+            .checked_add(1)
+            .ok_or(InstanceError::ViewIdsExhausted)?;
+        Ok(self.next)
     }
 
     /// The plan node `view` realized, if an instance node created it.
@@ -401,6 +427,7 @@ pub struct InstanceWork {
 
 /// Per-commit evaluation context and deterministic work counters.
 pub struct Update<'a> {
+    pub(crate) list_seeds: Option<&'a CandidateLists>,
     /// The environment every expression sees.
     pub env: Env<'a>,
     /// Run-time installed-family stack ids shared across commits in a session.
@@ -516,6 +543,7 @@ impl<'a> Update<'a> {
             reuse: false,
             scratch: vm::Scratch::default(),
             frame_buffers: Vec::new(),
+            list_seeds: None,
             scroll_padding: None,
             scroll_margin: None,
             cell_margins: None,
@@ -815,7 +843,7 @@ impl NodeInst {
         let row = plan.node(node);
         let node_type = NodeType::from_wire(row.node_type)
             .ok_or(InstanceError::UnknownNodeType(row.node_type))?;
-        let view = u.ids.fresh();
+        let view = u.ids.fresh()?;
         u.ids.sites.insert(view, node);
         if let Some(w) = u.ids.work.sites.get_mut(node.0 as usize) {
             w.created += 1;
@@ -824,11 +852,11 @@ impl NodeInst {
             id: view,
             node_type,
         });
+        let slots = Self::slot(u.sites, &row, row.bindings.len as usize);
         let mut inst = NodeInst {
             node,
             view,
-            last: vec![None; Self::slot(u.sites, &row, row.bindings.len as usize)]
-                .into_boxed_slice(),
+            last: (slots != 0).then(|| (0..slots).map(|_| None).collect()),
             children: Vec::new(),
             last_children: Box::default(),
             rare: None,
@@ -936,7 +964,7 @@ impl NodeInst {
                 Evaluated::Trapped { first } => {
                     u.ids.evaluated(self.node, !first);
                     if let Some(slot) = slot {
-                        self.last[slot] = None;
+                        self.set_emitted(slot, None);
                     }
                     if first && !u.discard {
                         self.unset_trapped(u, i, &binding);
@@ -946,7 +974,7 @@ impl NodeInst {
             };
             let unchanged = match slot {
                 None => !fresh,
-                Some(slot) => self.last[slot]
+                Some(slot) => self.last.as_ref().expect("binding slots")[slot]
                     .as_ref()
                     .is_some_and(|last| crate::compare::equal(last, &value) == Some(true)),
             };
@@ -965,7 +993,7 @@ impl NodeInst {
                     u.text_styled = true;
                 }
                 if let Some(slot) = slot {
-                    self.last[slot] = Some(value);
+                    self.set_emitted(slot, Some(value));
                 }
                 continue;
             }
@@ -1108,7 +1136,7 @@ impl NodeInst {
                 }
             }
             if let Some(slot) = slot {
-                self.last[slot] = Some(value);
+                self.set_emitted(slot, Some(value));
             }
         }
         if !tuned {

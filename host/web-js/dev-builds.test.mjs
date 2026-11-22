@@ -7,7 +7,7 @@ import { afterEach, expect, test } from 'bun:test';
 import { spawnOwned, stopAll } from '../../scripts/test-children.mjs';
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, resolve, win32 } from 'node:path';
@@ -108,6 +108,17 @@ ${second ? '' : '  state removed = 1\n'}  action bump
       button press=bump testId="bump"
         text "Bump"
       text "${label}" testId="label"
+${second ? '      Other()\n' : ''}      Editor()
+component Editor
+  state note = ""
+  action write(value: string)
+    note = value
+  view
+    input value=note input=write testId="draft"
+component Other
+  state note = "Unrelated"
+  view
+    text note testId="unrelated"
 `;
   writeFileSync(join(dir, 'app.json'), JSON.stringify({ name: 'Replacement', app: { id: 'test.replacement', name: 'Replacement' } }));
   writeFileSync(source, contract('A'));
@@ -122,6 +133,7 @@ ${second ? '' : '  state removed = 1\n'}  action bump
     let before = await read();
     expect(before.generation).toBe(1);
     expect(before.replacement).toBeNull();
+    await page.getByTestId('draft').fill('Piranesi');
     for (const [label, generation] of [['B', 2], ['A', 3], ['reboot', 4]]) {
       await page.getByTestId('bump').click();
       before = await read();
@@ -141,6 +153,8 @@ ${second ? '' : '  state removed = 1\n'}  action bump
       expect(after.epoch).toBeGreaterThanOrEqual(before.epoch);
       expect(after.incarnation).toBe(1);
       expect(after.slots.kept).toBe(before.slots.kept);
+      expect(await page.getByTestId('draft').inputValue()).toBe('Piranesi');
+      if (label === 'B') expect(await page.getByTestId('unrelated').textContent()).toBe('Unrelated');
       if (generation === 2) expect(after.replacement.dropped).toEqual([
         { what: 'state', name: 'retyped', why: 'type changed' },
         { what: 'state', name: 'removed', why: 'no place' },
@@ -809,7 +823,7 @@ test("the JS loop: an edit to theme-fixture's `when` token builds with setMode a
   const page = '  surface.page = light-dark(#ffffff, #000000)\n    when dark-style=dim: light-dark(#ffffff, #15202b)\n';
   expect(design).toContain(page);
   writeFileSync(join(dir, 'app.forma'), design);
-  let loop = null;
+  let loop, browser;
   try {
     loop = await devLoop(dir);
     const { said, base } = loop;
@@ -823,13 +837,23 @@ test("the JS loop: an edit to theme-fixture's `when` token builds with setMode a
     await until(() => count(/edit → checked|edit → batch ready .*built in|edit → plan ready/g) > checks || said().includes('build failed'), 300_000);
     expect(said()).not.toContain('build failed');
     expect(JSON.stringify(await (await fetch(`${base}/__dev/design`)).json())).toContain('#16212c');
+    browser = await suiteBrowser();
+    const preview = await browser.newPage();
+    await preview.goto(base);
+    await preview.waitForFunction(() => globalThis.exact?.replacementBoundary);
+    await preview.evaluate(() => exact.devError('assets/avatar.wgsl failed', 'shader'));
     // The default's light side alone, which `under scheme=dark` refuses:
     // the build says so, and not that the design declares no axes.
     writeFileSync(join(dir, 'app.forma'), design.replace(page, page.replace('#ffffff, #000000', '#fefefe, #000000')));
     await until(() => said().includes('build failed') && said().includes('[forma-'), 300_000);
     expect(said()).toContain('forma-under-light');
     expect(said()).not.toContain('declares no axes');
+    const overlay = preview.locator('pre').filter({ hasText: 'forma-under-light' });
+    expect(await overlay.textContent()).toContain('assets/avatar.wgsl failed');
+    await overlay.click();
+    expect(await overlay.count()).toBe(0);
   } finally {
+    await browser?.close();
     await loop?.stop().catch(() => {});
     rmSync(dir, { recursive: true, force: true });
   }
@@ -890,6 +914,52 @@ test('the JS loop rebuilds when a navigation source or grant admission changes',
     rmSync(dir, { recursive: true, force: true });
   }
 }, 180_000);
+
+test('writes beside a linked Contract source leave its build running', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'exact-linked-reads-')));
+  const app = join(root, 'app'), library = join(root, 'library');
+  mkdirSync(join(app, 'node_modules'), { recursive: true });
+  mkdirSync(library);
+  symlinkSync(library, join(app, 'node_modules/ui'), 'junction');
+  writeFileSync(join(library, 'package.json'), '{"name":"ui"}');
+  writeFileSync(join(app, 'app.json'), '{"name":"Linked","app":{"id":"test.linked","name":"Linked"}}');
+  writeFileSync(join(app, 'app.contract'), 'use Badge from "ui/views.contract"\ncomponent App\n  view\n    Badge()\n');
+  const badge = text => `component Badge\n  view\n    text "${text}"\n`;
+  const view = join(library, 'views.contract');
+  writeFileSync(view, badge('first-badge'));
+  let loop;
+  try {
+    loop = await devLoop(app, { EXACT_DEV_BUILD_HOLD_MS: '2000' });
+    const target = process.env.CARGO_TARGET_DIR ?? join(app, 'target');
+    const stage = join(target, 'web-js-dev-stage', sha(resolve(loop.dist)).slice(0, 16));
+    const until = async condition => {
+      const deadline = Date.now() + 60_000;
+      while (!condition()) {
+        if (Date.now() > deadline) throw new Error(loop.said().slice(-2000));
+        await Bun.sleep(30);
+      }
+    };
+    writeFileSync(view, badge('second-badge'));
+    // The compiler has read the new view and the build has yet to publish it.
+    await until(() => existsSync(join(stage, '.gen/dev-sources.json')));
+    writeFileSync(join(library, 'notes.txt'), 'unread');
+    mkdirSync(join(library, 'target'));
+    writeFileSync(join(library, 'target/thumbnail.png'), 'unread');
+    await until(() => loop.said().includes('edit → plan ready'));
+    expect(readFileSync(join(loop.dist, 'app.plan')).includes('second-badge')).toBe(true);
+    expect(loop.said()).not.toContain('superseded');
+    expect(loop.said()).not.toContain('build in flight stopped');
+
+    writeFileSync(view, 'use Label from "./new/label.contract"\ncomponent Badge\n  view\n    Label()\n');
+    await until(() => loop.said().includes('build failed'));
+    mkdirSync(join(library, 'new'));
+    writeFileSync(join(library, 'new/label.contract'), 'component Label\n  view\n    text "recovered-badge"\n');
+    await until(() => readFileSync(join(loop.dist, 'app.plan')).includes('recovered-badge'));
+  } finally {
+    await loop?.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 300_000);
 
 // A Contract library the app depends on as `file:./packages/ui` is a copy in node_modules; the loop's rebuild runs
 // host/web-js/build.mjs directly, which installs it again before it reads it (#115).
@@ -978,9 +1048,9 @@ test.each([posix.sep, win32.sep])('the JS watcher skips build outputs and keeps 
     const context = {
       app, OUTPUT, INPUT_TREE, shaderWatchRoots, within, existsSync, dirname, sep, besidePattern,
       fsWatch: (_path, _options, listener) => { notify = listener; },
-      stopping: false, compilerInput: path => path === join(dir, 'node_modules/used/source.contract'),
+      stopping: false, skipCargoTarget: () => false, compilerInput: path => ['node_modules/used/source.contract', 'frames/shared.contract'].some(name => path === join(dir, name)),
       backendOf: () => 'current', backendSeen: 'previous',
-      temporaryOfDesign: () => false, movedSince: () => true, since: Date.now() + 1000,
+      temporaryOfSource: () => false, movedSince: () => true, since: Date.now() + 1000,
       resolve, statSync, timer: null, saved: 0, edited: new Set(), residentChild: null,
       starting: { failure: null }, inputs: 0, movedSinceBuild: new Set(), appeared: new Set(),
       stopYoungBuild() {}, clearTimeout() {}, setTimeout: callback => { pending = callback; return 1; },
@@ -988,7 +1058,7 @@ test.each([posix.sep, win32.sep])('the JS watcher skips build outputs and keeps 
     };
     runInNewContext(rules + source.slice(begin, end) + '\nwatch(app.dir, { recursive: true }, changed(app.dir));', context);
     for (const name of ['target/web-js-dev-stage/hash/manifest.json', 'app.contract.d.ts', 'macos.out', 'macos.err',
-      'other.OUT', '.exact/evidence.err', 'node_modules/unused/source.contract', 'nested/.cache/file.js']) {
+      'other.OUT', '.exact/evidence.err', 'node_modules/unused/source.contract', 'nested/.cache/file.js', 'frames/preview.contract']) {
       notify('change', name.replaceAll('/', sep));
       expect(context.edited.has(join(dir, name)), name).toBe(false);
       expect(pending, name).toBeNull();
@@ -996,7 +1066,7 @@ test.each([posix.sep, win32.sep])('the JS watcher skips build outputs and keeps 
     expect(rebuilds).toBe(0);
     const inputs = ['app.contract', 'app.forma', 'app.ts', 'unused.ts', 'helper.js', 'local-crate/src/messages.err',
       'local-crate/src/captured.out', 'assets/logo.png', 'shader-gen/captured.out', 'declared.out', 'tools/declared.err',
-      '.env.local', '.exact/backend-origin', 'node_modules/used/source.contract'];
+      '.env.local', '.exact/backend-origin', 'node_modules/used/source.contract', 'frames/shared.contract'];
     if (sep === '/') inputs.push('nested\\target\\literal.ts');
     for (const [index, name] of inputs.entries()) {
       notify('change', name.replaceAll('/', sep));
