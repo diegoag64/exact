@@ -129,13 +129,15 @@ unsafe extern "C" fn render(
         return CALLBACK_RESULT_CONTINUE;
     }
     // SAFETY: AAudio serializes data callbacks for one stream, and the boxed
-    // Arm outlives the stream (closed in Drop before the box is freed).
-    let arm = unsafe { &mut *context.cast::<Arm>() };
-    arm.mixer.commands();
+    // Arm outlives the stream (closed in Drop before the box is freed). Only
+    // the mixer is borrowed: the error callback and the owner read `error`
+    // from other threads meanwhile.
+    let mixer = unsafe { &mut (*context.cast::<Arm>()).mixer };
+    mixer.commands();
     // SAFETY: the stream was opened stereo float: `frames` interleaved pairs.
     let output = unsafe { std::slice::from_raw_parts_mut(data.cast::<f32>(), frames as usize * 2) };
     for frame in output.as_chunks_mut::<2>().0 {
-        let (l, r) = arm.mixer.frame();
+        let (l, r) = mixer.frame();
         frame[0] = l;
         frame[1] = r;
     }
@@ -148,10 +150,10 @@ unsafe extern "C" fn failed(_stream: *mut Stream, context: *mut c_void, error: i
     }
     // Closing from an AAudio callback is forbidden: the owner reads this
     // (`Output::failure`), drops the output and opens a new one later.
-    // SAFETY: the boxed Arm outlives the stream; the error is atomic.
-    let arm = unsafe { &*context.cast::<Arm>() };
-    arm.error
-        .store(if error == OK { -1 } else { error }, Ordering::Release);
+    // SAFETY: the boxed Arm outlives the stream; only its atomic is borrowed,
+    // apart from the mixer the data callback holds.
+    let failed = unsafe { &(*context.cast::<Arm>()).error };
+    failed.store(if error == OK { -1 } else { error }, Ordering::Release);
 }
 
 /// The default output device, opened only by a live presentation owner.
