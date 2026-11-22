@@ -130,6 +130,16 @@ memory: at 1680×1760 a layer, 4x colour (RGBA8) and depth (Depth32Float)
 are 2 × 90 MiB = 180 MiB. Their contents are still discarded at the end of
 the pass, so on a tiler they cost memory, not bandwidth.
 
+## Sound
+
+The game canvas's sounds (`world.play`) play through AAudio
+(`game/audio/src/android.rs`): one shared low-latency stereo float stream,
+opened at the first live frame, paused while the app is hidden. Until
+November 2026 the audio crate had no Android output, so a headset game was
+always silent. `adb logcat -s exact-audio` shows the stream when it opens
+(`game audio: AAudio stereo float at 48000 Hz, 96 frames a burst, …`) or
+why it could not.
+
 ## Controllers
 
 The headset's controllers are input like any other device: the host reads
