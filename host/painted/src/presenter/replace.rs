@@ -2,11 +2,9 @@
 //! update): what belongs to the old tree goes, and what belongs to the
 //! window or the session stays.
 //!
-//! The new runner numbers its views from 1 again and its kernel counts its
-//! epoch from where a boot does, so state kept by view id, node key, epoch
-//! or plan index would name another node, or none. [`Presenter::replaced`]
-//! names every field: a field added later does not compile until it is
-//! said to be the tree's or kept.
+//! A replacement can keep a view id. Kernel node keys, collection revisions
+//! and pending feedback still belong to the tree that produced them.
+//! [`Presenter::replaced`] accounts for each field when the host changes.
 use super::*;
 
 impl<D: DataSource> Presenter<D> {
@@ -27,6 +25,7 @@ impl<D: DataSource> Presenter<D> {
             glides,
             zooms,
             page,
+            focus_reveal,
             focus_out,
             type_ahead,
             autofocus_from,
@@ -35,6 +34,8 @@ impl<D: DataSource> Presenter<D> {
             fields,
             field_history,
             field_drag,
+            file_drag,
+            mouse_selection,
             #[cfg(any(target_os = "android", test))]
             reader_selection,
             range_drag,
@@ -102,6 +103,7 @@ impl<D: DataSource> Presenter<D> {
             boxes_page: _,
             boxes_serial: _,
             dirty: _,
+            picture_dirty: _,
             image_paint_pending: _,
             field_reveal: _,
             last_frame_succeeded: _,
@@ -115,6 +117,7 @@ impl<D: DataSource> Presenter<D> {
             access: _,
             // The window's, the device's and the session's.
             make_text: _,
+            start_executor: _,
             live_clock: _,
             presents: _,
             native_timers: _,
@@ -180,6 +183,7 @@ impl<D: DataSource> Presenter<D> {
         *glides = Default::default();
         *zooms = zoom::Zooms::kept(zooms);
         *page = (0.0, 0.0);
+        *focus_reveal = None;
         focus_out.clear();
         *type_ahead = Default::default();
         *autofocus_from = None;
@@ -191,6 +195,8 @@ impl<D: DataSource> Presenter<D> {
         fields.clear();
         *field_history = Default::default();
         *field_drag = None;
+        *file_drag = Default::default();
+        *mouse_selection = Default::default();
         #[cfg(any(target_os = "android", test))]
         {
             *reader_selection = None;
@@ -229,6 +235,7 @@ impl<D: DataSource> Presenter<D> {
         self.modules_replaced();
         self.auth_replaced();
         self.brush.replaced();
+        self.brush.canvases.drawings = self.host.canvas_snapshots().clone();
         self.brush.lift = Default::default();
         // A picker's answer or a GPU surface is not the new tree's.
         self.picks_replaced();

@@ -8,25 +8,107 @@
 //        machine, so no app's first build compiles them.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { dirname, relative, resolve } from 'node:path';
+import { gzipSync } from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 // Also for its PATH: the pinned binaryen (and Cargo) as every web build has
 // them, so a prebuild optimizes and keeps what an app's build would.
 import { awaitBuildOutput, WEB_STD, WEB_SIZE, WEB_TOOLCHAIN, injectedProfiles, resolveApp, wasmRemapFlags, webToolchainEnv } from '../../scripts/app.mjs';
 import { rustDataOf, undeclaredDataCrate } from '../../scripts/app-shells.mjs';
-import { appCrates } from '../../scripts/cargo-check.mjs';
+import { appCrates, linkedCrate } from '../../scripts/cargo-check.mjs';
 import { SETUP_FETCHES, withHostDeployment } from '../../scripts/filesystem.mjs';
 import { replaceBuild } from '../web/serve.mjs';
 import { proofInputs } from '../../game/inputs.mjs';
 import { keptProducts } from '../../scripts/kept.mjs';
-import { RustMissing, fromSet, fromSets, fetchedAllowed, launch, rustMissing, freshCompiler } from '../../scripts/tools.mjs';
-import { EXE } from '../../scripts/paths.mjs';
+import { RustMissing, fromSet, fromSets, fetchedTool, launch, rustMissing, freshCompiler } from '../../scripts/tools.mjs';
+import { EXE, slashRelative, within } from '../../scripts/paths.mjs';
+/** The development URL for frames/<name>.contract. */
+export const frameURL = name => '/__dev/frames/' + encodeURIComponent(name).replaceAll("'", '%27');
+
+export const frameFixturePath = frame => frame.slice(0, -'.contract'.length) + '.fixture.mts';
+
+/** Only the selected frame's fixture enters its TypeScript capture. */
+export function frameFixture(app, frame) {
+  if (!frame) return null;
+  const path = frameFixturePath(frame), stat = lstatSync(path, { throwIfNoEntry: false });
+  if (!stat) return null;
+  const root = realpathSync(app), physical = realpathSync(path);
+  if (!stat.isFile() || !within(root, physical)) throw new Error(`${path}: a frame fixture must be a regular file inside the app`);
+  return slashRelative(root, physical);
+}
+
+/** The preview's dispatcher accepts the app's TypeScript sources and calls introduced by the frame.
+ * The app retains its grants, hooks and original handler for every unanswered call. */
+export function frameAnswer(file, types) {
+  return `import * as app from './app';
+${types}
+import fixture from ${JSON.stringify('./' + file)};
+import type { SourceMap as AppSources, TypeScriptSources } from './app.contract.d.ts';
+export * from './app';
+type Providers = { [S in TypeScriptSource]?: (args: Args<S>, store: Store, storage: Storage, native?: NativeModule | null) => Result<S> | Promise<Result<S>> };
+type Allowed = keyof TypeScriptSources | Exclude<TypeScriptSource, keyof AppSources>;
+const checked: Providers & Partial<TypeScriptSources> = fixture satisfies Record<Exclude<keyof typeof fixture, Allowed>, never>;
+const overrides: Providers = checked;
+const live: TypeScriptAnswer = app.answer;
+export const answer: TypeScriptAnswer = (source, args, store, storage, native) => {
+  const provide = Object.hasOwn(overrides, source) ? overrides[source] : undefined;
+  return provide ? provide(args, store, storage, native) : live(source, args, store, storage, native);
+};`;
+}
+
 export { EXE };
 import { buildScriptDir, crateDir, depInfoOf, fresh as cargoFresh, refreshCargoRustBindings } from '../../scripts/cargo-dep-info.mjs';
 export { buildScriptDir, crateDir, depInfoOf, freshCompiler };
 export const fresh = (product, dep, also = []) => cargoFresh(product, dep, also);
 import { BINARYEN_DOWNLOAD } from '../web/stages.mjs';
+
+// ECMA-426 §6 and §9.2. Only the generated column and source index are needed to charge a span to its module.
+function vlq(segment, at) {
+  const digits = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let value = 0, place = 1, digit;
+  do {
+    digit = digits.indexOf(segment[at++]);
+    if (digit < 0) throw new Error('invalid source-map VLQ');
+    value += (digit & 31) * place;
+    place *= 32;
+  } while (digit & 32);
+  return [value % 2 ? -Math.floor(value / 2) : value / 2, at];
+}
+
+/** Module shares of the minified launch script. A line ending, a one-field segment or text before a line's first
+ * mapping has no source. Columns count UTF-16 units. A character split by a mapping belongs to its starting span. */
+export function entrySizeReport(chunk, out) {
+  const map = chunk.map, mappings = map.mappings.split(';'), counts = new Map();
+  const lines = chunk.code.split(/(\r\n|[\r\n\u2028\u2029])/);
+  const add = (source, bytes) => { if (bytes) counts.set(source, (counts.get(source) ?? 0) + bytes); };
+  let source = 0;
+  for (let i = 0; i < lines.length; i += 2) {
+    const line = lines[i];
+    let column = 0, start = 0, owner = null;
+    for (const segment of (mappings[i / 2] || '').split(',')) {
+      if (!segment) continue;
+      const [advance, at] = vlq(segment, 0);
+      column += advance;
+      const low = line.charCodeAt(column), high = line.charCodeAt(column - 1);
+      const end = low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff ? column + 1 : column;
+      add(owner, Buffer.byteLength(line.slice(start, end)));
+      start = end;
+      if (at < segment.length) { source += vlq(segment, at)[0]; owner = map.sources[source]; }
+      else owner = null;
+    }
+    add(owner, Buffer.byteLength(line.slice(start)));
+    if (lines[i + 1]) add(null, Buffer.byteLength(lines[i + 1]));
+  }
+  const gen = realpathSync(resolve(out, '.gen'));
+  const moduleName = source => {
+    const path = resolve(out, source);
+    return relative(gen, existsSync(path) ? realpathSync(path) : path);
+  };
+  const bytes = Buffer.from(chunk.code), rows = [...counts].sort((a, b) => b[1] - a[1]);
+  return [`Launch script ${chunk.fileName}, ${bytes.length} B (${gzipSync(bytes).length} B gzip)`, 'Minified bytes by source module',
+    ...rows.map(([source, n]) => `  ${n} B  ${source == null ? '(unmapped)' : moduleName(source)}`)].join('\n');
+}
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
@@ -179,7 +261,8 @@ export function moduleMetadata(manifest, env, dev = false) {
 export const APP_JS_WARN_BYTES = 8 << 20;
 /** What a build says of a built `app.js` of `bytes` past that size, with the compiler's line of plan code by component
  * (`costs`) when it gave one; '' below it. Two apps reached 30 MB with no word (LLP 1156.006.000 D4). */
-export const sizeWarning = (name, bytes, costs = '') => (bytes <= APP_JS_WARN_BYTES ? '' : `warning: ${name} is ${(bytes / 2 ** 20).toFixed(1)} MiB: a component's body is compiled in at each place it is used, so a large body used many times multiplies. Draw repeated structure from data in one \`for\`, and keep a many-armed \`if\` out of a component used hundreds of times${costs ? `; ${costs}` : ''}`);
+export const sizeWarning = (name, bytes, costs = '') => bytes <= APP_JS_WARN_BYTES ? ''
+  : `warning: ${name} is ${(bytes / 2 ** 20).toFixed(1)} MiB. The plan expands each component use. Different mount bodies can add launch code. Add --sizes to the web build for bytes by source module.${costs ? ` ${costs}` : ''}`;
 /** What separates two directories of one app name (two worktrees of an app) in the names made from it: twelve hex
  * of the directory's real path, as `host/web/dev.mjs` keys `dev-generations` (LLP 1156.006.000 D13). Every app's
  * module builds into one Cargo target, where one crate name from two directories is one product and one claim. */
@@ -258,8 +341,9 @@ export function buildModule(app, out, draw = false, dir = resolve(root, 'apps', 
     } finally { release(); }
   }
 
-  const dataCrate = appCrates(dir).find(crate => crate.name === data.krate)?.dir;
-  if (!dataCrate) throw new Error(`${app}: app.json's rust.data.crate is ${data.krate}, which is not a crate beside app.json`);
+  // The one the app's own host crates link by path, which they build, else the one beside app.json
+  const dataCrate = linkedCrate(resolved.dir, data.krate) ?? appCrates(resolved.dir).find(crate => crate.name === data.krate)?.dir;
+  if (!dataCrate) throw new Error(`${app}: app.json's rust.data.crate is ${data.krate}, which neither its host crates link by path nor is a crate beside app.json; name the data crate its host crates link, or link it by path from one of them`);
   const packageName = `exact-js-module-${app}-${key}${dev ? '-dev' : ''}`;
   // A stable path lets Cargo keep the dev wrapper fresh across stages. Its
   // own package name keeps Cargo from reusing a stage-local wrapper's artifact.
@@ -427,7 +511,7 @@ function taken(name, at) {
   const missing = rustMissing();
   const kept = missing ? null : at().find();
   if (kept) return { path: kept, kept: true };
-  const fetched = fetchedAllowed() ? fromSet(name, 'fetched') : null;
+  const fetched = fetchedTool(name);
   if (fetched) return { path: fetched.path, kept: true };
   if (missing) throw new RustMissing(name);
   return null;
@@ -560,7 +644,7 @@ export function webCompiler() {
   const missing = rustMissing(), at = compilerKept();
   const taken = missing ? null : at.find();
   if (taken) return launch(taken);
-  const fetched = fetchedAllowed() ? fromSet('exact-web-js', 'fetched') : null;
+  const fetched = fetchedTool('exact-web-js');
   if (fetched) return launch(fetched.path);
   if (missing) throw new RustMissing('exact-web-js');
   const started = Date.now();

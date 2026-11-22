@@ -77,6 +77,7 @@ pub struct Bridge<D: DataSource> {
     /// The date and place last told before a boot (`set_launch_time`,
     /// `set_launch_place`): a runner booted later reads them from its first settle.
     launch_facts: exact_runner::time::Launch,
+    restore_window: Vec<(String, Vec<u8>)>,
     /// A share claimed before the boot, and whether its files move from an inbox (`share_land`).
     cold_share: Option<(exact_runner::share_in::Claimed, bool)>,
     /// The host's live clock while it owns time, kept for every boot (`set_live_clock`)
@@ -131,6 +132,7 @@ impl<D: DataSource> Bridge<D> {
             preferences: exact_runner::Preferences::NONE,
             launch_layout: crate::host::LaunchLayout::NONE,
             launch_facts: exact_runner::time::Launch::NONE,
+            restore_window: Vec::new(),
             cold_share: None,
             live_clock: None,
             wait_kinds: 0,
@@ -691,7 +693,15 @@ impl<D: DataSource> Bridge<D> {
         // After commit, its paint receipt configures storage before activation
         // and data_ready refreshes its baked/kept external-reading resources.
         let length = self.prepare_plan_carried(
-            plan_len, data, hooks, width, height, delivery, validated, None,
+            plan_len,
+            data,
+            hooks,
+            width,
+            height,
+            delivery,
+            validated,
+            None,
+            TreeBase::Live,
         );
         if let Some(prepared) = &mut self.prepared {
             prepared.module = true;
@@ -713,19 +723,6 @@ impl<D: DataSource> Bridge<D> {
         self.prepare_plan_with_delivery(len, data, hooks, width, height, None)
     }
 
-    /// Prepare with candidate delivery facts, without publishing them globally.
-    pub fn prepare_plan_with_delivery(
-        &mut self,
-        len: usize,
-        data: D,
-        hooks: Hooks,
-        width: f32,
-        height: f32,
-        delivery: Option<exact_runner::Delivery>,
-    ) -> u32 {
-        self.prepare_plan_carried(len, data, hooks, width, height, delivery, None, None)
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prepare_plan_carried(
         &mut self,
@@ -737,6 +734,7 @@ impl<D: DataSource> Bridge<D> {
         delivery: Option<exact_runner::Delivery>,
         carried: Option<exact_runner::Carried>,
         entry: Option<&str>,
+        base: TreeBase,
     ) -> u32 {
         if let Some(refusal) = self.refuse_analysis() {
             return refusal;
@@ -786,6 +784,10 @@ impl<D: DataSource> Bridge<D> {
             Some(io) => (io.endow)(data.grants(), data.app_id(), carried.is_none()),
             None => crate::store::Endowed::none(),
         };
+        let mut snapshot = snapshot;
+        if carried.as_ref().is_none_or(|c| c.fresh_state) {
+            self.seed_window_state(&mut snapshot);
+        }
         let fonts = self.fonts;
         let fonts_ctx = self.fonts_ctx;
         let control_text = self.control_text;
@@ -794,7 +796,7 @@ impl<D: DataSource> Bridge<D> {
         let ctx = hooks.ctx;
         let launch = self.launch();
         match exact_runner::time::launching_with(launch, || {
-            Host::boot_stored_after_decode(
+            Host::boot_stored_after_decode_mode(
                 PlanBytes::input(&plan, entry),
                 data,
                 measurer,
@@ -809,6 +811,12 @@ impl<D: DataSource> Bridge<D> {
                 self.launch.as_deref().unwrap_or("/"),
                 self.start_on_frame,
                 self.region,
+                None,
+                self.host.as_ref().filter(|_| {
+                    cfg!(target_os = "macos")
+                        && base == TreeBase::Live
+                        && carried.as_ref().is_some_and(|c| !c.fresh_state)
+                }),
                 self.links.clone(),
                 fonts.map(|callback| (callback, fonts_ctx)),
                 move |runner| {
@@ -912,6 +920,7 @@ impl<D: DataSource> Bridge<D> {
         self.presenter_hooks(&mut candidate.host, &candidate.hooks);
         self.wake = candidate.hooks.wake.map(|w| (w, candidate.hooks.wake_ctx));
         self.executor = executor;
+        self.restore_window.clear();
         let batch = Host::ending(self.host.replace(candidate.host), candidate.batch);
         self.launch_layout.insets = None;
         self.adopt_app_module();
@@ -1439,6 +1448,7 @@ mod answers;
 mod boot;
 mod canvas_performance;
 use boot::PreparedHost;
+pub(crate) use boot::TreeBase;
 mod colors;
 mod preparation;
 mod pump;

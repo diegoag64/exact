@@ -112,24 +112,81 @@ type OpenedPainter = Result<(Box<dyn Backend>, PainterInfo), String>;
 /// A carrier chooses its constructor without retaining every native backend.
 /// The backend is installed after validation, on the paint thread.
 #[derive(Clone, Copy)]
-pub(crate) struct PainterBoot {
+pub struct PainterBoot {
     pub(super) choice: PainterChoice,
-    open: fn(PainterChoice) -> OpenedPainter,
+    constructor: Constructor,
+}
+
+#[derive(Clone, Copy)]
+enum Constructor {
+    Open(fn(PainterChoice) -> OpenedPainter),
+    #[cfg(windows)]
+    Direct3d11(bool),
 }
 
 impl PainterBoot {
-    #[cfg(windows)]
-    fn direct_d3d11(self) -> Option<bool> {
-        if self.choice != PainterChoice::Ink
-            || !std::ptr::fn_addr_eq(
-                self.open,
-                open_backend as fn(PainterChoice) -> OpenedPainter,
-            )
-        {
-            return None;
+    fn new(choice: PainterChoice, open: fn(PainterChoice) -> OpenedPainter) -> Self {
+        Self {
+            choice,
+            constructor: Constructor::Open(open),
         }
-        let device = std::env::var("EXACT_INK_DEVICE").ok();
-        exact_ink::device::direct_d3d11(device.as_deref())
+    }
+
+    pub(crate) fn cpu() -> Self {
+        Self::new(PainterChoice::Cpu, |_| Ok(cpu_backend()))
+    }
+
+    #[cfg(windows)]
+    fn direct(warp: bool) -> Self {
+        Self {
+            choice: PainterChoice::Ink,
+            constructor: Constructor::Direct3d11(warp),
+        }
+    }
+
+    /// Select once for window creation, painting and every subsequent show.
+    #[cfg(windows)]
+    pub fn windows<const DEVELOPMENT: bool>(compat: &str) -> Self {
+        Self::windows_options::<DEVELOPMENT>(
+            compat,
+            std::env::var("EXACT_PAINTER").ok().as_deref(),
+            std::env::var("EXACT_INK_DEVICE").ok().as_deref(),
+        )
+    }
+
+    #[cfg(windows)]
+    fn windows_options<const DEVELOPMENT: bool>(
+        compat: &str,
+        painter: Option<&str>,
+        device: Option<&str>,
+    ) -> Self {
+        let baked = PainterChoice::from_baked(compat);
+        if DEVELOPMENT && !exact_runner::delivery::production(compat) {
+            return Self::windows_selected(baked.with_override(painter), device);
+        }
+        match baked {
+            PainterChoice::Cpu => Self::cpu(),
+            _ => Self::direct(device == Some("warp")),
+        }
+    }
+
+    #[cfg(windows)]
+    fn windows_selected(choice: PainterChoice, device: Option<&str>) -> Self {
+        if choice == PainterChoice::Ink {
+            if let Some(warp) = exact_ink::device::direct_d3d11(device) {
+                return Self::direct(warp);
+            }
+        }
+        Self::new(choice, open_backend)
+    }
+
+    /// Whether window creation needs a composition surface and should force WARP.
+    #[cfg(windows)]
+    pub fn direct_d3d11(self) -> Option<bool> {
+        match self.constructor {
+            Constructor::Direct3d11(warp) => Some(warp),
+            Constructor::Open(_) => None,
+        }
     }
 
     #[cfg(windows)]
@@ -154,24 +211,23 @@ impl PainterBoot {
                 }
             })
             .map_err(|e| e.to_string())?;
-        let ink =
-            crate::ink::Ink::from_device(exact_ink::device::Selected::D3d11(Box::new(device)));
+        let (backend, info) = d3d11_backend(device);
         if std::env::var_os("EXACT_AGENT_WINDOW_FRAMES").is_some() {
             eprintln!(
                 "exact-ink: startup device {:.3} ms, pipelines {:.3} ms, join {:.3} ms",
-                ink.info().device_ms,
-                ink.info().shaders_ms,
+                info.device_ms,
+                info.shaders_ms,
                 start.elapsed().as_secs_f64() * 1000.
             );
         }
-        Ok(ink_backend(ink))
+        Ok((backend, info))
     }
 
     pub(crate) fn selected(choice: PainterChoice) -> Self {
-        Self {
-            choice,
-            open: open_backend,
-        }
+        #[cfg(windows)]
+        return Self::windows_selected(choice, std::env::var("EXACT_INK_DEVICE").ok().as_deref());
+        #[cfg(not(windows))]
+        Self::new(choice, open_backend)
     }
 
     pub(crate) fn from_env(manifest: PainterChoice) -> Self {
@@ -188,14 +244,19 @@ impl PainterBoot {
         if choice == PainterChoice::Ink {
             return Err(ANDROID_INK_UNAVAILABLE.into());
         }
-        Ok(Self {
-            choice: PainterChoice::Canvas,
-            open: open_canvas,
-        })
+        Ok(Self::new(PainterChoice::Canvas, open_canvas))
     }
 
     pub(super) fn open(self) -> OpenedPainter {
-        (self.open)(self.choice)
+        match self.constructor {
+            Constructor::Open(open) => open(self.choice),
+            #[cfg(windows)]
+            Constructor::Direct3d11(warp) => {
+                exact_ink::device::d3d11::D3d11::open_with_fallback(warp)
+                    .map(d3d11_backend)
+                    .map_err(|error| error.to_string())
+            }
+        }
     }
 }
 
@@ -210,12 +271,15 @@ fn open_canvas(_: PainterChoice) -> OpenedPainter {
     ))
 }
 
+fn cpu_backend() -> (Box<dyn Backend>, PainterInfo) {
+    (Box::new(Raster::new()), cpu_info())
+}
+
 pub(super) fn open_backend(
     choice: PainterChoice,
 ) -> Result<(Box<dyn Backend>, PainterInfo), String> {
-    let cpu = || (Box::new(Raster::new()) as Box<dyn Backend>, cpu_info());
     match choice {
-        PainterChoice::Cpu => Ok(cpu()),
+        PainterChoice::Cpu => Ok(cpu_backend()),
         #[cfg(target_os = "android")]
         PainterChoice::Ink => Err(ANDROID_INK_UNAVAILABLE.into()),
         #[cfg(not(target_os = "android"))]
@@ -246,11 +310,20 @@ pub(super) fn open_backend(
             Err(e) if choice == PainterChoice::Auto => {
                 // A note, not an error (the smoke reads stderr for errors).
                 eprintln!("painting on the CPU: no GPU ({e})");
-                Ok(cpu())
+                Ok(cpu_backend())
             }
             Err(e) => Err(format!("no GPU: {e}")),
         },
     }
+}
+
+#[cfg(windows)]
+pub(crate) fn d3d11_backend(
+    device: exact_ink::device::d3d11::D3d11,
+) -> (Box<dyn Backend>, PainterInfo) {
+    ink_backend(crate::ink::Ink::from_device(
+        exact_ink::device::Selected::D3d11(Box::new(device)),
+    ))
 }
 
 #[cfg(not(target_os = "android"))]
@@ -268,6 +341,17 @@ fn ink_backend(ink: crate::ink::Ink) -> (Box<dyn Backend>, PainterInfo) {
 }
 
 impl<D: DataSource> Presenter<D> {
+    #[cfg(target_os = "linux")]
+    pub(crate) fn install_scanout_painter(&mut self, device: exact_ink::Wgpu) {
+        let (backend, info) = ink_backend(crate::ink::Ink::from_device(
+            exact_ink::device::Selected::from(device),
+        ));
+        self.brush.replace_backend(backend);
+        self.painter = info;
+        self.choice = PainterChoice::Ink;
+        self.repaint();
+    }
+
     /// Attach S1's benchmark carrier. Shipping Apple apps still use native views.
     #[cfg(target_os = "macos")]
     pub fn attach_apple_layer(
@@ -509,9 +593,7 @@ impl<D: DataSource> Presenter<D> {
     ) -> Result<(), String> {
         let (startup, device) = crate::surfaces::window::Startup::wait(preparing)?;
         if let Some(device) = device {
-            let ink =
-                crate::ink::Ink::from_device(exact_ink::device::Selected::D3d11(Box::new(device)));
-            let (backend, info) = ink_backend(ink);
+            let (backend, info) = d3d11_backend(device);
             self.brush.replace_backend(backend);
             self.painter = info;
         } else {
@@ -525,13 +607,24 @@ impl<D: DataSource> Presenter<D> {
 
     /// Release the hidden window's device. The next visible frame reopens the configured painter.
     #[cfg(windows)]
-    pub fn suspend_window_painter(&mut self, choice: PainterChoice) {
+    pub fn suspend_window_painter(&mut self, painter: PainterBoot) {
         self.surfaces.detach_painter_window();
         if self.deferred_painter.is_none() {
             self.brush.replace_backend(Box::new(Raster::new()));
             self.painter = cpu_info();
             self.choice = PainterChoice::Cpu;
-            self.deferred_painter = Some(PainterBoot::selected(choice));
+            self.deferred_painter = Some(painter);
+        }
+    }
+
+    /// Start the hidden window's D3D11 workers while the page prepares its first visible frame.
+    #[cfg(windows)]
+    pub fn prepare_window_show(&mut self) {
+        if let Some(force_warp) = self.deferred_painter.and_then(PainterBoot::direct_d3d11) {
+            self.surfaces.preparing_device.get_or_insert_with(|| {
+                exact_ink::device::d3d11::Startup::start_for_first_present(force_warp)
+                    .map_err(|e| e.to_string())
+            });
         }
     }
 
@@ -547,14 +640,14 @@ impl<D: DataSource> Presenter<D> {
 
     #[cfg(any(windows, test))]
     fn open_deferred_painter(&mut self) -> Result<bool, String> {
+        #[cfg(windows)]
+        self.prepare_window_show();
         let Some(painter) = self.deferred_painter.take() else {
             return Ok(false);
         };
         #[cfg(windows)]
-        if let Some(force_warp) = painter.direct_d3d11() {
-            let preparing = exact_ink::device::d3d11::Startup::start_for_first_present(force_warp)
-                .map_err(|e| e.to_string())?;
-            self.install_prepared_painter(preparing)?;
+        if let Some(preparing) = self.surfaces.preparing_device.take() {
+            self.install_prepared_painter(preparing?)?;
             return Ok(true);
         }
         let (backend, info) = painter.open()?;
@@ -605,6 +698,7 @@ impl<D: DataSource> Presenter<D> {
             None,
             "/",
             None,
+            crate::app::Services::default(),
         )?;
         presenter.measure();
         Ok((presenter, error))
@@ -725,6 +819,43 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_bake_selects_the_window_and_its_painter_together() {
+        use PainterChoice::*;
+        let production = r#"{"embedded":{"trust":"production"}}"#;
+        for boot in [
+            PainterBoot::windows_options::<false>("{}", Some("gpu"), Some("wgpu")),
+            PainterBoot::windows_options::<true>(production, Some("cpu"), Some("wgpu")),
+            PainterBoot::windows_options::<true>("{}", None, Some("d3d11")),
+            PainterBoot::windows_options::<true>("{}", Some("ink"), None),
+        ] {
+            assert_eq!(boot.choice, Ink);
+            assert_eq!(boot.direct_d3d11(), Some(false));
+        }
+        for boot in [
+            PainterBoot::windows_options::<false>("{}", Some("gpu"), Some("warp")),
+            PainterBoot::windows_options::<true>("{}", None, Some("warp")),
+        ] {
+            assert_eq!(boot.direct_d3d11(), Some(true));
+        }
+        for (painter, device, choice) in [
+            ("ink", "wgpu", Ink),
+            ("gpu", "d3d11", Gpu),
+            ("custom", "d3d11", Custom),
+            ("auto", "d3d11", Auto),
+            ("cpu", "d3d11", Cpu),
+        ] {
+            let boot = PainterBoot::windows_options::<true>("{}", Some(painter), Some(device));
+            assert_eq!((boot.choice, boot.direct_d3d11()), (choice, None));
+        }
+        for receipt in [r#"{"game":true}"#, r#"{"painter":"cpu"}"#] {
+            let boot = PainterBoot::windows_options::<false>(receipt, Some("ink"), Some("warp"));
+            assert_eq!(boot.direct_d3d11(), None);
+            assert_eq!(boot.open().unwrap().1.name, "cpu");
+        }
+    }
+
     #[test]
     fn baked_windows_games_keep_the_module_presenter_unless_the_painter_is_named() {
         for (compat, windows, other) in [
@@ -810,6 +941,7 @@ mod tests {
             output_rotation: Default::default(),
             #[cfg(target_os = "macos")]
             painted_boot: None,
+            services: Default::default(),
             content_region: None,
             launch: "/".into(),
             plan: plan.into(),
@@ -853,11 +985,34 @@ mod tests {
             ("{}", exact_runner::Delivery::default()),
             "/",
             None,
-            PainterBoot {
-                choice: PainterChoice::Gpu,
-                open,
-            },
+            PainterBoot::new(PainterChoice::Gpu, open),
+            crate::app::Services::default(),
         )
+    }
+
+    #[test]
+    fn a_new_plan_uses_the_shells_data_executor() {
+        thread_local! { static STARTS: Cell<usize> = const { Cell::new(0) }; }
+        fn start(grants: &str) -> crate::executor::Executor {
+            STARTS.with(|n| n.set(n.get() + 1));
+            crate::executor::Executor::local(grants)
+        }
+        let plan = plan();
+        let mut config = fixture_config(plan.clone());
+        config.services = crate::app::Services::with_image_downloads(start);
+        let (mut presenter, error) = crate::app::boot_presenter_with_painter::<()>(
+            &mut config,
+            (8., 8.),
+            PainterBoot::cpu(),
+        )
+        .unwrap();
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!(STARTS.with(Cell::get), 1);
+        assert_eq!(
+            presenter.reload(&plan, ()).unwrap(),
+            crate::presenter::ReloadResult::Applied(None)
+        );
+        assert_eq!(STARTS.with(Cell::get), 2);
     }
 
     #[test]
@@ -891,10 +1046,7 @@ mod tests {
             assert_eq!(hidden, starts_hidden);
             assert_eq!(preparations, usize::from(!starts_hidden));
             let mut config = fixture_config(plan());
-            let painter = PainterBoot {
-                choice: PainterChoice::Gpu,
-                open: counted,
-            };
+            let painter = PainterBoot::new(PainterChoice::Gpu, counted);
             let (mut presenter, error) =
                 crate::app::boot_window_with_painter::<()>(&mut config, (8., 8.), hidden, painter)
                     .expect("window boots");
@@ -959,10 +1111,7 @@ mod tests {
         let (presenter, error) = crate::app::boot_presenter_with_painter::<()>(
             &mut config,
             (8., 8.),
-            PainterBoot {
-                choice: PainterChoice::Gpu,
-                open: counted,
-            },
+            PainterBoot::new(PainterChoice::Gpu, counted),
         )
         .expect("boots");
         assert!(error.is_none(), "{error:?}");
@@ -986,10 +1135,7 @@ mod tests {
         let (presenter, _) = crate::app::boot_presenter_with_painter::<()>(
             &mut config,
             (8., 8.),
-            PainterBoot {
-                choice: PainterChoice::Gpu,
-                open: counted,
-            },
+            PainterBoot::new(PainterChoice::Gpu, counted),
         )
         .expect("boots");
         assert_eq!(presenter.host.runner().timer_due_ms(), Some(10_000.0));
@@ -1010,10 +1156,7 @@ mod tests {
             let (mut presenter, error) = crate::app::boot_presenter_with_painter::<()>(
                 &mut config,
                 (8., 8.),
-                PainterBoot {
-                    choice: PainterChoice::Gpu,
-                    open: counted,
-                },
+                PainterBoot::new(PainterChoice::Gpu, counted),
             )
             .expect("the baked plan uses the direct painter");
             assert!(error.is_none(), "{error:?}");

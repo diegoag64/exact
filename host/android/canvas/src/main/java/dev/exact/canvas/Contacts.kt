@@ -19,6 +19,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
     private var originY = 0f
     private var downX = 0f
     private var downY = 0f
+    private var downTime = 0L
     private var tool = 0
     private var claims = 0
     private var longPresses = 0
@@ -47,7 +48,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
                         if (pending.any { it.actionMasked == MotionEvent.ACTION_POINTER_DOWN }) {
                             finishHold(null)
                         } else {
-                            view.forward(4, downX, downY, tool, -1L)
+                            DragOut.held(downTime); view.forward(4, downX, downY, tool, -1L)
                             view.ask(downX, downY) { words ->
                                 if (token == serial && !stopped) finishHold(words)
                             }
@@ -55,27 +56,49 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
                     }
                 }
             } else if (contextPending) {
-                view.forward(4, downX, downY, tool, -1L)
+                longPress()
             } else {
                 val token = serial
                 waiting = true
                 view.textSelection.begin(downX, downY) { took ->
                     if (token == serial && !stopped) {
-                        if (took) { endEngine(); scrolling.yieldToHosted() }
-                        else view.forward(4, downX, downY, tool, -1L)
-                        waiting = false
-                        drain()
+                        if (took) {
+                            endEngine(); scrolling.yieldToHosted()
+                            waiting = false
+                            drain()
+                        } else longPress()
                     }
                 }
             }
         }
     }
 
+    /** The long press to exact2. One it took (its menu, or a drag that lifts as the finger moves on, LLP 1094.000 D7) keeps
+     * the rest of the contact from a scroller, which would otherwise claim the finger's next move along its axis. */
+    private fun longPress() {
+        DragOut.held(downTime); view.forward(4, downX, downY, tool, -1L)
+        val token = serial
+        // The moves that come meanwhile wait for the answer ([drain]), so a scroller cannot claim one first.
+        waiting = true
+        view.ask(downX, downY) { words ->
+            if (token == serial && !stopped) {
+                if (longPressesIn(words) != longPresses) scrolling.yieldToHosted()
+                waiting = false
+                drain()
+            }
+        }
+    }
+
+    /** The count of long presses exact2 has taken, in a hit reply ([Native.under]). */
+    private fun longPressesIn(words: IntArray): Int {
+        val at = 3 + 11 * words.getOrElse(1) { 0 } + (if (words.getOrElse(0) { 0 } and 32 != 0) 5 else 0)
+        return words.getOrElse(at + 7) { longPresses }
+    }
+
     private fun finishHold(words: IntArray?) {
         waiting = false
-        val at = 3 + 11 * (words?.getOrElse(1) { 0 } ?: 0)
         val additional = pending.any { it.actionMasked == MotionEvent.ACTION_POINTER_DOWN }
-        if (!additional && words != null && words.getOrElse(at + 7) { longPresses } != longPresses) {
+        if (!additional && words != null && longPressesIn(words) != longPresses) {
             dropCandidate(); module.cancel(); endEngine(); scrolling.yieldToHosted()
         } else {
             contextPending = false
@@ -145,7 +168,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
         val down = e.actionMasked == MotionEvent.ACTION_DOWN
         if (down) {
             module.clear(); dropCandidate(); hold(null); releaseInterception()
-            downX = e.x; downY = e.y; tool = e.getToolType(0)
+            downX = e.x; downY = e.y; downTime = e.downTime; tool = e.getToolType(0)
             engine = false; field = false
             view.fingers.began(e)
             val caughtFling = scrolling.touch(e)
@@ -168,7 +191,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
                     val flags = words.getOrElse(0) { 0 }
                     claims = flags and 31
                     val at = 3 + 11 * words.getOrElse(1) { 0 } + (if (flags and 32 != 0) 5 else 0)
-                    longPresses = words.getOrElse(at + 7) { 0 }
+                    longPresses = longPressesIn(words)
                     contextPending = words.getOrElse(at + 12) { 0 } != 0
                     if (!field && words.size >= at + 13) {
                         val session = (words[at + 8].toLong() and 0xffffffffL) or (words[at + 9].toLong() shl 32)

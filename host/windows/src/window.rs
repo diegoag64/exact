@@ -2,7 +2,7 @@ use crate::keyboard::key_names;
 use exact_ink::counters;
 use exact_painted::{
     app::{self, Config},
-    presenter::PointerKind,
+    presenter::{PainterBoot, PointerKind},
     window_title::WindowTitle,
     Presenter,
 };
@@ -25,13 +25,13 @@ use winit::{
 
 mod edit_menu;
 mod file_dialog;
+mod file_drop;
 mod frames;
 mod lifecycle;
 mod presents;
 mod service;
 mod tray;
 use frames::{next_frame_deadline, presentation_resumes, FrameSchedule};
-use presents::direct_device;
 
 struct App<D: DataSource> {
     service_causes: u8,
@@ -41,6 +41,7 @@ struct App<D: DataSource> {
     title: WindowTitle,
     min_size: (f32, f32),
     config: Config,
+    painter: PainterBoot,
     window: Option<Rc<Window>>,
     surface: Option<softbuffer::Surface<Rc<Window>, Rc<Window>>>,
     preparing: Option<exact_ink::device::d3d11::Startup>,
@@ -92,6 +93,8 @@ struct App<D: DataSource> {
     keep_running: bool,
     /// The window is not shown: hidden by a close, or since a hidden launch.
     hidden: bool,
+    /// DWM is composing this window for its first frame after a show request.
+    pending_show: Option<lifecycle::PendingShow>,
     /// The app's one instance, which later launches reach.
     instance: Option<crate::instance::Instance>,
     cold_documents: Vec<String>,
@@ -165,12 +168,13 @@ pub(crate) fn boot_phase(name: &str) {
     }
 }
 
-pub(super) fn run<D: DataSource + Default + 'static>(
+pub(super) fn run<D: DataSource + Default + 'static, const DEVELOPMENT: bool>(
     name: &str,
     opening: crate::Window,
     plan: &[u8],
     compat: &str,
     composed: exact_painted::Composed,
+    services: crate::Services,
 ) -> i32 {
     if let Some(result) = exact_ink::device::d3d11::startup_watchdog::helper() {
         return result;
@@ -202,24 +206,17 @@ pub(super) fn run<D: DataSource + Default + 'static>(
         Err(_) => None,
     };
     let login = crate::desktop::login_launch(&std::env::args().collect::<Vec<_>>());
-    let device = std::env::var("EXACT_INK_DEVICE").ok();
-    let direct = direct_device(
-        exact_painted::presenter::PainterChoice::from_env(
-            exact_painted::presenter::PainterChoice::from_baked(compat),
-        ),
-        device.as_deref(),
-    );
+    let painter = PainterBoot::windows::<DEVELOPMENT>(compat);
     let launch = app::prepare_window_painter(login, frame_limit.is_some(), || {
+        let Some(warp) = painter.direct_d3d11() else {
+            return Ok(None);
+        };
         if !Config::windowed_from_env()
-            || !direct
             || exact_ink::device::d3d11::startup_watchdog::after_layout()
         {
             return Ok(None);
         }
-        exact_ink::device::d3d11::Startup::start(
-            exact_ink::device::direct_d3d11(device.as_deref()).unwrap(),
-        )
-        .map(Some)
+        exact_ink::device::d3d11::Startup::start(warp).map(Some)
     });
     let (hidden, preparing) = match launch {
         Ok(launch) => launch,
@@ -247,7 +244,7 @@ pub(super) fn run<D: DataSource + Default + 'static>(
     {
         std::thread::sleep(Duration::from_millis(200));
     }
-    let mut config = Config::from_env(plan, compat);
+    let mut config = Config::from_bake_with_services::<DEVELOPMENT>(plan, compat, services);
     config.preferences = Some(exact_runner::Preferences {
         screen_reader: if config.agent {
             exact_runner::ScreenReader::Unknown
@@ -267,7 +264,7 @@ pub(super) fn run<D: DataSource + Default + 'static>(
         eprintln!("exact-windows: EXACT_AGENT_WINDOW_TAP requires a measured window run");
         return 1;
     }
-    if !config.windowed() {
+    if DEVELOPMENT && !config.windowed() {
         crate::displays::install_headless();
         return crate::clipboard::run_headless::<D>(&mut config, started);
     }
@@ -323,7 +320,7 @@ pub(super) fn run<D: DataSource + Default + 'static>(
     let timers = crate::timers::Timers::new(move |fired| {
         let _ = timer_proxy.send_event(crate::accessibility::Event::Timer(fired));
     });
-    let mut state = App::<D> {
+    let state = App::<D> {
         service_causes: 0,
         proxy,
         accessibility: None,
@@ -331,11 +328,12 @@ pub(super) fn run<D: DataSource + Default + 'static>(
         title: WindowTitle::default(),
         min_size: (opening.min_width, opening.min_height),
         config,
+        painter,
         window: None,
         surface: None,
         preparing,
         jump_list_started: false,
-        direct,
+        direct: painter.direct_d3d11().is_some(),
         presenter: None,
         timers,
         started,
@@ -377,12 +375,16 @@ pub(super) fn run<D: DataSource + Default + 'static>(
         closing: false,
         keep_running: opening.keep_running,
         hidden,
+        pending_show: None,
         instance,
         cold_documents,
         tray: None,
         presents: Default::default(),
     };
-    if let Err(e) = event_loop.run_app(&mut state) {
+    let state = Rc::new(std::cell::RefCell::new(state));
+    let result = event_loop.run_app(&mut file_drop::Window::new(state.clone()));
+    let mut state = state.borrow_mut();
+    if let Err(e) = result {
         eprintln!("exact-windows: {e}");
         state.failed = true;
     }
@@ -677,8 +679,18 @@ impl<D: DataSource + Default + 'static> App<D> {
         if !p.last_frame_succeeded() {
             return Ok(());
         }
+        if let Some(pending) = self.pending_show.take() {
+            pending.reveal()?;
+        }
         if painting && handed {
             self.presents.drew(p, direct, self.started);
+            // Service work can make the next picture dirty before the idle lookup.
+            self.tooltip.update(
+                p,
+                window,
+                (self.pointer_inside && self.focused && self.buttons == 0).then_some(self.pointer),
+                false,
+            );
         }
         // A keyboard command can change the cursor while the mouse is still.
         // Re-resolve the painted hit after the frame, including unmounts and HUDs.
@@ -918,6 +930,7 @@ impl<D: DataSource + Default + 'static> ApplicationHandler<crate::accessibility:
             Window::default_attributes()
                 .with_no_redirection_bitmap(self.direct)
                 .with_visible(false)
+                .with_drag_and_drop(false)
                 .with_title(&self.name)
                 .with_window_icon(crate::icon::small())
                 .with_taskbar_icon(crate::icon::large())
@@ -972,6 +985,7 @@ impl<D: DataSource + Default + 'static> ApplicationHandler<crate::accessibility:
             &mut self.config,
             viewport,
             self.hidden,
+            self.painter,
             self.preparing.take(),
             self.direct && exact_ink::device::d3d11::startup_watchdog::after_layout(),
         );

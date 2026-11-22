@@ -111,6 +111,31 @@ pub struct File {
     pub deferred: Vec<crate::members::Deferred>,
 }
 impl File {
+    /// Keep the selected component and every component placed by its view.
+    pub fn retain_component_tree(&mut self, root: usize) {
+        let components: BTreeMap<_, _> = self
+            .components
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.name.as_str(), i))
+            .collect();
+        let mut reached = vec![false; self.components.len()];
+        let mut next = vec![root];
+        while let Some(i) = next.pop() {
+            if std::mem::replace(&mut reached[i], true) {
+                continue;
+            }
+            next.extend(
+                Node::walk(&self.components[i].view).filter_map(|node| match node {
+                    Node::Use { name, .. } => components.get(name.as_str()).copied(),
+                    _ => None,
+                }),
+            );
+        }
+        let mut keep = reached.into_iter();
+        self.components.retain(|_| keep.next().unwrap());
+    }
+
     /// Describe an unknown component and the merged declarations in source order.
     /// Only refusal paths call this; valid uses allocate no diagnostic list.
     pub fn unknown_component_message(&self, name: &str) -> String {
@@ -202,6 +227,10 @@ pub struct PropertyDecl {
     pub name: String,
     /// Predicates in source order.
     pub lines: Vec<PropertyLine>,
+    /// For `after` and `never refuses`, the expanded root's names of the
+    /// action named: the name as written, until the app resolves a child's
+    /// `Component.action` to the action of each of its instances.
+    pub actions: Vec<String>,
 }
 /// The observations a property quantifies over.
 #[derive(Debug, Clone, PartialEq)]
@@ -515,13 +544,20 @@ impl Component {
 pub struct Persist {
     /// The state's name.
     pub name: String,
+    /// Whether this value belongs to one window.
+    pub window: bool,
     /// Where `persist` is written.
     pub span: Span,
 }
 impl Component {
+    /// The state's storage declaration, when it has one.
+    pub fn persistence(&self, name: &str) -> Option<&Persist> {
+        self.persist.iter().find(|p| p.name == name)
+    }
+
     /// Whether the state `name` says `persist`.
     pub fn persists(&self, name: &str) -> bool {
-        self.persist.iter().any(|p| p.name == name)
+        self.persistence(name).is_some()
     }
 }
 /// `name = expr`.
@@ -881,6 +917,8 @@ pub enum Node {
         /// root's own elements are 0, a used component's are its use's;
         /// 0 as parsed. The development map and refusal diagnostics read it.
         instance: u32,
+        /// The local source step in the expansion, absent on a generated element.
+        place: Option<u32>,
     },
     /// `Name(arg=expr, …)`, with the nodes indented under it filling the
     /// component's `slot` (LLP 1017 P4b).

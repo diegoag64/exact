@@ -115,6 +115,46 @@ Inside the Exact checkout, for its own apps, the same commands are
 `cargo run -q -p contract -- <command> apps/<name>/app.contract …` and
 `bun host/web/dev.mjs --app <name>`. Run `bun install --frozen-lockfile` there once.
 
+To preview a component declared in your app's root, add a frame such as
+`frames/card.contract` inside the app. Its first component is the preview's
+root. It can pass props to the app's components and use the app's data handlers.
+
+```contract
+use Inspector from "../app.contract"
+component Frame
+  view
+    Inspector(title="Card")
+```
+
+Run `bun exact.mjs web` from the app directory and open
+`/__dev/frames/card/` on the dev server. Each `frames/<name>.contract` has
+its own URL. Editing a frame refreshes the pages whose compiled content
+changes. An error appears in the affected frame, which keeps its last good
+view while you edit.
+
+To supply sample data, place a TypeScript module named `card.fixture.mts`
+beside `card.contract`. Export an object keyed by the app's TypeScript
+source names. Each handler receives the same arguments as its handler in
+`app.ts`. This frame gives `frameData(title)` a fixed size.
+
+```ts
+import type { TypeScriptSources } from '../app.contract.d.ts';
+
+export default {
+  frameData: ([title]) => ({ title, width: 320, height: 200 }),
+} satisfies Partial<TypeScriptSources>;
+```
+
+The frame calls the fixture for `frameData` and the app for every other
+source. A fixture can return an empty list or throw to exercise an error
+state. Editing or removing the fixture updates its frame. The app's release
+build and other frames use their own handlers.
+
+From the Exact checkout, build the frame with
+`bun host/web-js/build.mjs /path/to/app --frame frames/card.contract --out /path/to/app/target/card`
+and serve the output directory. The app supplies the design, theme and declared
+data sources. A frame that needs navigation declares its own routes.
+
 Use `build --json` before and after the edit. It returns one JSON array with all
 independent diagnostics it can collect, capped at 20; success is `[]`. It is the
 whole output: stderr stays empty (but for a note while the compiler first
@@ -598,6 +638,14 @@ write wins. Calls in exclusive branches
 A derive is not mutable storage, an async effect, or a timer. Derive cycles are
 refused. Avoid unnecessary state that can be calculated from existing values.
 
+### Window state and shared settings
+
+Use `state conversation = "" persist window` for a selection that belongs to
+one window. The browser keeps it in `sessionStorage`. Reloading the tab restores
+it. An independent tab or a link with `target="_blank"` starts fresh. A named
+window with an opener initially receives a copy and then keeps its own values.
+AppKit and UIKit restore the values when the system restores the window or scene.
+
 ### A remembered setting: `persist`
 
 A root `state` that ends in `persist` is kept across launches (LLP 1116 D5), as
@@ -740,9 +788,11 @@ at bounded uses
 ([A feature's requests](#a-features-requests)). A child used under `for` owns row state keyed to that row's identity.
 Stable keys matter when content is inserted, removed, filtered, or reordered.
 A child's derive is compiled once per component use and evaluated at each read
-in that instance's frame. Non-atomic prop and inject arguments share that
-representation. These calculations use the reader's list and call budgets;
-a trap belongs to the reader. They are not cached. A root derive evaluates
+in that instance's frame. A computed prop or inject argument shares that
+representation. Each read uses the reader's list and call budgets and can
+trap there. A literal stays inline, so the web compiler can fold
+`size == "sm"` when a component takes the enum argument `size="sm"`.
+A root derive evaluates
 once per settlement, so put a calculation there when its result should be
 shared across readers. Action-body reads, action calls and `fn` calls still
 expand in place. The web build reports its entry's bytes and each component's
@@ -1278,10 +1328,12 @@ receive-only. See
 [the reference](reference.md#generate-typescript-data-source-types) for bounds and events.
 
 A large response needs a parse that yields. On native hosts each turn of an
-answer has 100 ms of its own (CPU) time: from its call, or from the `fetch` or
+answer has 100 ms of its own (CPU) time by default: from its call, or from the `fetch` or
 storage step it awaited, until it next awaits one. A turn over that is refused;
 a resource keeps its value and is asked again twice before it fails, so a parse
-that passes its tests on a 300 KB thread fails on a 1 MB one.
+that passes its tests on a 300 KB thread fails on a 1 MB one. For an indivisible
+call such as signing, `app.ts` can set one source’s budget with
+`export const turnBudgets = { signOrder: 400 }` (100 to 1000 ms).
 `await scheduler.yield()` (the web's [Prioritized Task
 Scheduling](https://wicg.github.io/scheduling-apis/#dom-scheduler-yield)) ends
 the turn, and the answer goes on in a new one with its own 100 ms. Yield every
@@ -1836,25 +1888,25 @@ fixture does next: `{"action": "expire-access", "profile": "spec"}`, and
 returns once the app's token request is held, and `release-token` lets it
 go), `deny-authorize`; `fixture.ts`'s `control` lists them all.
 
-The fixture app can exercise a signed-in screen with a fixed backend answer.
-`authorize` completes the nonce-bound code exchange. `reload` reopens the
-app with the session saved in this test's scratch store.
+To open a fresh test already signed in, configure the app's provider with the
+local fixture's `/p/spec` issuer. Give `signed-in` the provider's plain
+`secret.keep` name, its `clientId`, and the test person's `sub`. The fixture
+completes the code exchange before launch. The first data read, a token refresh
+and a relaunch all see the same person. Signing out clears the test's session.
 
 ```contract-test
-test "loads an authenticated screen from a saved OIDC session"
+test "opens the reader's profile"
+  signed-in "oauth.spec" {"clientId":"client-spec","sub":"reader-2","name":"Grace Hopper"}
   answer fetch "http://127.0.0.1:4400/p/spec/api/me" with 200 {"name":"Offline reader"}
-  request POST "/control" {"action":"reset"}
-  clock data
-  tap "sign-in"
-  authorize
-  clock data
-  expect text "status" == "Signed in"
-  expect text "name" == "Offline reader"
-  reload
-  clock data
   expect text "status" == "Signed in"
   expect text "name" == "Offline reader"
 ```
+
+`name` defaults to `sub`, and `email` defaults to the empty string. The
+fixture generates a bearer token. Give `token` a test value to choose the
+first bearer, for example `"token":"reader-2-test"`. The fixture refuses a
+value it already issued until reset. To exercise the sign-in button and the
+callback itself, start signed out, tap the button and use `authorize`.
 
 #### HTTPS callbacks
 
@@ -2268,15 +2320,22 @@ A literal `role` must name a concrete ARIA role, or it is refused.
 ([combobox recipe](recipes/combobox.md)); the web exposes it, and other hosts carry it
 without using it.
 
-HTML names Contract spells otherwise (the compiler names each): `div` is `column`,
-`row` or `view`; `span`, `p`, `strong`, `em`, `b` and `i` are `text`; `h1`–`h6` are
-headings, as written; `label` is `text` beside its field, which
-`aria-label` (or `aria-labelledby`) names; `img` is `image`; `a` is `link`; `ul`,
-`ol` and `li` are a `list` or a `column` of rows; `title` and `meta` are `head
-title=… description=…`; a `table` is `view display="grid"` with
-`grid-template-columns` (or a `column` of `row`s); there is no `form` (a field's
-Enter is its `submit`) and no `details` (keep `open` in state, show the body `if
-open`). A view chooses with `if`, as an action does; a count is
+Content pages can use `p`, `strong`, `em`, `blockquote`, `ul`, `ol` and `li`.
+The web emits the corresponding HTML elements in the built page and when the
+app updates it. A paragraph holds a string or text runs. Lists hold `li`
+elements, including items from a keyed `for`. Write `li "First"` for a simple
+item, or nest paragraphs and another list inside it. Use `list` for a scrolling
+app list. Tables and description lists also emit their HTML elements.
+
+Contract spells a few HTML names differently. Write `view` for a plain
+`div`, or `column` and `row` for flex layout. A plain `text` becomes a
+`div` on the web and a `span` inside another text. Write `h1` through `h6`
+for headings, `image` for `img`, and `link` for `a`. Give a field an
+`aria-label`, or use `aria-labelledby` with the ID of its visible label.
+Set the document title and description with `head title=… description=…`.
+A field's Enter runs its `submit` action. For a disclosure, keep `open` in
+state, show the body `if open`, and toggle it from a button.
+A view chooses with `if`, as an action does; a count is
 `xs.length`, never `count`, `len` or `.size`; a resource's placeholder is `else
 empty()` (`[]` for a list), never `else []`. A component
 call uses parentheses; a built-in element uses space-separated attributes.
@@ -2526,6 +2585,7 @@ control's insets/corners alone.
 On the Mac, an image-only `plain` or `borderless` button uses AppKit's push
 button height at its control size as its default minimum width and height.
 Authored dimensions and padding take precedence; its focus ring follows the image.
+In a window toolbar or route header, either style gives the toolbar item a borderless button.
 
 `pointer-events` takes `none` or `auto`. A disabled native button retains
 its authored colours; bind `opacity` for authored dimming. It can open a
@@ -3770,6 +3830,17 @@ creates it; an existing destination of the other kind is refused, as is a path t
 leads through a symbolic link. The result is a path, not an open handle, so a package
 opens or empties it promptly (LLP 1133.009 D10).
 
+### A package source on the web
+
+When a package has no web implementation, a source in its `exact.json` can
+still answer with `substitute.default`. An optional source can declare
+`"default": null` to answer `none`. A source that lists `"web"` in
+`substitute.unsupported` fails with `NotSupportedError` even if it has a default.
+
+For a status that stays readable, use `"targets": {"web": {"available": false}}`
+inside its `substitute`. The other fields keep their default values. List
+`"web"` in `unsupported` on the operations that require the missing platform feature.
+
 ### A package's native module, library and web assets
 
 A package fills the data module's one native module (`native.call` in `app.ts`) from the
@@ -4265,6 +4336,11 @@ main navigationKey=`${top(nav).id}` navigationBack="close" navigate=follow displ
   paints (on iOS only when `scripts/agent.mjs` runs alone: `exact.mjs` shows UIKit's
   bars); `--chrome platform` on `macos` shows the sidebar, and a tap naming a tab
   presses its row (`native: "sidebar-row"`).
+- For a footer pinned below the scrolling tabs, put the root tablist and a `footer`
+  together as the only children of a `nav` directly inside the navigation root. The Mac,
+  iPadOS 18 and later, and the wide web layout show the footer in the sidebar. It can
+  contain an account button or other controls. The bottom bar hides the footer on iPhone,
+  Android and the narrow web layout. An app-drawn tablist keeps its footer in the page.
 - On an iPad (iPadOS 18 and later) the same root tablist, placed as above, is UIKit's
   sidebar-adaptable tab bar (`UITabBarController.mode = .tabSidebar`): a sidebar of the
   tabs where the window is regular-width and wide enough (an iPad in landscape), the
@@ -4284,11 +4360,31 @@ main navigationKey=`${top(nav).id}` navigationBack="close" navigate=follow displ
   the other hosts keep it where it is written. A header field on a list is that list's
   filter; a search tab searches the app. `contract vocab search` has the details;
   Expo's `role="search"` trigger and SwiftUI's `Tab(role: .search)` are `rel="search"`.
-- A tab bar that minimizes as content scrolls (`tabBarMinimizeBehavior`) and an accessory
-  view above it (`bottomAccessory`, iOS 26) are not Contract words: unsaid, the bar is
-  UIKit's default, and an app that wants them sets them from the `tabs` hatch, which
-  hands it the `UITabBarController` (docs/reference.md, "Access hatches"). The routes
-  follow the safe area a minimizing bar changes.
+- **A mini player above the tab bar** (docs/recipes/mini-player.md):
+  `navigationTabAccessory="now-playing"` on the root tablist names an element, written
+  after every tab panel the tablist links (usually just before the tablist), that iOS 26
+  and later show as UIKit's tab bar accessory (`bottomAccessory`): a glass capsule on
+  every tab, on an iPhone above the bar and inline where the bar was while it hides, on
+  an iPad at the bottom of the page. UIKit places and sizes it (48 points high on an
+  iPhone 18 Pro with iOS 27), the element's box is UIKit's whatever `height` it says,
+  and the routes clear it. Show and remove it with `if` or `display`. The web, the Mac
+  and Android lay the element out where CSS puts it, above the tab strip; iOS 17 to 25,
+  which have no accessory, leave it there, hidden under the shown tab bar. Where the
+  compiler can prove it, a literal id that names nothing, or an element inside the
+  tablist, a tab panel, a route, a `list`, a popover or a `dialog`, a run of text or a
+  part of an `svg` or a `select`, is refused (`lower-tab-accessory`, for example
+  "`navigationTabAccessory="player"` names an element inside a tab panel, but the tab
+  bar's accessory is shared by every tab"); its message says what to change. On the
+  live tree, where the compiler cannot tell (an element written before a panel the
+  tablist links, in the `footer` the sidebar shows, or a radio or a tab of its group), a
+  development build on iOS 26 and later writes the reason to `logs` while Exact's own
+  tab container shows the tabs. To see it, drive iOS with `--chrome platform`.
+- A tab bar that minimizes as content scrolls (`tabBarMinimizeBehavior`) is not a
+  Contract word: unsaid, the bar is UIKit's default, and an app that wants it sets it
+  from the `tabs` hatch, which hands it the `UITabBarController` (docs/reference.md,
+  "Access hatches"). The routes follow the safe area a minimizing bar changes, and an
+  accessory goes inline beside the minimized bar. The hatch owns `bottomAccessory`
+  while Exact shows no accessory.
 - A box written beside the routes in the navigation root (a column the routes are offset
   past) shows on iOS as on the web: the native container that stands for the routes
   paints under a child no route's box meets, and UIKit lays the navigation bar's title
@@ -4312,6 +4408,11 @@ main navigationKey=`${top(nav).id}` navigationBack="close" navigate=follow displ
   detail the window's title and subtitle are the detail's, as in System Settings, and
   the list's heading stays over its rows; beside a sidebar (three columns) the list's
   heading is the title and the detail's stays in its pane, as in Mail.
+- In the Mac's list column, a sectioned list uses an inset AppKit table.
+  Each section header is a group row. A link in the section body selects its
+  row and opens the detail. The footer has no table row. When a virtualized
+  list repeats sections, AppKit can address every row while Exact keeps a
+  window of sections mounted.
 - On the Mac a window toolbar the app declares (`row role="toolbar"
   toolbarPlacement="window"` of action buttons and at most one heading) has Customize
   Toolbar when every button in it has an `id` of its own: the ids are the items'
@@ -5107,7 +5208,9 @@ skipped (except an id-less hit outside its named ancestor's box includes that
 ancestor once). `querySelectorAll("[data-paint~=\"accent\"]")` lists the own ids of
 mounted, displayed, non-inert nodes bearing the declared `data-paint` word in
 tree order. Covered routes and unselected tabs do not answer; a split list
-answers with its detail where the host presents it (the web at desktop widths).
+answers with its detail where the host shows them side by side (the web at desktop
+widths, and iOS where UIKit's split view shows both columns; over the detail only the
+list answers, LLP 1127 D8, and `state window.split` says which shows).
 Closed popovers and dialogs do not answer; open ones do. Point reads skip inert
 subtrees and use the presenter's placement for open top-layer content. Point reads
 also name the front modal dialog or presented route where its native backdrop accepts input,
@@ -6249,7 +6352,7 @@ application, so its local event monitors see them). Other carriers answer
 `delivery: "unsupported"` for forms they cannot carry; Firefox and WebKit carry
 clicks and wheels at a point, including wheels with modifiers. A word a form does
 not use is refused by name. `tap stage wheel 0 -20 modifiers Control`
-is a pinch's wheel; `tap world drop a.board` drags a file in (web, macOS). Plain canvas taps and held contacts are
+is a pinch's wheel; `tap world drop a.board` drags a file in (web, macOS, Windows). Plain canvas taps and held contacts are
 fingers, so their platform pointer identity and retained press history can differ
 from a mouse's; use the intended physical input when comparing game saves.
 
@@ -6382,6 +6485,8 @@ During a reorder `state.reorder` reads `{ item, from, to, before, phase,
 ending }`; a grouped grip also takes `type <grip> key Space` and the arrows. `clock +N` moves the virtual clock without
 waiting for a store's or the network's reply on real time (unless a timer fires
 first); its reply says what is still in flight (`inflight`, on every host), and `clock settle` lands it.
+On the web JS target, a single jump can deliver several timer-driven DOM edits together
+to a `MutationObserver`. To observe an intermediate value, advance to that time in a separate clock step.
 A request the server holds, marked `exactHeld: true` (a long poll, LLP 1016.000 D9), is the exception: no
 clock waits on it, neither a jump nor `clock settle` nor `clock data`, and each of their replies names it
 (`held`, `heldTargets`; `state.pending` marks it `held: true`). Its answer must be safe to supersede.
@@ -6944,9 +7049,9 @@ A runtime choice with a bundled-font literal is refused so it cannot silently
 select an installed face with the same name; write bundled choices as literals.
 
 A `text` with `selectionchange=act` hears the reader's real text selection
-on the web, macOS, iOS and Android. `action act(s: Selection)` gets `s.text`, `s.start` and
+on the web, macOS, iOS, Android and Linux. `action act(s: Selection)` gets `s.text`, `s.start` and
 `s.end` in the node's own text ("" at 0, 0 when nothing there is selected).
-On web and macOS, `s.rects` is a list of `Geometry` snapshots for the selected
+On web, macOS and Linux, `s.rects` is a list of `Geometry` snapshots for the selected
 fragments in viewport space. It is empty when cleared. iOS and Android report an empty list.
 `removeAllRanges()` clears the reader selection, and
 `setSelectionRange(id, start, end[, direction])` selects a `text` on web and
@@ -7268,8 +7373,10 @@ selection clears the selection, as in a text view. On Android a long press on
 `user-select="text"` selects a word. The handles adjust the selection within
 one paragraph, and the floating toolbar offers Copy, Share and Select all.
 An inline or enclosing `all` selects its text as a unit. Dragging the paragraph
-away from a handle scrolls its container. Linux, Windows and tvOS have no text
-selection, so `text` and `all` change nothing there. `contain` is refused by
+away from a handle scrolls its container. On Linux and Windows, drag across opted-in text,
+double-click a word, or triple-click a paragraph. One click selects a run marked `all`.
+Ctrl+C copies the visible text when the host supplies a clipboard.
+On tvOS, `text` and `all` leave their content unselected. `contain` is refused by
 name: no native host has it. These rows take literals
 or choices of literals, so unsupported runtime values cannot bypass the check.
 
@@ -7693,7 +7800,9 @@ descendant's over its ancestor's. A type only narrows the manifest's
 an inherited one (`color`, fonts, `fill`…); `inherit` on a row CSS does not
 inherit is refused. `order` places flex and grid items. An image's accessible
 name is `alt` or `aria-label`; `enterkeyhint` labels a soft keyboard's enter
-key on the web and iOS. A bare number on a length row is pixels (except
+key on the web, iOS and Android; in a `textarea` that key is Enter, a new line
+unless a `key` handler prevents it (on Android only where the hint names an action:
+a textarea with no hint, or `enter`, breaks the line itself). A bare number on a length row is pixels (except
 `line-height`, where it is CSS's multiple of the font size), and the row takes
 CSS's spellings too (`font-size="14px"`, `letter-spacing="-0.5px"`,
 `padding="1.5rem"`; `stroke-width="2px"` but no `rem` there), bound or literal

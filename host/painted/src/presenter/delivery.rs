@@ -256,8 +256,14 @@ impl<D: DataSource> Presenter<D> {
 
     /// First pixel (LLP 1026 D11): the selection that booted is good.
     pub fn first_pixel(&mut self) {
+        // A snapshot can succeed while a direct window shows an older picture.
+        #[cfg(windows)]
+        if (self.surfaces.direct_window.as_ref()).is_some_and(|d| !d.presented) {
+            return;
+        }
         if self.display.blocked()
             || self.dirty
+            || self.picture_dirty
             || !self.last_frame_succeeded
             || self.activation_failed.is_some()
         {
@@ -354,7 +360,7 @@ impl<D: DataSource> Presenter<D> {
     /// already running.
     pub fn check_update(&mut self) -> bool {
         match &self.updates {
-            Some(u) => u.check(),
+            Some(u) => u.check(crate::wake::notify),
             None => false,
         }
     }
@@ -577,7 +583,7 @@ impl<D: DataSource> Presenter<D> {
         // begun to go out; the rest never left (LLP 1016.000 D10).
         self.executor.forget(|_| false);
         let started = self.executor.let_go_started(|_| false);
-        self.executor = self.host.executor();
+        self.executor = self.host.executor_with(self.start_executor);
         self.host.runner_mut().uploads_started(&started);
         self.replaced();
         if self.display.new_session() {
@@ -768,7 +774,7 @@ component App
         fn fd(&self) -> std::os::unix::io::RawFd {
             -1
         }
-        fn check(&self) -> bool {
+        fn check(&self, _: fn()) -> bool {
             false
         }
         fn take_line(&mut self) -> Option<String> {

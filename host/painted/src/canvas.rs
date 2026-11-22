@@ -231,6 +231,9 @@ pub mod legacy;
 #[cfg(target_os = "android")]
 #[path = "canvas/tls.rs"]
 pub mod tls;
+#[cfg(any(target_os = "android", test))]
+#[path = "canvas/tracks.rs"]
+pub(crate) mod tracks;
 #[cfg(target_os = "android")]
 pub use jni_sys;
 #[path = "canvas/filter.rs"]
@@ -1069,10 +1072,9 @@ pub struct CanvasHost<D: DataSource> {
     settling: bool,
     /// A touch began or ended: paint the next frame.
     force: bool,
-    /// A scroll came since the last collection pass: the frame drawing it
-    /// leaves the pass for [`CanvasHost::refine`], after the frame. Only once
-    /// the reader calls `refine` (`prefetching`).
-    scrolled: bool,
+    /// Scroll deferral state across `frame`, `requests`, `refine`, and input
+    /// (`scroll::ScrollHold`). Only active once the reader calls `refine` (`prefetching`).
+    scroll_hold: scroll::ScrollHold,
     prefetching: bool,
     /// The kernel epoch a collection pass left, when nothing else changed
     /// since the paint: rows mounted or retired out of view, which the next
@@ -1104,11 +1106,10 @@ pub struct CanvasHost<D: DataSource> {
     borrowed: bool,
     /// The frame that makes the canvases a booting thread left is owed.
     owed_surfaces: bool,
-    /// The monotonic clock at `started` (ns), sent once (`CLOCK`), and each
-    /// live layer's keyframes as last sent (`TRACKS`).
+    /// The monotonic clock at `started` (ns), and what the reader was sent
+    /// of it and of each live layer's keyframes.
     origin_ns: i64,
-    clock_sent: bool,
-    tracks: HashMap<u32, (layer::Basis, Vec<u32>)>,
+    tracks: tracks::Tracks,
     /// The scroller [`CanvasHost::scroll`] moves, and a finger last did.
     feed: Option<ViewId>,
     /// Whether the windows' lead is back after the first frame (and after
@@ -1124,7 +1125,6 @@ pub struct CanvasHost<D: DataSource> {
     /// A touch came: until its frame is out, collection passes build only
     /// the rows that show (a slice of 0); the lead follows that frame.
     responding: bool,
-    tracks_epoch: u64,
     /// The reader's window and what it was last told to draw around the page.
     shell: device::Shell,
     /// Pictures the reader will report presented (LLP 1003.001 D9), by token.
@@ -1150,6 +1150,11 @@ const MOVES_MOUNTED: u32 = 6;
 
 #[cfg(target_os = "android")]
 impl<D: DataSource + Default> CanvasHost<D> {
+    /// End any deferred scroll turn so non-scroll input pumps and tells the shell.
+    pub(super) fn end_scroll(&mut self) {
+        self.scroll_hold.end();
+    }
+
     /// One turn: the presenter's work, then a recording when anything
     /// changed. `Some` is the new op stream (valid until the next call).
     pub fn frame(&mut self, vsync: bool) -> Option<Vec<u32>> {
@@ -1163,7 +1168,7 @@ impl<D: DataSource + Default> CanvasHost<D> {
         let now = self.now();
         let p = &mut self.p;
         let _frame = Section::begin(c"exact frame");
-        p.hold_collections(self.scrolled);
+        p.hold_collections(self.scroll_hold.holding_collections());
         let frame = self.frame_held(now, vsync);
         self.p.hold_collections(false);
         if std::mem::take(&mut self.responding) {
@@ -1175,7 +1180,7 @@ impl<D: DataSource + Default> CanvasHost<D> {
     fn frame_held(&mut self, now: f64, vsync: bool) -> Option<Vec<u32>> {
         // A frame a scroll step asks for: replies and pictures arrive through
         // [`CanvasHost::poll`] when their fds wake, so this one skips them.
-        let quick = self.scrolled;
+        let quick = self.scroll_hold.quick();
         let p = &mut self.p;
         p.tick_development(); // a quick frame too: a due dev poll waits on none
         if !quick {
@@ -1226,7 +1231,7 @@ impl<D: DataSource + Default> CanvasHost<D> {
                 self.owed_surfaces = true;
             } else {
                 self.owed_surfaces = false;
-                if !self.scrolled {
+                if !quick {
                     self.p.sync_surfaces();
                 }
                 self.surfaces = self.p.render_surfaces(now);
@@ -1238,8 +1243,8 @@ impl<D: DataSource + Default> CanvasHost<D> {
             // A play that changed since the last stream (a row that came
             // into view starts its animations): its layer's tracks go with
             // the move, where the reader takes them there.
-            if self.move_tracks && self.p.host().lowered_epoch() != self.tracks_epoch {
-                self.layer_tracks(&mut shift);
+            if self.move_tracks && self.p.host().lowered_epoch() != self.tracks.epoch {
+                self.tracks.send(&self.p, self.origin_ns, &mut shift);
             }
             return Some(shift);
         }
@@ -1278,62 +1283,14 @@ impl<D: DataSource + Default> CanvasHost<D> {
         self.force = false;
         self.quiet = None;
         let mut ops = FINISHED.with(|f| f.borrow_mut().take())?;
-        self.layer_tracks(&mut ops);
+        self.tracks.send(&self.p, self.origin_ns, &mut ops);
         Some(ops)
-    }
-
-    /// After a paint: each live layer's keyframes, where they changed, and
-    /// the clock they run on, once (`crate::host::lower`).
-    fn layer_tracks(&mut self, ops: &mut Vec<u32>) {
-        let alive = layer::ALIVE.with(|a| a.borrow().clone());
-        if alive.is_empty() && self.tracks.is_empty() {
-            return;
-        }
-        if !self.clock_sent {
-            self.clock_sent = true;
-            ops.extend([
-                layer::CLOCK,
-                self.origin_ns as u32,
-                (self.origin_ns >> 32) as u32,
-            ]);
-        }
-        let ids: std::collections::HashSet<u32> = alive.iter().map(|a| a.0).collect();
-        self.tracks.retain(|id, _| ids.contains(id));
-        // Plays change only in a sync: until one, only new layers' tracks;
-        // after one, the layers of the nodes it changed.
-        let epoch = self.p.host().lowered_epoch();
-        let since = self.tracks_epoch;
-        self.tracks_epoch = epoch;
-        for (id, key, basis) in alive {
-            let cached = self.tracks.get(&id);
-            let words = if crate::host::lower::is_spinner(key) {
-                self.p.host().spinner_tracks()
-            } else {
-                let key = exact_kernel::motion::node_key(key);
-                if cached.is_some_and(|(old, _)| *old == basis)
-                    && (epoch == since || !self.p.host().lowered_changed_after(key, since))
-                {
-                    continue;
-                }
-                let base = basis.base;
-                let mut p = crate::paint::Presented::IDENTITY;
-                p.translate = (base[0], base[1]);
-                p.scale = base[2];
-                p.rotate = base[3];
-                p.opacity = base[4];
-                self.p.host().layer_tracks(key, &p, basis.reference)
-            };
-            if cached.is_none_or(|(_, old)| *old != words) {
-                ops.extend([layer::TRACKS, id, words.len() as u32]);
-                ops.extend(&words);
-            }
-            self.tracks.insert(id, (basis, words));
-        }
     }
 
     /// Drain the wakes (executor replies, decoded images, the update store's
     /// line) without painting; whether a frame is now wanted.
     pub fn poll(&mut self) -> bool {
+        self.scroll_hold.poll();
         let now = self.now();
         if let Some(e) = self.p.pump(now) {
             eprintln!("exact: {e}");

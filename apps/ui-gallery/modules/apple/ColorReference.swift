@@ -14,7 +14,8 @@ final class ColorReference: ExactModule {
             return ["available": false]
         case "sidebarBarHeight":
             #if os(iOS)
-            return ["height": Double(split?.sidebarBarHeight ?? 0)]
+            sidebarBar.update()
+            return ["height": Double(sidebarBar.height)]
             #else
             return ["height": 0]
             #endif
@@ -24,9 +25,19 @@ final class ColorReference: ExactModule {
     }
 
     #if os(iOS)
-    /// What the `sidebarBarHeight` answer watches: said whenever the split's `sidebarBarHeight` changes
-    static let sidebarBarTopic = "gallery-sidebar-bar"
-    private weak var split: GallerySplit?
+    private lazy var sidebarBar: SidebarBarHeight = {
+        let height = SidebarBarHeight()
+        height.changed = { [context] in context.changed(SidebarBarHeight.topic) }
+        return height
+    }()
+
+    /// Measures the list's bar again, and says so when its height changed.
+    private func updateSidebarBar() {
+        if sidebarBar.update() { context.changed(SidebarBarHeight.topic) }
+    }
+
+    override func window(_ window: ExactWindow) { updateSidebarBar() }
+
     private let sharedBackgrounds = NSMapTable<UIViewController, NSNumber>.weakToStrongObjects()
 
     /// Whether the gallery draws the header's material itself, before iOS 26, where the bar draws one of
@@ -38,14 +49,9 @@ final class ColorReference: ExactModule {
         return true
     }
 
-    override func tabContainer(_ contents: ExactTabContents) -> UIViewController? {
-        let split = GallerySplit(contents)
-        split.sidebarBarHeightChanged = { [context] in context.changed(Self.sidebarBarTopic) }
-        self.split = split
-        return split
-    }
-
     override func route(_ route: ExactRoute) {
+        sidebarBar.follow(route.controller)
+        updateSidebarBar()
         let shared = route.element("range-bar") != nil
         if Self.sharesMaterial, route.isNew || sharedBackgrounds.object(forKey: route.controller)?.boolValue != shared {
             let appearance = UINavigationBarAppearance()

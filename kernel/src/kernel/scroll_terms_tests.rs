@@ -406,6 +406,35 @@ fn a_scroller_inside_one_that_takes_the_keyboard_takes_none_of_it() {
         (inner.reach, inner.reserved, inner.keyboard),
         ([0.0; 4], [None; 4], [0.0; 4])
     );
+    // The band reaches 4, which takes it, so it reaches 6 on no edge
+    assert_eq!(terms(&k, 4).band_reaches, [true; 4]);
+    assert_eq!(inner.band_reaches, [false; 4]);
+}
+
+#[test]
+fn a_scroller_passes_the_band_on_an_edge_it_ignores_where_it_reaches_the_area() {
+    // 4 ignores the container region on the top, where its box reaches the band, so the band
+    // reaches 6, inside it, there, and on the other edges 4 takes it
+    let k = owner_with(
+        Some(BAND),
+        &[],
+        &[(
+            4,
+            scroller(&[
+                (StyleId::Display, "flex"),
+                (StyleId::FlexDirection, "column"),
+                (StyleId::SafeAreaIgnore, "container top"),
+            ]),
+        )],
+        &[(
+            4,
+            6,
+            scroller(&[(StyleId::Height, "100"), (StyleId::FlexGrow, "0")]),
+        )],
+        &[],
+        None,
+    );
+    assert_eq!(terms(&k, 6).band_reaches, [true, false, false, false]);
 }
 
 #[test]
@@ -443,8 +472,8 @@ fn with_no_band_a_scroller_reaches_nothing() {
         4,
     );
     assert_eq!(
-        (t.reach, t.reserved, t.container),
-        ([0.0; 4], [None; 4], [true; 4])
+        (t.reach, t.reserved, t.band_reaches, t.container),
+        ([0.0; 4], [None; 4], [false; 4], [true; 4])
     );
 }
 
@@ -526,4 +555,226 @@ fn an_owners_root_that_scrolls_and_takes_its_bottom_keeps_its_own_inset_there() 
         (t.reach[2], t.reserved[2], t.container[2]),
         (60.0, Some(60.0), true)
     );
+}
+
+/// `-exact-safe-area-extend` naming `edges`, with `bounds` rows where given.
+fn extend(edges: &'static str, bounds: &[(StyleId, &'static str)]) -> Vec<(StyleId, &'static str)> {
+    let mut all = vec![(StyleId::Height, "200"), (StyleId::SafeAreaExtend, edges)];
+    all.extend_from_slice(bounds);
+    all
+}
+
+fn extension(k: &Kernel, id: ViewId) -> Option<[f32; 4]> {
+    k.extension(k.arena.key(slot(k, id)))
+}
+
+#[test]
+fn an_extension_on_the_band_goes_as_far_as_reach_would_whatever_reach_says() {
+    // 4, a plain box with reach `none`, at the band's inner side: `auto` on the top is the band's
+    // 47, reach's distance there, and nothing on the edges it does not extend on
+    let k = holding(&[(4, extend("top", &reach("none")))], None);
+    assert_eq!(frame(&k, 4).1, 47.0);
+    assert_eq!(extension(&k, 4), Some([47.0, 0.0, 0.0, 0.0]));
+}
+
+#[test]
+fn an_extension_clear_of_the_band_reaches_nothing_by_default_and_a_length_stands() {
+    // 3, 100 tall, puts 4 100 below the band's inner side: `auto` is 0 there, a length is given
+    let gap = (3, vec![(StyleId::Height, "100")]);
+    let k = holding(&[gap.clone(), (4, extend("top", &[]))], None);
+    assert_eq!(extension(&k, 4), Some([0.0; 4]));
+    let k = holding(
+        &[
+            gap,
+            (
+                4,
+                extend("top", &[(StyleId::SafeAreaExtendBoundsTop, "20")]),
+            ),
+        ],
+        None,
+    );
+    assert_eq!(extension(&k, 4), Some([20.0, 0.0, 0.0, 0.0]));
+}
+
+#[test]
+fn an_extension_with_no_band_extends_a_length_and_nothing_by_auto() {
+    let rows = extend("top bottom", &[(StyleId::SafeAreaExtendBoundsBottom, "12")]);
+    let k = owner_with(None, &[], &[(4, rows)], &[], &[], None);
+    assert_eq!(extension(&k, 4), Some([0.0, 0.0, 12.0, 0.0]));
+}
+
+#[test]
+fn an_extension_stops_where_reach_stops() {
+    // 6 fills the content root and holds 4 at its top: clipping on both axes, it keeps 4's
+    // extension from the band as it keeps reach; not clipping, the extension goes to it
+    for (rows, top) in [
+        (vec![], 47.0),
+        (
+            vec![
+                (StyleId::OverflowX, "hidden"),
+                (StyleId::OverflowY, "hidden"),
+            ],
+            0.0,
+        ),
+    ] {
+        let k = owner_with(
+            Some(BAND),
+            &[],
+            &[(6, column(&rows))],
+            &[(6, 4, extend("top", &[]))],
+            &[],
+            None,
+        );
+        assert_eq!(extension(&k, 4).map(|e| e[0]), Some(top), "{rows:?}");
+    }
+}
+
+#[test]
+fn an_extensions_start_and_end_follow_the_boxs_direction() {
+    let band = [47.0, 20.0, 34.0, 30.0];
+    let with = |edge, direction| {
+        let mut rows = extend(edge, &[]);
+        rows.push((StyleId::Direction, direction));
+        let k = owner_with(Some(band), &[], &[(4, rows)], &[], &[], None);
+        extension(&k, 4).unwrap()
+    };
+    assert_eq!(with("start", "ltr"), [0.0, 0.0, 0.0, 30.0]);
+    assert_eq!(with("start", "rtl"), [0.0, 20.0, 0.0, 0.0]);
+    assert_eq!(with("end", "ltr"), [0.0, 20.0, 0.0, 0.0]);
+    assert_eq!(with("end", "rtl"), [0.0, 0.0, 0.0, 30.0]);
+}
+
+#[test]
+fn an_extensions_bounds_count_only_on_its_edges_and_never_below_zero() {
+    // A bound on an edge the box does not extend on does nothing; a calculation below 0 is 0
+    let rows = extend(
+        "top",
+        &[
+            (StyleId::SafeAreaExtendBoundsTop, "calc(10px - 30px)"),
+            (StyleId::SafeAreaExtendBoundsBottom, "12"),
+        ],
+    );
+    let k = holding(&[(4, rows)], None);
+    assert_eq!(extension(&k, 4), Some([0.0; 4]));
+}
+
+#[test]
+fn a_box_that_extends_nothing_has_no_extension() {
+    let k = holding(&[(4, vec![(StyleId::Height, "200")])], None);
+    assert_eq!(extension(&k, 4), None);
+}
+
+#[test]
+fn an_owners_root_that_does_not_scroll_and_reserves_lies_clear_of_the_band() {
+    // The root reserves 12 more on its top but does not scroll: laid out below its reservation,
+    // its border edge is clear of the band, so `auto` is 0; only a root that scrolls takes what
+    // its host clears as its area, as reach's terms do
+    let k = owner_with(
+        Some(BAND),
+        &[
+            (StyleId::SafeAreaExtend, "top"),
+            (StyleId::AdditionalSafeAreaTop, "12"),
+        ],
+        &[(4, vec![(StyleId::Height, "100")])],
+        &[],
+        &[],
+        None,
+    );
+    assert_eq!(frame(&k, 4).1, 59.0);
+    assert_eq!(extension(&k, 2).map(|e| e[0]), Some(0.0));
+}
+
+#[test]
+fn an_extensions_bound_resolves_when_read_and_a_fallback_to_auto_is_auto() {
+    // A fallback to `auto` goes as far as reach would, the band's 47
+    let rows = extend(
+        "top",
+        &[(
+            StyleId::SafeAreaExtendBoundsTop,
+            "env(titlebar-area-width, auto)",
+        )],
+    );
+    assert_eq!(
+        extension(&holding(&[(4, rows)], None), 4),
+        Some([47.0, 0.0, 0.0, 0.0])
+    );
+    // A calculation that resolves only when read, through `env()`, counts as 0 below 0
+    let at = |bound| {
+        let rows = extend("top", &[(StyleId::SafeAreaExtendBoundsTop, bound)]);
+        extension(&holding(&[(4, rows)], None), 4).unwrap()[0]
+    };
+    assert_eq!(at("calc(env(safe-area-inset-top, 0px) + 10px)"), 10.0);
+    assert_eq!(at("calc(env(safe-area-inset-top, 0px) - 60px)"), 0.0);
+}
+
+#[test]
+fn reach_and_extension_touch_within_half_a_device_pixel_with_no_solve_and_not_where_no_area_is() {
+    // 3, 0.25 tall, puts 4 a quarter point inside the band's inner side, within half a point at 1×,
+    // in a layout no observation reads: it touches; on the sides, where no band is, it reaches nothing
+    let k = holding(
+        &[
+            (3, vec![(StyleId::Height, "0.25")]),
+            (4, extend("top left", &[])),
+        ],
+        None,
+    );
+    assert_eq!(extension(&k, 4), Some([47.25, 0.0, 0.0, 0.0]));
+}
+
+#[test]
+fn a_reservation_joins_the_band_within_half_a_device_pixel_with_no_solve() {
+    // 6, a quarter point below the band's inner side, adds 20 on its top and holds 4 below it: in a
+    // layout no observation reads, its padding edge still joins the band, so 4 reaches and extends
+    // to the band's outer side, 67.25 above its own edge
+    let rows = vec![
+        (StyleId::AdditionalSafeAreaTop, "20"),
+        (StyleId::Height, "300"),
+        (StyleId::Display, "flex"),
+        (StyleId::FlexDirection, "column"),
+    ];
+    let k = owner_with(
+        Some(BAND),
+        &[],
+        &[(3, vec![(StyleId::Height, "0.25")]), (6, rows)],
+        &[(6, 4, scroller(&[(StyleId::SafeAreaExtend, "top")]))],
+        &[],
+        None,
+    );
+    assert_eq!(frame(&k, 4).1, 67.25);
+    assert_eq!(terms(&k, 4).reach[0], 67.25);
+    assert_eq!(extension(&k, 4).map(|e| e[0]), Some(67.25));
+}
+
+#[test]
+fn an_edge_a_scroller_above_takes_gives_no_reach_and_no_extension_within_half_a_pixel() {
+    // The root ignores the container region on its top, so 6, a scroller filling it, lies at the
+    // space's top edge and takes the band there; 4, a scroller inside it a quarter point below its
+    // padding edge, finds no area there: neither reach nor extension
+    let nested = [
+        (6, 3, vec![(StyleId::Height, "0.25")]),
+        (6, 4, scroller(&[(StyleId::SafeAreaExtend, "top")])),
+    ];
+    let root = [(StyleId::SafeAreaIgnore, "container top")];
+    let k = owner_with(Some(BAND), &root, &[(6, scroller(&[]))], &nested, &[], None);
+    assert_eq!(frame(&k, 4).1, 0.25);
+    assert_eq!(terms(&k, 4).reach[0], 0.0);
+    assert_eq!(extension(&k, 4).map(|e| e[0]), Some(0.0));
+}
+
+#[test]
+fn an_extensions_bound_reads_the_boxs_own_containers() {
+    // The root is laid out in its 763-point content root, so its `100cqh` is 763 and the bound
+    // 763 − 800 counts as 0; read against the 844-point block outside it would be 44
+    let k = owner_with(
+        Some(BAND),
+        &[
+            (StyleId::SafeAreaExtend, "top"),
+            (StyleId::SafeAreaExtendBoundsTop, "calc(100cqh - 800px)"),
+        ],
+        &[(4, vec![(StyleId::Height, "100")])],
+        &[],
+        &[],
+        None,
+    );
+    assert_eq!(extension(&k, 2).map(|e| e[0]), Some(0.0));
 }

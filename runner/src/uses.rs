@@ -253,11 +253,14 @@ pub enum Capability {
     /// top-layer stack, which a sheet route shares, presents a `dialog` in its
     /// core ([`Uses::MAC_CORE`]).
     Dialogs,
+    /// A drag out of the app (LLP 1094.000 D3): a node with `draggable`,
+    /// whose host lifts it to the system with its data.
+    DragOut,
 }
 
 impl Capability {
     /// Every capability, in bit order.
-    pub const ALL: [Capability; 61] = [
+    pub const ALL: [Capability; 62] = [
         Capability::Markdown,
         Capability::Motion,
         Capability::Collections,
@@ -319,6 +322,7 @@ impl Capability {
         Capability::Widgets,
         Capability::ContentIndex,
         Capability::Dialogs,
+        Capability::DragOut,
     ];
 
     /// The name an entry, a refusal and a report use.
@@ -385,6 +389,7 @@ impl Capability {
             Capability::Widgets => "widgets",
             Capability::ContentIndex => "content_index",
             Capability::Dialogs => "dialogs",
+            Capability::DragOut => "drag_out",
         }
     }
 
@@ -540,7 +545,7 @@ pub fn uses(plan: &Plan) -> Uses {
     // declared source its network (LLP 1162.001 D3).
     if plan.resources.iter().any(|r| r.reader || r.keep)
         || !plan.fetches.is_empty()
-        || plan.slots.iter().any(|s| s.persist)
+        || plan.slots.iter().any(|s| s.is_persisted())
     {
         uses = uses.with(Capability::Io);
     }
@@ -572,6 +577,9 @@ pub fn uses(plan: &Plan) -> Uses {
                 Some(PropId::HeightDragFor | PropId::TransformDragFor | PropId::ReorderFor) => {
                     uses = uses.with(Capability::Motion).with(Capability::Drag);
                 }
+                // A drag's data is admitted for its host whether or not the
+                // node drags now, and `draggable=false` is the web's too.
+                Some(PropId::Draggable) => uses = uses.with(Capability::DragOut),
                 // A shared element flies between its two places (LLP 1013.000).
                 Some(PropId::SharedElement) => uses = uses.with(Capability::Transitions),
                 Some(PropId::Virtualized)
@@ -869,19 +877,16 @@ pub fn uses_picture_in_picture(plan: &Plan) -> bool {
     runs_command(plan, &["requestPictureInPicture"])
 }
 
-/// Whether an image's, a media element's or a frame's source can be remote:
-/// an `http:` or `https:` literal, or one computed at run time, which this
-/// cannot read. The Mac App Store sandbox loads such a source only with
-/// `network.client` (LLP 1030.005 D2).
+/// A remote or computed image, media source, video poster or iframe URL
+/// requires the Mac App Store sandbox's `network.client` (LLP 1030.005 D2).
 pub fn sources_can_be_remote(plan: &Plan) -> bool {
     plan.bindings.iter().any(|binding| {
         binding.kind == BindingKind::Prop
             && matches!(
                 PropId::from_wire(binding.id),
-                Some(PropId::Src | PropId::ImageSource)
+                Some(PropId::Src | PropId::ImageSource | PropId::Poster)
             )
-            && constant_str(plan, plan.code(binding.expr))
-                .is_none_or(|src| src.starts_with("http:") || src.starts_with("https:"))
+            && constant_str(plan, plan.code(binding.expr)).is_none_or(exact_plan::has_http_scheme)
     })
 }
 
@@ -961,7 +966,7 @@ pub(super) fn decoration_rows(
     )
 }
 
-fn constant_str<'a>(plan: &'a Plan, code: &[u8]) -> Option<&'a str> {
+pub(crate) fn constant_str<'a>(plan: &'a Plan, code: &[u8]) -> Option<&'a str> {
     match plan.read_code(code).0 {
         [op, a, b, c, d, ret] if *op == Opcode::Str as u8 && *ret == Opcode::Return as u8 => {
             let id = u32::from_le_bytes([*a, *b, *c, *d]);
@@ -1006,8 +1011,9 @@ mod grant_tests {
 
     #[test]
     fn persisted_slots_link_storage_without_resources() {
+        use exact_plan::PersistScope;
         use exact_plan::{asm::Asm, builder::PlanBuilder, TypeKind};
-        for persist in [false, true] {
+        for persist in [PersistScope::None, PersistScope::App, PersistScope::Window] {
             let mut b = PlanBuilder::new(exact_kernel::SCHEMA_DIGEST, 1);
             let boolean = b.primitive(TypeKind::Bool);
             let mut initial = Asm::new();
@@ -1026,7 +1032,7 @@ mod grant_tests {
             );
             assert_eq!(
                 super::uses(&b.finish().unwrap()).has(Capability::Io),
-                persist
+                persist != PersistScope::None
             );
         }
     }

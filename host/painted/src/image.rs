@@ -34,6 +34,8 @@ pub(crate) fn is_symbol(source: &str) -> bool {
 #[cfg(test)]
 #[path = "image/allocation_tests.rs"]
 mod allocation_tests;
+#[cfg(test)]
+pub(crate) use allocation_tests::measure_allocations;
 #[path = "image/assets.rs"]
 mod assets;
 #[path = "image/bitmap.rs"]
@@ -51,6 +53,9 @@ mod jpeg_decode;
 #[path = "image/package.rs"]
 mod package;
 pub(crate) mod sampling;
+#[cfg(windows)]
+#[path = "image/windows_bitmap.rs"]
+mod windows_bitmap;
 pub use package::Ask as PackageAsk;
 #[path = "image/png.rs"]
 mod png_decode;
@@ -277,6 +282,9 @@ impl Images {
     }
     pub(crate) fn with_assets(assets: Assets) -> Self {
         Self::make(assets, Backend::new())
+    }
+    pub(crate) fn local(assets: Assets) -> Self {
+        Self::make(assets, Backend::local())
     }
     fn make(assets: Assets, backend: Arc<Backend>) -> Self {
         Self {
@@ -757,7 +765,7 @@ impl Images {
                     if let Some(after) = (view.on_screen
                         && view.retry_at.is_none()
                         && view.retries < RETRY_AFTER.len()
-                        && remote::is_remote(&view.source))
+                        && exact_plan::has_http_scheme(&view.source))
                     .then(|| self.backend.transient(source))
                     .flatten()
                     {
@@ -772,8 +780,8 @@ impl Images {
                     // Its `error`, once its failure is final: at once if asking
                     // again cannot mend it; else once a showing's retries are
                     // spent on screen (off screen it waits until it has shown).
-                    let transient =
-                        remote::is_remote(&view.source) && self.backend.transient(source).is_some();
+                    let transient = exact_plan::has_http_scheme(&view.source)
+                        && self.backend.transient(source).is_some();
                     let spent = view.on_screen
                         && view.retry_at.is_none()
                         && view.retries >= RETRY_AFTER.len();
@@ -980,6 +988,11 @@ impl Images {
             .collect();
         self.natural(reports)
     }
+    /// Whether view `id`'s picture is asked for.
+    #[cfg(test)]
+    pub(crate) fn wanted(&self, id: ViewId) -> bool {
+        self.views.get(&id).is_some_and(|view| view.visible)
+    }
     /// Which assignment of its source view `id` shows ([`LoadEvent`]).
     pub(crate) fn assignment(&self, id: ViewId) -> Option<u64> {
         self.views.get(&id).map(|view| view.assignment)
@@ -1027,7 +1040,9 @@ impl Images {
     pub fn retry_due_in(&self) -> Option<Duration> {
         let now = Instant::now();
         (self.views.values())
-            .filter(|v| v.on_screen && v.source_id.is_some() && remote::is_remote(&v.source))
+            .filter(|v| {
+                v.on_screen && v.source_id.is_some() && exact_plan::has_http_scheme(&v.source)
+            })
             .filter_map(|v| v.retry_at)
             .min()
             .map(|at| at.saturating_duration_since(now))
@@ -1052,7 +1067,7 @@ impl Images {
                 v.source.is_empty()
                     || is_symbol(&v.source)
                     || self.package.serves(&v.source)
-                    || remote::is_remote(&v.source)
+                    || exact_plan::has_http_scheme(&v.source)
                     || matches!(
                         v.source_id
                             .as_ref()
@@ -1167,8 +1182,8 @@ impl Images {
             "peakBytes":s.peak_bytes,"running":s.running,"processRunning":g.running,
             "ready":s.ready,"deliveryCells":s.delivery_cells,"pendingJobs":s.pending_jobs,
             "subscribers":s.subscribers,"coldEntries":s.cold_entries,"sourceEntries":self.backend.sources(),
-            "remoteFetches":self.backend.downloads.fetches.load(std::sync::atomic::Ordering::Relaxed),
-            "remoteCacheBytes":self.backend.downloads.cached_bytes(),
+            "remoteFetches":self.backend.downloads.as_ref().map_or(0, |d| d.fetches.load(std::sync::atomic::Ordering::Relaxed)),
+            "remoteCacheBytes":self.backend.downloads.as_ref().map_or(0, |d| d.cached_bytes()),
             "liveDiagnostics":self.loaded.len(),"deferred":self.deferred,
             "budgetWaits":waiting,"refusalReasons":reasons,
             "refused":self.views.values().filter(|v| v.refusal.is_some()).count()})
