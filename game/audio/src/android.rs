@@ -24,6 +24,10 @@ const USAGE_GAME: i32 = 14;
 const CONTENT_TYPE_SONIFICATION: i32 = 4;
 const CALLBACK_RESULT_CONTINUE: i32 = 0;
 const OK: i32 = 0;
+const STATE_PAUSING: i32 = 5;
+const STATE_FLUSHING: i32 = 7;
+/// How long a suspend waits for the stream to finish pausing, then flushing.
+const SETTLE_NS: i64 = 200_000_000;
 
 #[link(name = "aaudio")]
 // SAFETY: these declarations match the NDK's aaudio/AAudio.h C ABI.
@@ -51,6 +55,13 @@ unsafe extern "C" {
     fn AAudioStreamBuilder_delete(builder: *mut Builder) -> i32;
     fn AAudioStream_requestStart(stream: *mut Stream) -> i32;
     fn AAudioStream_requestPause(stream: *mut Stream) -> i32;
+    fn AAudioStream_requestFlush(stream: *mut Stream) -> i32;
+    fn AAudioStream_waitForStateChange(
+        stream: *mut Stream,
+        input: i32,
+        next: *mut i32,
+        timeout_ns: i64,
+    ) -> i32;
     fn AAudioStream_requestStop(stream: *mut Stream) -> i32;
     fn AAudioStream_close(stream: *mut Stream) -> i32;
     fn AAudioStream_getSampleRate(stream: *mut Stream) -> i32;
@@ -209,8 +220,14 @@ impl AndroidOutput {
 
     /// The activity stopped: the app went to the background.
     pub fn suspend(&mut self) -> Result<(), String> {
+        // A pause keeps the samples the stream already holds, which the return
+        // would play. A flush discards them, once the pause has finished.
         // SAFETY: this is the owned open stream.
         unsafe { check("requestPause", AAudioStream_requestPause(self.stream))? };
+        self.settle(STATE_PAUSING)?;
+        // SAFETY: as above; the stream is now paused.
+        unsafe { check("requestFlush", AAudioStream_requestFlush(self.stream))? };
+        self.settle(STATE_FLUSHING)?;
         self.suspended = true;
         let ids: Vec<_> = self.pending.live.keys().copied().collect();
         for id in ids {
@@ -218,6 +235,16 @@ impl AndroidOutput {
         }
         self.pending.flush();
         Ok(())
+    }
+
+    /// Wait until the stream has left `passing`, an asynchronous request's
+    /// transitional state.
+    fn settle(&self, passing: i32) -> Result<(), String> {
+        let mut next = passing;
+        // SAFETY: the owned open stream and a valid out-pointer.
+        let waited =
+            unsafe { AAudioStream_waitForStateChange(self.stream, passing, &mut next, SETTLE_NS) };
+        check("waitForStateChange", waited)
     }
 
     /// Back in the foreground. Increment the transport generation before sync.
