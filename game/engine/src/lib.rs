@@ -53,7 +53,7 @@ pub use data::{bin, hash, json, Data, DataError, Number, Reader, Writer};
 pub use emitter::Emitter;
 pub use environment::{
     AmbientOcclusion, AoQuality, Bloom, Caustics, Environment, EnvironmentMap, Fog, Quality,
-    SceneSamples, ShadowBox, ShadowFilter, Shadows, Shafts, ToneMapping, Water, Waves,
+    Saturation, SceneSamples, ShadowBox, ShadowFilter, Shadows, Shafts, ToneMapping, Water, Waves,
     AUTO_RENDER_SCALE,
 };
 pub use exact_game_derive::{Args, Component, Data, Event, Presentation, Resource};

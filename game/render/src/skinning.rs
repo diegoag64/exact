@@ -474,9 +474,8 @@ impl Skinning {
             let (prev, curr) = p
                 .as_ref()
                 .filter(|p| p.local.len() == len && p.previous.len() == len)
-                .map_or((&t.rest[..], &t.rest[..]), |p| {
-                    (&p.previous[..], &p.local[..])
-                });
+                // A tick the animation did not step on holds its pose (`Pose::shown`).
+                .map_or((&t.rest[..], &t.rest[..]), |p| p.shown(w.tick()));
             let has_pose = p
                 .as_ref()
                 .is_some_and(|p| p.local.len() == len && p.previous.len() == len);

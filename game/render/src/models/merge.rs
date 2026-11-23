@@ -31,6 +31,7 @@ fn shared(m: &MaterialData) -> bool {
     m.alpha_mode == AlphaMode::Opaque
         && m.base_color == [1.; 4]
         && !m.unlit
+        && !m.keeps_colour
         && !crate::model_pipeline::layered(m)
         && crate::model_pipeline::untextured(m)
 }

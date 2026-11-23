@@ -22,6 +22,38 @@ pub struct Pose {
     pub(crate) stepped: Option<u64>,
 }
 
+impl Pose {
+    /// The tick `animation::step` last wrote this pose on; none before it has.
+    pub fn stepped(&self) -> Option<u64> {
+        self.stepped
+    }
+    /// The two poses a frame of tick `tick` is drawn between: the previous
+    /// completed tick's and this one's, where `animation::step` ran on it.
+    /// A tick it did not run on (a game held still, a pause) holds the
+    /// current pose: blending the last two again would replay the last
+    /// step's motion every tick, a jiggle.
+    pub fn shown(&self, tick: u64) -> (&[f32], &[f32]) {
+        match self.stepped {
+            Some(at) if at != tick => (&self.local, &self.local),
+            _ => (&self.previous, &self.local),
+        }
+    }
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::*;
+
+    #[test]
+    fn a_pose_is_blended_on_the_tick_it_stepped_and_held_after() {
+        let p = Pose { previous: vec![0.0; 10], local: vec![1.0; 10], stepped: Some(7), ..Default::default() };
+        assert_eq!(p.shown(7), (&[0.0; 10][..], &[1.0; 10][..]), "the tick it stepped: from the last pose to this one");
+        assert_eq!(p.shown(8), (&[1.0; 10][..], &[1.0; 10][..]), "a tick held: this pose, still");
+        let unstepped = Pose { previous: vec![0.0; 10], local: vec![1.0; 10], ..Default::default() };
+        assert_eq!(unstepped.shown(3).0, &[0.0; 10][..], "a pose no step wrote is drawn as it was given");
+    }
+}
+
 impl Clip {
     pub fn duration(&self) -> f32 {
         self.tracks

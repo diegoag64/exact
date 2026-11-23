@@ -42,8 +42,8 @@ mod occlusion;
 mod outline;
 mod perf;
 mod pipeline;
-pub mod profile;
 mod placed;
+pub mod profile;
 #[cfg(test)]
 mod quad_tests;
 mod quads;
@@ -380,6 +380,9 @@ pub struct FrameInput<'a> {
     pub environment_map: Option<EnvironmentMapInput<'a>>,
     /// Screen-space ambient occlusion; None (the default) draws none.
     pub ambient_occlusion: Option<exact_game::AmbientOcclusion>,
+    /// How much colour the lit world keeps (`exact_game::Saturation`): 1 as
+    /// authored, 0 grey; emission and unlit materials keep theirs.
+    pub saturation: f32,
     /// A water surface and its effects (`water.rs`); None (the default) draws none.
     pub water: Option<exact_game::Water>,
     /// Optional pass timestamps. Requires TIMESTAMP_QUERY on the device.
@@ -415,6 +418,7 @@ impl Default for FrameInput<'_> {
             environment: Environment::default(),
             environment_map: None,
             ambient_occlusion: None,
+            saturation: 1.0,
             water: None,
             timestamps: None,
             headroom: 1.0,

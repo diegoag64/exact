@@ -3,7 +3,8 @@ override MODEL_TEXTURES: bool = true;
 struct BakedMaterial {
     base: vec4<f32>, surface: vec4<f32>, emission_cutoff: vec4<f32>, flags: vec4<f32>,
     uv: array<vec4<f32>, 10>,
-    // clearcoat, its roughness, the sheen's roughness; the sheen's colour
+    // clearcoat, its roughness, the sheen's roughness; the sheen's colour,
+    // and whether the material keeps its colour (`MaterialData::keeps_colour`)
     coat: vec4<f32>, sheen: vec4<f32>,
 }
 @group(2) @binding(0) var<uniform> baked: BakedMaterial;
@@ -79,6 +80,7 @@ fn model_unlit(input:ModelVarying, base:vec4<f32>) -> vec4<f32> {
     if MODEL_TEXTURES && has_texture(4u) { emission=textureSample(emission_texture,emission_sampler,material_uv(input.uv,3u)+input.uv_offset).rgb; }
     if MODEL_DISCARD && baked.flags.x==1.0 && base.a < baked.emission_cutoff.w { discard; }
     var color=vec3<shading>(base.rgb)+vec3<shading>(emission*baked.emission_cutoff.rgb*input.part_emission)+vec3<shading>(input.glow.xyz);
+    if baked.sheen.w < 0.5 { color=graded(color); }
     if FOG { color=shaded_fog(color,input.world); }
     var alpha=1.0;
     if MODEL_DISCARD && baked.flags.x==2.0 { alpha=base.a*(1.0-fade_of(input.slot)); }
@@ -125,7 +127,7 @@ fn model_shade(input:ModelVarying, front:bool, visibility:f32) -> vec4<f32> {
         emitted*=under;
         glow*=under;
     }
-    var color=environment*shading(ao)+emitted+glow;
+    var color=environment*shading(ao);
     if frame.sun_direction_illuminance.w>0.0 {
         color+=layered_brdf(n,v,(-frame.sun_direction_illuminance.xyz),albedo,metallic,roughness)*vec3<shading>(frame.sun_color_count.xyz)*shading(frame.sun_direction_illuminance.w)*shading(visibility*water_caustics(input.world));
     }
@@ -134,6 +136,9 @@ fn model_shade(input:ModelVarying, front:bool, visibility:f32) -> vec4<f32> {
     if baked.flags.y > 0.0 {
         color += shading(baked.flags.y * input.part.z * pow(1.0 - clamp(dot(n,v),0.0,1.0),3.0)) * mix(albedo,vec3<shading>(1.0),0.2);
     }
+    // Graded whole, emission too (frame.wgsl), unless the material keeps its colour.
+    color=color+emitted+glow;
+    if baked.sheen.w < 0.5 { color=graded(color); }
     if FOG { color=shaded_fog(color,input.world); }
     var alpha=1.0;
     if MODEL_DISCARD && baked.flags.x==2.0 { alpha=base.a*(1.0-fade_of(input.slot)); }

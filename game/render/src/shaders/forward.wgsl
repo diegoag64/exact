@@ -82,7 +82,7 @@ fn shade(input: Surface, visibility: f32) -> vec4<f32> {
     let v = view_direction(input.world);
     // The colour in `shading` (frame.wgsl): f16 where the device has it.
     let albedo = vec3<shading>(base);
-    var color = ambient(n, v, albedo, metallic, roughness) + vec3<shading>(emissive);
+    var color = ambient(n, v, albedo, metallic, roughness);
     if frame.sun_direction_illuminance.w > 0.0 {
         let l = -frame.sun_direction_illuminance.xyz;
         color += brdf(n, v, l, albedo, metallic, roughness) * vec3<shading>(frame.sun_color_count.xyz)
@@ -94,6 +94,8 @@ fn shade(input: Surface, visibility: f32) -> vec4<f32> {
         }
         add_local_lights(&color, input.clip.xy, input.world, n, v, albedo, metallic, roughness, false);
     }
+    // Graded whole, emission too (frame.wgsl).
+    color = graded(color + vec3<shading>(emissive));
     if FOG {
         color = shaded_fog(color, input.world);
     }

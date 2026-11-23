@@ -22,11 +22,24 @@ pub(crate) fn has_sky(frame: &FrameInput<'_>, map: bool) -> bool {
 }
 
 /// The scene's clear: opaque, as the canvas promises (`Surface::opaque`).
+/// `color` with only `saturation` of its colour kept: frame.wgsl's `graded`.
+pub(crate) fn graded(color: [f32; 3], saturation: f32) -> [f32; 3] {
+    // Exactly as authored at full colour (the default).
+    if saturation >= 1.0 {
+        return color;
+    }
+    let luma = color[0] * 0.2126 + color[1] * 0.7152 + color[2] * 0.0722;
+    color.map(|c| luma + (c - luma) * saturation)
+}
+
 pub(crate) fn clear_color(frame: &FrameInput<'_>) -> wgpu::Color {
-    let sky = frame
-        .environment
-        .background
-        .map_or(frame.environment.horizon, |c| c.0);
+    let sky = graded(
+        frame
+            .environment
+            .background
+            .map_or(frame.environment.horizon, |c| c.0),
+        frame.saturation,
+    );
     wgpu::Color {
         r: sky[0] as f64,
         g: sky[1] as f64,
@@ -72,7 +85,8 @@ pub(crate) fn uniform(
     data[68..71].copy_from_slice(&frame.environment.horizon);
     data[71] = frame.environment.sun_disc;
     if let Some(fog) = frame.environment.fog {
-        data[72..75].copy_from_slice(&fog.color.map_or(frame.environment.horizon, |c| c.0));
+        let fog_color = fog.color.map_or(frame.environment.horizon, |c| c.0);
+        data[72..75].copy_from_slice(&graded(fog_color, frame.saturation));
         data[75] = fog.density.max(0.0);
         data[76] = fog.height_falloff.max(0.0);
         if let Some([near, far]) = fog.linear {
@@ -154,6 +168,12 @@ pub(crate) fn uniform(
         data[181] = map.rotation;
         data[182] = map.rgbm.max(0.);
     }
+    // `sky.w`: how much colour the lit world keeps (frame.wgsl `graded`).
+    data[183] = if frame.saturation.is_finite() {
+        frame.saturation.clamp(0., 1.)
+    } else {
+        1.
+    };
     data
 }
 
@@ -186,5 +206,48 @@ pub(crate) fn tone(color: [f32; 3], frame: &FrameInput<'_>, encode_srgb: bool) -
         g: channel(color[1]),
         b: channel(color[2]),
         a: 1.,
+    }
+}
+
+#[cfg(test)]
+mod saturation_tests {
+    use super::*;
+
+    #[test]
+    fn a_frame_keeps_its_colour_unless_told_and_grey_keeps_its_brightness() {
+        let irradiance = [0.0; 36];
+        let full = uniform(
+            &FrameInput::default(),
+            false,
+            None,
+            (4, 4),
+            &irradiance,
+            [0.0; 4],
+        );
+        assert_eq!(
+            full[183], 1.0,
+            "frame.wgsl `sky.w`: the default world keeps its colour"
+        );
+        let grey = FrameInput {
+            saturation: 0.25,
+            ..FrameInput::default()
+        };
+        assert_eq!(
+            uniform(&grey, false, None, (4, 4), &irradiance, [0.0; 4])[183],
+            0.25
+        );
+        let odd = FrameInput {
+            saturation: f32::NAN,
+            ..FrameInput::default()
+        };
+        assert_eq!(
+            uniform(&odd, false, None, (4, 4), &irradiance, [0.0; 4])[183],
+            1.0
+        );
+        let c = [0.8, 0.4, 0.1];
+        assert_eq!(graded(c, 1.0), c);
+        let g = graded(c, 0.0);
+        assert!((g[0] - g[1]).abs() < 1e-6 && (g[1] - g[2]).abs() < 1e-6);
+        assert!((g[0] - (0.8 * 0.2126 + 0.4 * 0.7152 + 0.1 * 0.0722)).abs() < 1e-6);
     }
 }

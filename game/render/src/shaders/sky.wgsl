@@ -35,7 +35,8 @@ fn sky_radiance(direction: vec3<f32>) -> vec3<f32> {
         let glow = exp(-angle / (radius * 6.0)) * 0.12;
         color += frame.sun_color_count.xyz * frame.sun_direction_illuminance.w * (disc + glow);
     }
-    return color;
+    // Graded as the lit world is (frame.wgsl `graded`), in f32.
+    return mix(vec3(dot(color, vec3(0.2126, 0.7152, 0.0722))), color, frame.sky.w);
 }
 // A fragment's view direction through its NDC position.
 fn view_ray(ndc: vec2<f32>) -> vec3<f32> {

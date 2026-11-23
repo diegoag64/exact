@@ -878,7 +878,8 @@ fn baked(m: &MaterialData, present: u32) -> Vec<f32> {
     let mask = if m.clearcoat_mask_from_alpha { 1. } else { 0. };
     values.extend([m.clearcoat, m.clearcoat_roughness, m.sheen_roughness, mask]);
     values.extend(m.sheen_color);
-    values.push(0.);
+    // `sheen.w`: the material keeps its colour in a graded world (frame.wgsl `graded`).
+    values.push(if m.keeps_colour { 1. } else { 0. });
     values
 }
 

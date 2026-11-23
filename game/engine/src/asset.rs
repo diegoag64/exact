@@ -100,6 +100,11 @@ pub struct MaterialData {
     /// The colour is `base + emission` alone, with no light, environment or
     /// rim (glTF's `KHR_materials_unlit`); fog and fading still apply.
     pub unlit: bool,
+    /// The material keeps its colour however little the world keeps
+    /// (`crate::Saturation`): an interface, or what should stand in colour in
+    /// a grey world. Written only when set, so a material without it encodes
+    /// as before.
+    pub keeps_colour: bool,
     /// A clear coat over the material, 0 to 1 (`KHR_materials_clearcoat`);
     /// zero is none.
     pub clearcoat: f32,
@@ -134,6 +139,7 @@ impl Default for MaterialData {
             alpha_cutoff: 0.5,
             double_sided: false,
             unlit: false,
+            keeps_colour: false,
             clearcoat: 0.0,
             clearcoat_roughness: 0.0,
             clearcoat_mask_from_alpha: false,
@@ -195,6 +201,10 @@ macro_rules! material_record {
                     w.field("clearcoat_mask_from_alpha");
                     self.clearcoat_mask_from_alpha.write(w);
                 }
+                if self.keeps_colour {
+                    w.field("keeps_colour");
+                    self.keeps_colour.write(w);
+                }
                 let shading = Shading::of(self);
                 if !shading.is_default() {
                     w.field("shading");
@@ -206,6 +216,7 @@ macro_rules! material_record {
                 // The record's rule, not a patch: no name read is no name.
                 self.name.clear();
                 self.clearcoat_mask_from_alpha = false;
+                self.keeps_colour = false;
                 Shading::default().assign(self);
                 let fields = [$(stringify!($field)),*];
                 let mut seen = [false; [$(stringify!($field)),*].len()];
@@ -218,6 +229,8 @@ macro_rules! material_record {
                         "name" => self.name.read(r).map_err(|e| e.at("name"))?,
                         "clearcoat_mask_from_alpha" => self.clearcoat_mask_from_alpha.read(r)
                             .map_err(|e| e.at("clearcoat_mask_from_alpha"))?,
+                        "keeps_colour" => self.keeps_colour.read(r)
+                            .map_err(|e| e.at("keeps_colour"))?,
                         "shading" => {
                             let mut shading = Shading::default();
                             shading.read(r).map_err(|e| e.at("shading"))?;
@@ -1196,5 +1209,24 @@ mod texture_tests {
         assert_eq!(TextureFamily::Bc.name("fox.model"), "fox.model");
         assert_eq!(TextureFormat::Bc4.family(), TextureFamily::Bc);
         assert_eq!(TextureFormat::Astc4x4.family(), TextureFamily::Astc);
+    }
+}
+
+#[cfg(test)]
+mod keeps_colour_tests {
+    use super::*;
+
+    #[test]
+    fn a_material_keeps_its_colour_only_when_told_and_encodes_as_before_without_it() {
+        let plain = MaterialData { unlit: true, ..Default::default() };
+        let marked = MaterialData { keeps_colour: true, ..plain.clone() };
+        let (a, b) = (crate::bin::to_vec(&plain), crate::bin::to_vec(&marked));
+        assert_ne!(a, b);
+        let mut back = MaterialData { keeps_colour: true, ..Default::default() };
+        crate::bin::read_into(&a, &mut back).unwrap();
+        assert!(!back.keeps_colour && back.unlit);
+        let mut back = MaterialData::default();
+        crate::bin::read_into(&b, &mut back).unwrap();
+        assert!(back.keeps_colour && back.unlit);
     }
 }

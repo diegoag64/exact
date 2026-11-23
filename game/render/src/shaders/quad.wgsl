@@ -32,7 +32,10 @@ struct QuadOut {
 // Tonemapped in place for a direct frame, as forward.wgsl's DIRECT; alpha passes
 // through to the blend.
 override DIRECT: bool = false;
-fn quad_out(c: vec4<f32>) -> vec4<f32> {
+fn quad_out(colour: vec4<f32>) -> vec4<f32> {
+    // Particles, sprites and translucent primitives are graded as the lit
+    // world is (frame.wgsl `graded`), in f32.
+    let c = vec4(mix(vec3(dot(colour.rgb, vec3(0.2126, 0.7152, 0.0722))), colour.rgb, frame.sky.w), colour.a);
     if DIRECT { return vec4(tonemap(c.rgb).rgb, c.a); }
     return c;
 }

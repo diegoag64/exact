@@ -320,10 +320,13 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
     ) -> Result<(), RenderError> {
         // Soft particles: translucency follows in its own pass over this depth.
         let split = self.quads.split();
-        let sky = frame
-            .environment
-            .background
-            .map_or(frame.environment.horizon, |c| c.0);
+        let sky = frame::graded(
+            frame
+                .environment
+                .background
+                .map_or(frame.environment.horizon, |c| c.0),
+            frame.saturation,
+        );
         // A direct frame draws into the target, through its own MSAA attachment at
         // 4x, which resolves into the target after the frame's last pass.
         let direct = state.direct.then(|| self.direct_attachments());
@@ -1014,7 +1017,11 @@ impl Skips {
                 ("skip-water", skips.water),
                 ("skip-translucent", skips.translucent),
             ];
-            let left: Vec<_> = named.iter().filter(|(_, on)| *on).map(|(name, _)| *name).collect();
+            let left: Vec<_> = named
+                .iter()
+                .filter(|(_, on)| *on)
+                .map(|(name, _)| *name)
+                .collect();
             if !left.is_empty() {
                 exact_gpu::debug_applied(&left.join(" "));
             }

@@ -111,6 +111,21 @@ impl EnvironmentMap {
     }
 }
 
+/// How much of its colour the lit world keeps: 1 (the default, as if absent)
+/// as authored, 0 grey. Everything drawn is graded, its emission included:
+/// models lit or unlit, primitives (a `Material::glow` too), particles and
+/// sprites, the sky, the background and the fog. A model material marked
+/// `MaterialData::keeps_colour` keeps its colour (an interface, or what
+/// should stand in colour in a grey world). No pass is added: the shading
+/// that draws a surface applies it.
+#[derive(Clone, Copy, Debug, PartialEq, Resource)]
+pub struct Saturation(pub f32);
+impl Default for Saturation {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
 /// Screen-space ambient occlusion, an optional effect: inserting this resource
 /// turns it on. Creases and contacts darken where nearby geometry covers a
 /// surface's hemisphere within `radius`.

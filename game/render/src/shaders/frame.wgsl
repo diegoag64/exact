@@ -31,7 +31,8 @@ struct Frame {
     // SH9 diffuse irradiance / π, premultiplied (ibl.rs, ibl.wgsl).
     irradiance: array<vec4<f32>, 9>,
     // An environment map drawn as the sky: intensity (0: the procedural sky),
-    // yaw about +Y, RGBM range.
+    // yaw about +Y, RGBM range; and how much colour the lit world keeps
+    // (`Saturation`, `graded`).
     sky: vec4<f32>,
     // Linear fog near/far, metres per CSS pixel at unit depth, orthographic.
     toon: vec4<f32>,
@@ -63,6 +64,13 @@ fn view_origin(world: vec3<f32>) -> vec3<f32> {
         return world - forward * dot(forward, world - frame.camera_alpha.xyz);
     }
     return frame.camera_alpha.xyz;
+}
+// A surface's colour with only `Saturation` of it kept (1 as authored, 0 grey,
+// Rec. 709 luma), its emission included: every model (lit or unlit, unless
+// its material keeps its colour), primitive, particle and sprite.
+fn graded(c: vec3<shading>) -> vec3<shading> {
+    let luma = dot(c, vec3<shading>(0.2126, 0.7152, 0.0722));
+    return mix(vec3<shading>(luma), c, shading(frame.sky.w));
 }
 fn environment(y: f32) -> vec3<f32> {
     return mix(frame.horizon_disc.xyz,
