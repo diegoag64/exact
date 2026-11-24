@@ -438,7 +438,7 @@ fn new_scene_samples_make_the_renderer_again_under_the_same_world() {
         fixture::render(&gpu, &mut s, &frame(i as f64 * 100.)).unwrap();
     }
     assert_eq!(state(&mut s)["quality"]["samples"], 4);
-    assert_eq!(s.samples, Some(SceneSamples::Four));
+    assert_eq!(s.samples, Some(4));
     let world = state(&mut s);
     s.bind(&args(true, 1, 0), None).unwrap();
     assert!(s.render.is_none(), "released at the bind");
@@ -449,7 +449,7 @@ fn new_scene_samples_make_the_renderer_again_under_the_same_world() {
     );
     fixture::render(&gpu, &mut s, &frame(300.)).unwrap();
     assert!(s.error().is_none(), "{:?}", s.error());
-    assert_eq!(s.samples, Some(SceneSamples::One));
+    assert_eq!(s.samples, Some(1));
     assert_eq!(state(&mut s)["quality"]["samples"], 1);
     // Unchanged samples keep the renderer.
     s.bind(&args(false, 1, 0), None).unwrap();

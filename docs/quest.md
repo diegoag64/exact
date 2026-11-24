@@ -406,9 +406,17 @@ lower a lighter frame's clocks in an A/B pair. On a Quest 3 that holds level
 profile's one fixed layer normally stops after the centre and four corner taps
 of the receiver-plane filter when they agree (`shadow_sample.wgsl`).
 
-Trade-off switches, which lower the picture to price a fidelity choice (never
-a setting): `msaa-1` draws a headset frame with one sample rather than four
-(the `stereo frames draw …-1x` line confirms it), and `eye-scale-<k>` makes the
+A game can request 1×, 2×, or 4× MSAA through `Game::samples`. A native
+Vulkan headset uses 2× when its colour and depth formats support it. The
+renderer uses 4× if the two-sample format checks fail.
+
+A game can set `Game::XR_MODEL_OUTLINES` to false to skip model outline
+hulls in immersive frames. Use `show-xr-outlines` to restore them for a
+comparison. `skip-outlines` takes precedence.
+
+The `msaa-1` and `msaa-2` debug switches request one or two samples. If
+both are set, `msaa-1` takes precedence. Check the `stereo frames draw`
+line for the chosen sample count. `eye-scale-<k>` makes the
 eye swapchains `k` times the recommended size (0.25 to 1.5; logged as
 `applied: eye-scale …`). `depth-prepass` draws the opaque depth first, inside
 the forward pass, at any sample count (logged as `applied: depth prepass at

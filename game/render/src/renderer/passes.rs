@@ -6,6 +6,11 @@ use super::*;
 use crate::hooks::CustomMaterial;
 
 impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
+    pub(crate) fn model_outlines_enabled(&self) -> bool {
+        let switches = Skips::read();
+        !switches.outlines
+            && (!self.immersive || self.xr_model_outlines || switches.show_xr_outlines)
+    }
     pub(super) fn model_material(&self, batch: usize) -> Option<crate::MaterialId> {
         if ASSETS {
             self.model_batches[batch]
@@ -486,10 +491,10 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             state.times[2] = start.map(|s| s.elapsed());
             self.scene_viewport(&mut pass, state.size, false);
         }
-        let hulls = if skip.outlines {
-            Default::default()
-        } else {
+        let hulls = if self.model_outlines_enabled() {
             self.draw_outlines(&mut pass, state.size, state.direct)
+        } else {
+            Default::default()
         };
         if hulls.draws > 0 {
             self.probe_note(|| Drew::Hulls { draws: hulls.draws });
@@ -991,6 +996,7 @@ struct Skips {
     models: bool,
     quads: bool,
     outlines: bool,
+    show_xr_outlines: bool,
     sky: bool,
     water: bool,
     translucent: bool,
@@ -1005,6 +1011,7 @@ impl Skips {
                 models: on("skip-models"),
                 quads: on("skip-quads"),
                 outlines: on("skip-outlines"),
+                show_xr_outlines: on("show-xr-outlines"),
                 sky: on("skip-sky"),
                 water: on("skip-water"),
                 translucent: on("skip-translucent"),
@@ -1013,6 +1020,7 @@ impl Skips {
                 ("skip-models", skips.models),
                 ("skip-quads", skips.quads),
                 ("skip-outlines", skips.outlines),
+                ("show-xr-outlines", skips.show_xr_outlines),
                 ("skip-sky", skips.sky),
                 ("skip-water", skips.water),
                 ("skip-translucent", skips.translucent),

@@ -45,7 +45,7 @@ impl Rung {
 
     /// Scene samples: one under `Low`; the game's own as the ceiling.
     pub fn samples(self, game: SceneSamples) -> SceneSamples {
-        // The profile's direct frames resolve four samples in tile memory.
+        // The immersive profile keeps the game's sample request.
         if self.xr {
             // `msaa-1`: a measuring switch (docs/quest.md), never a setting.
             if exact_gpu::debug_switch("msaa-1") {
@@ -135,7 +135,7 @@ impl Rung {
         }
     }
 
-    fn json(self, samples: SceneSamples, scale: f32) -> String {
+    fn json(self, samples: u32, scale: f32) -> String {
         let asked = match self.asked {
             Quality::Auto => "auto",
             Quality::Low => "low",
@@ -147,7 +147,7 @@ impl Rung {
             r#"{{"asked":"{asked}","tier":"{}","rung":"{}","samples":{},"scale":{scale}}}"#,
             self.tier.keyword(),
             if self.xr { "xr" } else { self.level.keyword() },
-            samples.count()
+            samples
         )
     }
 }
@@ -164,15 +164,26 @@ pub(crate) fn unresolved_scale(game: f32) -> f32 {
 
 /// A renderer's scene samples: the rung's, under the game's; the game's
 /// before a binding resolved the rung.
-pub(crate) fn samples(rung: Option<Rung>, game: SceneSamples) -> SceneSamples {
-    rung.map_or(game, |rung| rung.samples(game))
+pub(crate) fn samples(rung: Option<Rung>, game: SceneSamples) -> u32 {
+    let wanted = rung.map_or(game, |rung| rung.samples(game));
+    #[cfg(target_os = "android")]
+    if rung.is_some_and(|r| r.xr)
+        && exact_gpu::vulkan::stereo_msaa_two()
+        && (wanted == SceneSamples::Two || exact_gpu::debug_switch("msaa-2"))
+    {
+        return wanted.count().min(2);
+    }
+    match wanted {
+        SceneSamples::Two => SceneSamples::Four.count(),
+        _ => wanted.count(),
+    }
 }
 
 /// The world state's `quality` row, once a binding resolved the rung.
 pub(crate) fn row(rung: Option<Rung>, game: SceneSamples, scale: f32, reply: &mut String) {
     if let Some(rung) = rung {
         reply.push_str(",\"quality\":");
-        reply.push_str(&rung.json(rung.samples(game), rung.scale(scale)));
+        reply.push_str(&rung.json(samples(Some(rung), game), rung.scale(scale)));
     }
 }
 
@@ -209,6 +220,8 @@ mod tests {
         let high = Rung::resolve(Quality::High, GpuTier::Low);
         assert_eq!(low.samples(SceneSamples::Four), SceneSamples::One);
         assert_eq!(mid.samples(SceneSamples::Four), SceneSamples::Four);
+        assert_eq!(super::samples(Some(low), SceneSamples::Two), 1);
+        assert_eq!(super::samples(Some(mid), SceneSamples::Two), 4);
         assert_eq!(
             mid.samples(SceneSamples::One),
             SceneSamples::One,

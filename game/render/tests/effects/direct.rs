@@ -311,7 +311,9 @@ fn a_direct_town_frame_draws_what_its_hdr_frame_draws() {
                 SceneSamples::One => assert_eq!(count, 0, "largest difference {most}"),
                 // Each sample is clamped before the resolve: the edges of the
                 // sphere above 1 against the ground move (40 pixels here).
-                SceneSamples::Four => assert!(count < pixels / 100, "{count}"),
+                SceneSamples::Two | SceneSamples::Four => {
+                    assert!(count < pixels / 100, "{count}")
+                }
             }
         }
     }

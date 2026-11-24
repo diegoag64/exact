@@ -141,6 +141,7 @@ pub struct RendererWithAssets<const ASSETS: bool> {
     water_effects: crate::WaterEffects,
     /// The immersive profile (`crate::profile`, `set_immersive`).
     pub(crate) immersive: bool,
+    pub(crate) xr_model_outlines: bool,
     texture_creations: u64,
     hook_binding: Option<crate::hooks::FrameBinding>,
     custom_bindings: Option<crate::hooks::MaterialBindings>,
@@ -277,7 +278,17 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         samples: exact_game::SceneSamples,
         depth_prepass: bool,
     ) -> Self {
-        let samples = samples.count();
+        Self::with_sample_count(device, queue, format, samples.count(), depth_prepass)
+    }
+
+    /// The raster count after the native eye target's format checks.
+    pub(crate) fn with_sample_count(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        depth_prepass: bool,
+    ) -> Self {
         // `depth-prepass`: a measuring switch (docs/quest.md) that draws the
         // opaque depth first at any sample count.
         let measured = exact_gpu::debug_switch("depth-prepass");
@@ -472,6 +483,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             water: Default::default(),
             water_effects: Default::default(),
             immersive: false,
+            xr_model_outlines: true,
             texture_creations: if samples == 1 { 3 } else { 4 },
             hook_binding: None,
             custom_bindings: None,

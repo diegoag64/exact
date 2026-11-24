@@ -102,6 +102,10 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             .render
             .as_ref()
             .map_or(0, |(renderer, _)| renderer.models.loaded.len());
+        let outlines = self
+            .render
+            .as_ref()
+            .is_some_and(|(renderer, _)| renderer.model_outlines_enabled());
         // What the GPU cull kept, per view (camera, sun cascades), from the
         // readback armed a second before; "direct" where it does not run.
         let culled = match self.render.as_ref() {
@@ -123,7 +127,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             .join(" | ");
         format!(
             "xr state: args [{args}] tick={} entities={} {} resident_models={resident}; \
-             last frame mode={} draws={} instances={} triangles={} shadow_draws={} cascades={} samples={} gpu_cull_kept={culled}; \
+             last frame mode={} model_outlines={outlines} draws={} instances={} triangles={} shadow_draws={} cascades={} samples={} gpu_cull_kept={culled}; \
              stage center={} scale={} position={} extent={}; journal: {tail}",
             world.tick(),
             world.len(),
@@ -229,14 +233,19 @@ pub(super) fn encode_stereo<const ASSETS: bool>(
 
 /// A stereo frame's mode for a host's log (`Surface::xr_stereo_mode`).
 pub(super) fn stereo_mode(multiview: bool, direct: bool, samples: u32) -> &'static str {
-    match (multiview, direct, samples > 1) {
-        (true, true, true) => "multiview-direct-4x",
-        (true, true, false) => "multiview-direct-1x",
-        (true, false, true) => "multiview-hdr-4x",
-        (true, false, false) => "multiview-hdr-1x",
-        (false, true, true) => "per-eye-direct-4x",
-        (false, true, false) => "per-eye-direct-1x",
-        (false, false, true) => "per-eye-hdr-4x",
-        (false, false, false) => "per-eye-hdr-1x",
+    match (multiview, direct, samples) {
+        (true, true, 4) => "multiview-direct-4x",
+        (true, true, 2) => "multiview-direct-2x",
+        (true, true, 1) => "multiview-direct-1x",
+        (true, false, 4) => "multiview-hdr-4x",
+        (true, false, 2) => "multiview-hdr-2x",
+        (true, false, 1) => "multiview-hdr-1x",
+        (false, true, 4) => "per-eye-direct-4x",
+        (false, true, 2) => "per-eye-direct-2x",
+        (false, true, 1) => "per-eye-direct-1x",
+        (false, false, 4) => "per-eye-hdr-4x",
+        (false, false, 2) => "per-eye-hdr-2x",
+        (false, false, 1) => "per-eye-hdr-1x",
+        _ => "unknown",
     }
 }

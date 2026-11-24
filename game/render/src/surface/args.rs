@@ -139,7 +139,12 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             }
             self.assets_dirty |= models != sim.world().model_revision();
             // New scene samples (`Game::samples`) make the renderer again.
-            let samples = crate::quality::samples(self.rung, G::samples(sim.args()));
+            let rung = super::render::frame_rung(
+                self.rung,
+                self.xr_format.is_some(),
+                G::quality(sim.args()),
+            );
+            let samples = crate::quality::samples(rung, G::samples(sim.args()));
             resample = self.samples.is_some_and(|made| made != samples);
             if generation != sim.generation() {
                 self.hook_clock.reset();

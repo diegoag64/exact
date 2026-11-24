@@ -36,6 +36,8 @@ pub trait Game: 'static {
     /// Keeps shadows, textures, emission, fog and rim; ignores metallic/specular response.
     /// Fixed for the renderer's lifetime; primitive and custom materials are unaffected.
     const MATTE_MODELS: bool = false;
+    /// Draw model outline hulls in immersive frames.
+    const XR_MODEL_OUTLINES: bool = true;
     /// Surface name in Contract.
     const NAME: &'static str = "world";
     /// Stable save identity, independent of the shared surface name.

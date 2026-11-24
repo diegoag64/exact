@@ -280,11 +280,13 @@ pub enum ToneMapping {
     /// Linear output, encoded to sRGB by the target or the shader.
     None,
 }
-/// Scene colour/depth sampling; selected once by `Game::SAMPLES`.
+/// Scene colour/depth sampling, requested by `Game::samples`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SceneSamples {
     /// One sample per pixel.
     One,
+    /// Two-sample MSAA on supported native stereo targets.
+    Two,
     /// Four-sample MSAA (the default).
     #[default]
     Four,
@@ -294,6 +296,7 @@ impl SceneSamples {
     pub fn count(self) -> u32 {
         match self {
             Self::One => 1,
+            Self::Two => 2,
             Self::Four => 4,
         }
     }

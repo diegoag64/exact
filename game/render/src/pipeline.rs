@@ -14,6 +14,9 @@ const FRAME: &str = piece!("frame");
 /// `particle` (dots) or `sprite` (textured quads), `kind` `plain`, `soft`,
 /// `count` or `soft_count` (a look frame's probe variants), at `samples` 1 or 4.
 pub(crate) fn quad_module(base: &str, kind: &str, samples: u32) -> &'static str {
+    // The multisampled WGSL reads textureNumSamples(depth). Only its binding
+    // type differs from 1x; the render pipeline keeps the actual raster count.
+    let samples = if samples == 1 { 1 } else { 4 };
     macro_rules! quads {
         ($($name:literal)*) => {
             match format!("{base}_{kind}_{samples}").as_str() {

@@ -105,7 +105,7 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     /// The tick the world was first seen idle at, while it stays idle.
     idle_tick: Option<u64>,
     /// The scene samples the renderer was made with (`Game::samples`).
-    samples: Option<exact_game::SceneSamples>,
+    samples: Option<u32>,
     /// This frame's timing facts (`Surface::timing`), for the hooks' `FrameView.time`.
     timing: exact_gpu::FrameTiming,
     scheduled_cap: std::cell::Cell<u32>,
@@ -598,7 +598,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         self.perf.rendering = false;
         if self.encoded.is_some() && self.perf.reporting.is_some() {
             let scale = self.raster_scale();
-            let samples = self.samples.map_or(1, exact_game::SceneSamples::count);
+            let samples = self.samples.unwrap_or(1);
             let cap = self.frame_cap();
             if let Some(report) = &mut self.perf.reporting {
                 report.encoded(frame, &self.timing, scale, samples, self.perf.stats, cap);
@@ -647,6 +647,9 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         stereo: &exact_gpu::XrStereo,
         format: wgpu::TextureFormat,
     ) -> Option<bool> {
+        if self.xr_format.is_none() {
+            self.immersive_format(Some(format));
+        }
         let target = stereo.array_view(format);
         self.perf.measure_frame = false;
         self.perf.live = !frame.seekable;
@@ -977,7 +980,8 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
                 ",\"device\":false"
             });
             let scale = G::render_scale(sim.args());
-            crate::quality::row(self.rung, G::samples(sim.args()), scale, &mut reply);
+            let rung = self::render::frame_rung(self.rung, self.xr_format.is_some(), G::quality(sim.args()));
+            crate::quality::row(rung, G::samples(sim.args()), scale, &mut reply);
             self.perf.append(&mut reply);
             reply.pop();
             reply.push_str(",\"tickSpans\":");

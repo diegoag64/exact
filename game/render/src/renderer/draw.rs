@@ -969,9 +969,13 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 } else {
                     0
                 };
+            let bytes_per_pixel = match self.pipelines.samples {
+                1 => 12,
+                n => 12 * u64::from(n) + 8,
+            };
             metrics.attachment_bytes = u64::from(self.targets.size.0)
                 * u64::from(self.targets.size.1)
-                * (if self.pipelines.samples == 1 { 12 } else { 56 } + extra);
+                * (bytes_per_pixel + extra);
             metrics.record_stages(
                 state.times,
                 hooks,

@@ -153,3 +153,124 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
         self.quads.swap_views(&self.device, &mut set.quads);
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use exact_game::{Camera, Environment, Material, Mesh, Transform, World};
+    use exact_gpu::fixture;
+    use glam::{Mat4, Vec3};
+
+    #[test]
+    fn native_two_samples_resolve_both_direct_eye_layers() {
+        use wgpu::{Features as F, TextureFormat as T};
+        let required =
+            F::MULTIVIEW | F::MULTISAMPLE_ARRAY | F::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+        let Some(gpu) = fixture::device_or_skip(fixture::device_with(required)) else {
+            return;
+        };
+        let format = T::Rgba8UnormSrgb;
+        if !gpu.device.features().contains(required)
+            || ![format, T::Rgba16Float, T::Depth32Float]
+                .into_iter()
+                .all(|f| {
+                    gpu.adapter
+                        .get_texture_format_features(f)
+                        .flags
+                        .sample_count_supported(2)
+                })
+        {
+            eprintln!(
+                "skipped: native 2x stereo unavailable on {:?}",
+                gpu.adapter.get_info().name
+            );
+            return;
+        }
+        let mut renderer =
+            crate::Renderer::with_sample_count(&gpu.device, &gpu.queue, format, 2, false);
+        renderer.set_immersive(true);
+        let mut world = World::new(60, 1);
+        world.insert_resource(Environment {
+            background: Some([0.; 3].into()),
+            fog: None,
+            bloom: None,
+            ..Default::default()
+        });
+        world.spawn((Transform::at(0., 0., 4.), Camera::default()));
+        world.spawn((
+            Transform::default(),
+            Mesh::cube(1.2),
+            Material::glow([3.; 3]),
+        ));
+        let mut feed = crate::Feed::default();
+        feed.feed(&world, &mut renderer).unwrap();
+        let mut frame = feed.frame(&world, 1., 1.);
+        let eyes = [-0.18, 0.18].map(|x| {
+            let camera = Vec3::new(x, 0., 4.);
+            Eye {
+                view: Mat4::from_translation(-camera),
+                proj: frame.proj,
+                camera,
+            }
+        });
+        let target = gpu.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("single-sample eye array"),
+            size: wgpu::Extent3d {
+                width: 96,
+                height: 96,
+                depth_or_array_layers: 2,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let stats = renderer
+            .encode_stereo(
+                &mut encoder,
+                &target.create_view(&Default::default()),
+                (96, 96),
+                &mut frame,
+                eyes,
+                Some(&world),
+                &Default::default(),
+            )
+            .unwrap()
+            .unwrap();
+        gpu.queue.submit([encoder.finish()]);
+        assert_eq!(stats.samples, 2);
+        assert_eq!(stats.direct_frames, 1);
+        let scratch = renderer
+            .stereo
+            .as_ref()
+            .unwrap()
+            .direct_targets
+            .as_ref()
+            .unwrap();
+        assert_eq!(scratch.color.as_ref().unwrap().texture().sample_count(), 2);
+        assert_eq!(scratch.depth.texture().sample_count(), 2);
+        assert_eq!(scratch.size.depth_or_array_layers, 2);
+        let centers = [0, 1].map(|layer| {
+            let pixels = fixture::read_layer(&gpu, &target, layer).unwrap();
+            let xs: Vec<usize> = pixels
+                .data
+                .chunks_exact(4)
+                .enumerate()
+                .filter(|(_, p)| p[0] > 150)
+                .map(|(i, _)| i % 96)
+                .collect();
+            assert!(
+                xs.len() > 100 && xs.len() < 96 * 96 / 2,
+                "cube on dark background in eye {layer}"
+            );
+            xs.iter().sum::<usize>() as f32 / xs.len() as f32
+        });
+        assert!(
+            centers[0] > centers[1] + 1.,
+            "parallax across resolved layers: {centers:?}"
+        );
+    }
+}

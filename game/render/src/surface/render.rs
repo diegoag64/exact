@@ -260,7 +260,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
                 self.seekable
             };
             self.render = Some((
-                crate::renderer::RendererWithAssets::<ASSETS>::configured(
+                crate::renderer::RendererWithAssets::<ASSETS>::with_sample_count(
                     device,
                     queue,
                     format,
@@ -520,7 +520,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             self.hooks.device_lost();
             self.ready_work = None;
             self.render = Some((
-                crate::renderer::RendererWithAssets::<ASSETS>::configured(
+                crate::renderer::RendererWithAssets::<ASSETS>::with_sample_count(
                     device,
                     queue,
                     format,
@@ -687,6 +687,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             rung.clamp_staged(&mut input, authored, stage.as_ref());
             renderer.set_water_effects(rung.water_effects());
             renderer.set_immersive(rung.xr);
+            renderer.xr_model_outlines = G::XR_MODEL_OUTLINES;
         }
         // Every pixel the renderer stores has alpha one: each clear of the
         // output stores one, opaque draws write one, and every blend composes

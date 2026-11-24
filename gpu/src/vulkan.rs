@@ -16,6 +16,9 @@
 //!   `gpu_xr_stereo_mode`).
 #![allow(unsafe_code)]
 
+mod msaa;
+pub use msaa::stereo_msaa_two;
+
 use crate::{native, DeviceFailure, DeviceFailureKind, Gpu, XrStereo};
 use ash::vk::{self, Handle as _};
 use std::cell::RefCell;
@@ -194,6 +197,9 @@ fn make(
             features |= wgpu::Features::MULTISAMPLE_ARRAY;
         }
     }
+    if features.contains(wgpu::Features::MULTISAMPLE_ARRAY) {
+        features |= exposed.features & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
+    }
     let memory_hints = wgpu::MemoryHints::MemoryUsage;
     let device_extensions = exposed.adapter.required_device_extensions(features);
     let mut device_features = exposed
@@ -366,6 +372,7 @@ pub mod usage {
 /// The provider's images as wgpu wraps them, by handle, and the last drawn.
 #[derive(Default)]
 struct Targets {
+    msaa_eye: Option<(u32, u32, wgpu::TextureFormat)>,
     wrapped: Vec<(u64, wgpu::Texture)>,
     last: Option<wgpu::Texture>,
 }
@@ -498,6 +505,11 @@ pub fn render_stereo(id: u32, target: &StereoTarget, now_ms: f64) -> u32 {
                 return Ok(texture.clone());
             }
             let texture = wrap(gpu, target, format)?;
+            let eye = (target.width, target.height, format);
+            if t.msaa_eye != Some(eye) {
+                msaa::select(gpu, target, format);
+                t.msaa_eye = Some(eye);
+            }
             t.wrapped.retain(|(image, _)| *image != target.image);
             t.wrapped.push((target.image, texture.clone()));
             Ok::<_, String>(texture)
