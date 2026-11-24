@@ -169,7 +169,9 @@ pub(crate) fn name_the_fix(n: &Node, mut e: LowerError) -> LowerError {
 }
 
 /// The props besides ARIA's that any leaf box takes, so a module's too.
-const BOX_PROPS: [&str; 6] = ["testId", "id", "role", "disabled", "inert", "tabindex"];
+const BOX_PROPS: [&str; 7] = [
+    "testId", "id", "role", "disabled", "inert", "tabindex", "portal",
+];
 
 /// The events a native view sends its box (`ExactNativeEvents`; the Apple
 /// host's `NativeViews.kinds`), the only handlers a module tag can fire.
@@ -180,7 +182,7 @@ const MODULE_EVENTS: [&str; 9] = [
 /// The form-control props (LLP 1069.001, LLP 1069.002) a module's box has
 /// no use for. `checked` is refused on every tag but `input` before this
 /// runs (`controls::control`); it is listed so the set reads whole.
-const CONTROL_PROPS: [&str; 20] = [
+pub const CONTROL_PROPS: [&str; 20] = [
     "value",
     "placeholder",
     "autofocus",

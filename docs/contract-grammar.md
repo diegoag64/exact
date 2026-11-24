@@ -404,7 +404,9 @@ resource over a list, and a child that owns requests or tasks is used where its 
 are bounded: outside every region, under `if` and `match`, or in a row of
 `stack(nav)`, `t.stack` or `nav.tabs`, never under another `for` or in a
 virtualized list (`type-child-resource`). Its state initializers do not read its
-own resources (`type-state-reads-request`). The device's facts are sources a
+own resources, nor does a state initializer of a component it uses outside any
+`if`, `match` or `for` of its own read its resources or mutations through a prop
+(`type-state-reads-request`). The device's facts are sources a
 component declares, the root or a child: `resource v = exactViewport() as shape
 V` (or `exactPage()`), with no arguments and no `else`, opens no request, and
 every instance reads the root's one answer (`EmptyState` reads
@@ -483,8 +485,10 @@ commit of its own after each change, as an answer's `then` runs.
 ### Live Activities: `startActivity`, `updateActivity`, `endActivity`
 
 The three reserved mutation sources (LLP 1126.001 WP9) compile on every host.
-They run on iOS through an ActivityKit arm loaded at first use; other hosts
-refuse the send with `… is not linked into this artifact`.
+They run on iOS through an ActivityKit arm loaded at first use, and on Android,
+for an entry with an `android` mapping, as an ongoing notification (LLP 1126
+D13; reference.md "Live Activities"); other hosts refuse the send with `… is
+not linked into this artifact`.
 Declare the entry in `app.json`'s `live_activities`, its state shape and slots
 as in `apps/caltrain/activities.contract`. Each send answers a record whose only field is
 `id: string`; the compiler refuses other result shapes:
@@ -524,10 +528,14 @@ whose fields are `activities: Activity[]`, `frequentPushesEnabled: bool`,
 `linked: bool` (the host packaged its arm), `pushToStartToken:
 option<string>` and `pushToStartActivities: PushStartActivity[]`.
 An activity has `id`, `kind`, `state` (a JSON string), `activityState`
-(`pending`, `active`, `stale`, `ended`, `dismissed`) and `token: option<string>`.
+(`pending`, `active`, `stale`, `ended`, `dismissed`), `token: option<string>`
+and `promoted: bool`, true when Android posted its notification as a promoted
+Live Update (`FLAG_PROMOTED_ONGOING`; false elsewhere).
 A push-start activity has `kind`, `generation` and `shape`, all strings.
-Readers may name only the fields they need. Off iOS the lists are empty, the
-push-to-start token is absent and frequent pushes are false. A first demand
+Readers may name only the fields they need. Off iOS and Android the lists are
+empty; off iOS the push-to-start token is absent and frequent pushes are false.
+Android lists the activities its `app.json` row maps (`android`, reference.md
+"Live Activities"). A first demand
 enumerates existing activities, including after a relaunch without a send;
 later token, state and content updates re-answer the source. A token is absent
 until ActivityKit supplies it, and exists only for an entry declaring
@@ -824,9 +832,10 @@ step          = "tap" "midi" STRING ( HEX { HEX } | "clock" NUMBER NUMBER ) NL
                   | "modifiers" STRING | "mediasession" STRING [ NUMBER ] ] NL
               | "tap" STRING "drag" ( "to" STRING [ "at" NUMBER NUMBER ]
                   | [ "-" ] NUMBER [ "-" ] NUMBER )
-                  { ( "press" | "over" | "hold" ) NUMBER
-                  | "from" NUMBER NUMBER | "mouse" | "into" "keyboard" }
-                  [ "during" { STRING } ] NL
+                  { ( "press" | "over" | "hold" ) NUMBER | "modifiers" STRING
+                  | "from" NUMBER NUMBER | "mouse" | "into" "keyboard" | "during" STRING { STRING } }
+                  { "then" [ "-" ] NUMBER [ "-" ] NUMBER
+                    { ( "over" | "hold" ) NUMBER | "during" STRING { STRING } } } NL
               | "type" STRING ( STRING [ "append" ]
                   | "key" STRING [ "down" | "up" | "for" NUMBER ]
                   | "copy" | "cut" | "paste" STRING ) NL
@@ -987,12 +996,15 @@ Lean print the same oracle answer; an `after` pair could see a resource change o
 step that commits nothing. A mutation's result slot is a state and may be named.
 
 `always` checks every printed configuration, including boot. `stays v` means that a
-previous observation equal to `v` must remain `v`. `after "action"` reads the value
-before an input and after its following `land`; the input must have only that
-successful handler commit, and its landing only `then` and `queue` commits. Other
-commits, including a commit omitted from the trace, make the pair counted only.
-`after clock` checks clock advances and landings not paired with inputs, over all
-their commits. `only writes` compares every root slot, including queue results.
+previous observation equal to `v` must remain `v`. The work due when an input
+arrives (a change action, a timer due exactly then, an armed `then` or queued send)
+runs before its handler; when it runs any commit, it is observed as a `due` step of
+its own, before the input. `after "action"` reads the value before an input and after
+its following `land`, so `old` is the configuration the handler met; the input must
+have only that successful handler commit, and its landing only `then` and `queue`
+commits. Other commits, including a commit omitted from the trace, make the pair
+counted only. `after clock` checks clock advances, `due` steps and landings not
+paired with inputs, over all their commits. `only writes` compares every root slot, including queue results.
 `never refuses` reads the action on each commit line; an action never run is
 reported as not exercised. Poisoned configurations are counted, not checked.
 Numbers use binary64 arithmetic and IEEE comparisons; other values compare by
@@ -1181,18 +1193,29 @@ beside `commands` to omit `DB` and skip scratch database creation and removal.
 `tap "id" drag to "other" [at x y]` ends on the other
 node (LLP 1094 D12). `tap "id" drag dx dy` is the driver's `tap … drag` (from the
 node's middle, or `from x y` in its box, in points; `press`, `over`, `hold` in
-milliseconds; each once). It is a finger where the carrier has one (the web,
+milliseconds; each once; `modifiers "Shift"` held throughout). `then dx dy`, up to
+seven times, moves on from where the drag before it ended, with its own `over`,
+`hold` and `during`: `tap "stage" drag 100 0 from 50 50 press 500 over 200 then 0 80
+over 200 hold 100` presses for half a second, drags right, then down, holds and
+lifts (not after `drag to`). It is a finger where the carrier has one (the web,
 iOS: on a simulator the touch runner's real gesture, LLP 1080.000 §11, which a
 test with a drag starts for its session; a phone has none yet and fails the
 step); `mouse` makes it the left button on the web, with the page's pointer
 `fine`, so a desktop path is what runs (iOS refuses it; macOS and Linux drag
 with the mouse anyway). A finger's drag the browser takes to scroll an
 ancestor ends in `panrelease` and a `pan cancelled` journal line naming the
-`touch-action` that keeps it. `during "op" …` is last: each quoted op is a read
+`touch-action` that keeps it. `during "op" …`: each quoted op is a read
 (`tree`, `layout`, `state`, `logs`, `screenshot`) or `clock`, run while the finger
-is down, after the move and before the hold. `press` and `hold` advance the
-virtual clock by those milliseconds (a game's ticks), except under
-`--timing platform`, where the platform's own clock owns the gesture.
+is down, after its leg's move and before its hold. The gesture takes its `press`,
+`over` and `hold` on the test's clock, so `performanceNow()` in the app's pointer
+actions reads them: a move's samples are a frame apart on the clock, the first
+one frame after the press (500 ms of press reads 515 on the web before a 200 ms
+move, its first sample's), and the lift reads the whole gesture. iOS's touch is
+real, so there the clock follows it on real time, at each phase's start no
+earlier than that phase's time (the same press reads 500 to about 501), and the
+lift reads the whole gesture exactly; assert a hold as a range, `expect state
+heldMs >= 500` and `<= 520`. Under `--timing platform` the platform's own clock
+owns the gesture.
 `tap "id" pinch <scale> [at x y]` is the driver's pinch: `scale` greater than 0,
 about the node's middle or about `at` in its box. A canvas that takes raw input
 receives it as a real pinch arrives there: two touch contacts on the web and iOS,
@@ -1206,7 +1229,11 @@ presenter, in steps about the point; Linux answers it unsupported. The agent's
 the web, Android and Windows it zooms a zoomable scroll where no `dblclick`
 handler takes it (two real taps under `--touch platform`, two touch points in
 Chrome, two touch contacts on Android and Windows), and macOS and Linux answer it
-unsupported. On the web, Android, Windows and Linux, `tap <t> wheel 0 <dy>
+unsupported. The agent's `tap <t> fingers <n> [at x y]` puts two to five real
+fingers down together under iOS `--touch platform`, level about the node's middle
+or `at`, 50 points apart, and lifts them together, as the window's recognizers
+read several fingers (four open the developer menu); without the runner, and on
+other hosts, it answers unsupported. On the web, Android, Windows and Linux, `tap <t> wheel 0 <dy>
 modifiers Control` is a trackpad's pinch, as the platform delivers one.
 `tap "id" wheel <dx> <dy>` is the driver's wheel (the agent's `tap <t> wheel
 dx dy`) at the node's middle, in points (CSS pixels on the web): a positive `dy`
@@ -2501,7 +2528,12 @@ an `image` (LLP 1094.000). `dataTransfer=DataTransfer(text=, url=, files=[…])`
 declares what the drag carries, by `DataTransfer`'s names: `text` as
 `text/plain`, `url` (absolute `http:` or `https:`) as `text/uri-list`, and
 each file as itself, a shipped `assets/` file or an `app:/` path behind
-`fs.read`. Each needs the other. The data is declared on the node, not set in
+`fs.read`. Each needs the other. A file the app opens as a database is not
+one to drag: on Apple and Android the host opens and closes the file as a
+destination asks for it, which drops SQLite's locks on it
+([How To Corrupt An SQLite Database File, §2.2](https://sqlite.org/howtocorrupt.html#_posix_advisory_locks_canceled_by_a_separate_thread_doing_close_)),
+so drag a copy made with `storage.fs` while the database is closed, or an
+export of its rows. The data is declared on the node, not set in
 a `dragstart` listener, because every platform takes a drag's items as it
 begins; `dragstart`, `drag` and `dragend` are refused for now
 (`lower-handler-later`). The runner admits each file and `url` for the host
@@ -3059,8 +3091,13 @@ the virtual clock).
   Settings…), `file`, `edit`, `view`, `go`, `window`, `help`, and `none`, which
   shows no item and keeps the chord a shortcut (a host item with that chord
   keeps its place without it); they are independent of localized menu titles
-  and override chord filing. The label remains the button's `aria-label` or
-  text. `disabled`/inert disable the item; hidden or removed buttons leave the
+  and override chord filing. A placed item shows and takes the button's first
+  chord holding ⌘, or else its first holding ⌃ (`Control+Space`,
+  `Control+Meta+1`); a chord of ⌥ or ⇧ alone stays out of the menu, since those
+  type, and one press runs the command once whichever of the window and the
+  menu takes it. ⌃Space is macOS's default shortcut for Select the Previous
+  Input Source; where it is on, the system takes it before the app. The label
+  remains the button's `aria-label` or text. `disabled`/inert disable the item; hidden or removed buttons leave the
   menu. An item in the app menu or Help (`about`, `app`, `help`, and Settings…)
   is the app's, not its window's: it stays enabled, and its chord works, while
   no window is key, under a sheet and under a Contract modal dialog, as in a
@@ -3243,7 +3280,7 @@ argument validation. Use the working implementation when selecting arguments:
 | --- | --- |
 | `observe(name)`, `observe(name, Attributes(...), severity)`, `observeAttributes(Attributes(...))`, `observeError(message)`, `observeError(message, type)` or `observeFeedback(id, message[, rating[, min, max]][, Attributes(...)])`: optional Observe events, attributes merged into later events, error reports and user feedback. Feedback's attributes come last; a rating without a scale is on 0 to 10. Attributes use a shape constructor. Event names contain 1–256 characters and do not start with `expo.`; severity recognizes `trace`, `debug`, `info`, `warn`, `error` and `fatal`, defaulting to `info`. Declare the `observe` launch module and its project configuration to dispatch them. | [Observe configuration](../modules/observe/README.md), [compiler tests](../contract/cli/tests/it/observe_commands.rs) |
 | `postMessage(text, target)`: ordered messages to a canvas by literal surface name, or string replies and host updates to a live iframe by `id` on Apple and both web executors; iframe targets may compute. Missing, ambiguous, replaced or navigation-revoked iframe targets are dropped without entering the canvas queue. | LLP 1020 §11, [iframe fixture](../scripts/fixtures/iframe-post-messages.contract), [compiler tests](../contract/cli/tests/it/post_message.rs) |
-| `navigate(id, url)`, `traverseHistory(id, delta)`, `reload(id)` or `reload(id, ignoreCache=true)`, `stopLoading(id)`: move the mounted `iframe` with that `id`, by the Navigation API's and WebDriver BiDi's names; bare `reload()` stays the development host's reboot. The frame reports with `navigate=`, `currententrychange=`, `navigatesuccess=` and `navigateerror=`, each with a `FrameNavigation` record as the action's optional last parameter. On Apple a frame with `partition=` is a top-level page in that partition's own storage (`persist:` names last across launches) and takes them all; an unpartitioned frame refuses the commands (`navigateerror`, `NotSupportedError`). The web honours no `partition` (`exactPage().iframePartition` is false) and gives a same-origin frame what the browser lets a page see. A literal id no `iframe` carries is refused here; `partition` beside `sandbox` (`lower-iframe-partition-sandbox`), beside `message=` or a `postMessage` to it (`lower-iframe-partition-message`), or with a literal `src` that is not a web page (`lower-iframe-partition-src`) is refused. A partition is cleared with `clearSiteData` from `@exact/browser`: `send m = clearSiteData(partition=…, types=[…])`, or from data code `await clearSiteData({ partition, types })` once the Contract names the send (LLP 1133.002 D14). On Apple any frame that handles `newwindow=` asks for windows, with a `FrameNewWindow`: a `new-window` (`window.open` with features) from a partitioned frame has already opened as the platform's popup in the same partition; a `foreground-tab` or `background-tab` (`target=_blank`, ⌘-click), or a `new-window` from an unpartitioned frame (part of the app's page), opened nothing and is the app's; `download=` reports a download with a `FrameDownload`. Dialogs, file inputs, a download's destination and another app's scheme are the platform's sheets and panels, and `requests` under the agent (`dialog`, `open-file`, `save-file`). A guest's `window.print()` prints its own frame (a PDF frame the PDF's pages): on macOS the print panel, a sheet on the window, and the `print` request under the agent, for a web view's main frame or a PDF in a frame below it (another frame below it does not print: no public API prints it); the web prints as the browser does; iOS does not print yet. `captureScreenshot(id, "app:/tmp/shot.png")` writes a PNG of any frame's guest, and `clip=DOMRect(x=…, y=…, width=…, height=…)` a part of it in the guest's CSS pixels, as a pinch or pan leaves it; the frame answers with `capture=` and a `FrameCapture` (`path`, `width`, `height`, or `error` and `message`); a literal path outside `app:/data`, `app:/cache` and `app:/tmp` is refused here (`lower-frame-capture-path`); the web answers `NotSupportedError`. On Apple an unpartitioned, unsandboxed frame of a local PDF (`app:/` or `assets/`) shows it in PDFKit's `PDFView`, `#page=N` opening at that page. Data code that holds the grant `browser.automation` drives a partitioned frame with `@exact/browser-automation` (WebDriver BiDi's `evaluate`, `callFunction`, `addPreloadScript`, `performActions`, `handleUserPrompt`, `setDownloadBehavior`, `captureScreenshot`); while it drives one, the frame's dialogs fire `userpromptopened=` with a `FrameUserPrompt` instead of showing a sheet, until a person's input takes the frame back. `openDevTools(id)` opens the platform's inspector for a frame's guest, as Electron's `<webview>.openDevTools()`: on macOS Safari's Web Inspector in a window of its own (brought to the front when open), through WebKit's private `_inspector`; iOS makes the frame inspectable from a Mac's Safari › Develop; the web refuses it in the log | LLP 1020.002, [fixture](../scripts/fixtures/iframe-partition.contract), [windows](../scripts/fixtures/iframe-windows.contract) |
+| `navigate(id, url)`, `traverseHistory(id, delta)`, `reload(id)` or `reload(id, ignoreCache=true)`, `stopLoading(id)`: move the mounted `iframe` with that `id`, by the Navigation API's and WebDriver BiDi's names; bare `reload()` stays the development host's reboot. The frame reports with `navigate=`, `currententrychange=`, `navigatesuccess=` and `navigateerror=`, each with a `FrameNavigation` record as the action's optional last parameter. On Apple a frame with `partition=` is a top-level page in that partition's own storage (`persist:` names last across launches) and takes them all; an unpartitioned frame refuses the commands (`navigateerror`, `NotSupportedError`). Android keeps a `persist:` partition as a WebView profile where its WebView has profiles and a navigation listener (`exactPage().iframePartition` is then true), refuses every other partition (`navigateerror`, `NotSupportedError`), and there a kept partition takes the events and the commands as on Apple, but for `ignoreCache=true` (`NotSupportedError`: WebView has no reload from origin); a failed load shows Chromium's error page, and a document's title comes with its `navigatesuccess` (LLP 1020.002 §11). The web honours no `partition` (`exactPage().iframePartition` is false) and gives a same-origin frame what the browser lets a page see. A literal id no `iframe` carries is refused here; `partition` beside `sandbox` (`lower-iframe-partition-sandbox`), beside `message=` or a `postMessage` to it (`lower-iframe-partition-message`), or with a literal `src` that is not a web page (`lower-iframe-partition-src`) is refused. A partition is cleared with `clearSiteData` from `@exact/browser`: `send m = clearSiteData(partition=…, types=[…])`, or from data code `await clearSiteData({ partition, types })` once the Contract names the send (LLP 1133.002 D14); Android clears `"cookies"` or all of a partition (`"*"`), and refuses `"storage"` or `"cache"` without `"*"` (`NotSupportedError`). On Apple any frame that handles `newwindow=` asks for windows, with a `FrameNewWindow`: a `new-window` (`window.open` with features) from a partitioned frame has already opened as the platform's popup in the same partition; a `foreground-tab` or `background-tab` (`target=_blank`, ⌘-click), or a `new-window` from an unpartitioned frame (part of the app's page), opened nothing and is the app's; `download=` reports a download with a `FrameDownload`. Dialogs, file inputs, a download's destination and another app's scheme are the platform's sheets and panels, and `requests` under the agent (`dialog`, `open-file`, `save-file`). A guest's `window.print()` prints its own frame (a PDF frame the PDF's pages): on macOS the print panel, a sheet on the window, and the `print` request under the agent, for a web view's main frame or a PDF in a frame below it (another frame below it does not print: no public API prints it); the web prints as the browser does; iOS does not print yet. `captureScreenshot(id, "app:/tmp/shot.png")` writes a PNG of any frame's guest, and `clip=DOMRect(x=…, y=…, width=…, height=…)` a part of it in the guest's CSS pixels, as a pinch or pan leaves it; the frame answers with `capture=` and a `FrameCapture` (`path`, `width`, `height`, or `error` and `message`); a literal path outside `app:/data`, `app:/cache` and `app:/tmp` is refused here (`lower-frame-capture-path`); the web answers `NotSupportedError`. On Apple an unpartitioned, unsandboxed frame of a local PDF (`app:/` or `assets/`) shows it in PDFKit's `PDFView`, `#page=N` opening at that page. Data code that holds the grant `browser.automation` drives a partitioned frame with `@exact/browser-automation` (WebDriver BiDi's `evaluate`, `callFunction`, `addPreloadScript`, `performActions`, `handleUserPrompt`, `setDownloadBehavior`, `captureScreenshot`); while it drives one, the frame's dialogs fire `userpromptopened=` with a `FrameUserPrompt` instead of showing a sheet, until a person's input takes the frame back. On Android a kept partition takes `evaluate`, `callFunction` and `addPreloadScript`: a `sandbox` runs in a WebView execution world in the documents that start after the app first names it (`InvalidStateError` before), and without one a promise is not awaited and a preload script is refused (`NotSupportedError`, naming `sandbox`), since Exact puts nothing in the page's own world; input, prompts, downloads and pictures answer `NotSupportedError` there. `openDevTools(id)` opens the platform's inspector for a frame's guest, as Electron's `<webview>.openDevTools()`: on macOS Safari's Web Inspector in a window of its own (brought to the front when open), through WebKit's private `_inspector`; iOS makes the frame inspectable from a Mac's Safari › Develop; the web refuses it in the log | LLP 1020.002, [fixture](../scripts/fixtures/iframe-partition.contract), [windows](../scripts/fixtures/iframe-windows.contract) |
 | `focus(id)` | [Markdown Stress](../apps/markdown-stress/app.contract) |
 | `format(id, command[, argument])`: a Markdown editor's toolbar command ([Markdown](#markdown-markup-format-select)) | [Markdown Stress](../apps/markdown-stress/app.contract) |
 | `blur()`, `blur(id)` | [Messages](../apps/messages/app.contract), [keyboard-bar corpus](../contract/corpus/keyboard-bar.contract) |
@@ -3261,8 +3298,8 @@ argument validation. Use the working implementation when selecting arguments:
 | `exitFullscreen()`, `setWindowOpacity(opacity)`: what a quit the app holds does to its window before it quits, as Electron's `setFullScreen(false)` and `setOpacity(0)`. `exitFullscreen()` is the web's `document.exitFullscreen()`: on the Mac the session's window leaves its full-screen space (a video's own full screen is `requestFullscreen(id)`'s); nothing happens when nothing is full screen. `setWindowOpacity` draws the session's window at an opacity from 0 (unseen, still key and still hearing keys) to 1 (`NSWindow.alphaValue`); a literal outside 0–1 is refused here (`type-window-opacity`). The Mac's; the web refuses `setWindowOpacity`, and iOS and Linux refuse both, in the journal. The agent's `state.windows` shows each window's `fullScreen` and `opacity` (LLP 1069.010) | [calls tests](../contract/cli/tests/it/calls.rs), [`WindowCommandsMacTests`](../host/apple/tests/ExactKitTests/WindowCommandsMacTests.swift) |
 | `hideWindow()`: the session's window put away with the app still running, as Electron's `BrowserWindow.hide`, for a menu-bar utility whose window goes once its work is done. On the Mac it is what the person's ⌘W does under `host.macos.window.keepRunning` or while a status item is placed: the window is ordered out, its session kept, `exactPage().visibilityState` reads `hidden` and `persisted` `true`, and the next bare `focus()`, Dock click or status-item press shows it as a restore (`restores`). Where the app would end without its window (neither, or a `navigate-new` app), it is refused in the journal and the window stays; `close()` still closes the window and ends the app. On Windows it is what the close button does under `host.windows.window.keepRunning`, and refused in the journal without it. iOS, Linux, Android and the web refuse it in the journal (LLP 1133.025 D4) | [window command tests](../contract/cli/tests/it/window_commands.rs), [`WindowCommandsMacTests`](../host/apple/tests/ExactKitTests/WindowCommandsMacTests.swift) |
 | `startViewTransition()`: the action's commit cross-fades the whole window from how it looked before, as the web's `document.startViewTransition()` with the root's default animation, over 0.25 s. It takes no argument (`type-view-transition`). For a change that replaces most of the screen with no route of its own, such as a switch of the app's whole data set. The commit's own pushes and pops land without their own animation; a sheet or dialog it opens presents with its own. iOS runs `UIView.transition(with: window, options: .transitionCrossDissolve)`; a sheet the commit closes, or a dialog it closes with `close(id)`, slides out while what is beneath it cross-fades, and one that stays fades with the window. The Mac fades the window's content. iOS and the Mac fade under reduced motion too. The web (exact-web-js) runs the commit's tree update inside `document.startViewTransition` and cuts under reduced motion; the wasm web host and the painted hosts (Linux, Android, Windows) cut, with a journal line (LLP 1013.003) | [window command tests](../contract/cli/tests/it/window_commands.rs), [`ViewTransitionIOSTests`](../host/apple/tests/ExactKitTests/ViewTransitionIOSTests.swift), [`ViewTransitionMacTests`](../host/apple/tests/ExactKitTests/ViewTransitionMacTests.swift), [window transition test](../host/web-js/window-transition.test.mjs) |
-| `share(title=, text=, url=, files=)`: the system share sheet by the Web Share API's names, at least one of `text`, `url` and `files`, each its own item of the sheet (pass a picture alone to share only it, as a Share Card button does; `contract vocab share`); `url` absolute `http(s)`. `files=` lists `app:/` files, each behind the app's `fs.read` grant (on Apple a regular file of at most 64 MB, reached through no symbolic link), and `"#id"` entries: a PNG of that element as it is drawn now, at the display's scale, named by the share's `title` (else by the id) (iOS and macOS; the web refuses it, `share: refused: a picture of an element is not available on the web`, and Android refuses it, though it shares `app:/` files; Linux refuses files). A literal `#id` no element carries is refused here (`lower-share-picture`), a missing one at run time in the journal. Offer it where `exactPage()`'s `canShareFiles` and `canSharePictures` hold (LLP 1125 D12). The outcome is a journal line | [share corpus](../contract/corpus/share.contract), [Metronome](../apps/metronome/app.contract) |
-| `showPicker(id)`, export `saveFile(id, from, suggestedName)`: the host copies the `app:/` file `from` to where the person chooses; `change` at `id` carries the chosen name, `cancel` a dismissal. `saveFile(id, text=…, suggestedName=…)` saves the text itself (UTF-8), no file written first and no grant, so "export what's on screen" is one press | [picker tests](../contract/cli/tests/it/picker.rs), [Fieldnotes](../apps/fieldnotes/app.contract), [Linux's save tests](../host/painted/src/presenter/save_tests.rs) |
+| `share(title=, text=, url=, files=)`: the system share sheet by the Web Share API's names, at least one of `text`, `url` and `files`, each its own item of the sheet (pass a picture alone to share only it, as a Share Card button does; `contract vocab share`); `url` absolute `http(s)`. `files=` lists `app:/` files, each behind the app's `fs.read` grant (on Apple a regular file of at most 64 MB, reached through no symbolic link), and `"#id"` entries: a PNG of that element as it is drawn now, at the display's scale, named by the share's `title` (else by the id) (iOS and macOS; the web refuses it, `share: refused: a picture of an element is not available on the web`, and Android refuses it, though it shares `app:/` files; Linux refuses files). A literal `#id` no element carries is refused here (`lower-share-picture`), a missing one at run time in the journal. Offer it where `exactPage()`'s `canShareFiles` and `canSharePictures` hold (LLP 1125 D12). The outcome is a journal line. A file the app opens as a database is not one to share: on Apple and Android the host opens and closes the file, which drops SQLite's locks on it ([How To Corrupt An SQLite Database File, §2.2](https://sqlite.org/howtocorrupt.html#_posix_advisory_locks_canceled_by_a_separate_thread_doing_close_)); share a copy made with `storage.fs` while the database is closed, or an export of its rows | [share corpus](../contract/corpus/share.contract), [Metronome](../apps/metronome/app.contract) |
+| `showPicker(id)`, export `saveFile(id, from, suggestedName)`: the host copies the `app:/` file `from` to where the person chooses; `change` at `id` carries the chosen name, `cancel` a dismissal. As for `share`, a file the app opens as a database is not one to save: on Apple the copy's open and close drop SQLite's locks on it. `saveFile(id, text=…, suggestedName=…)` saves the text itself (UTF-8), no file written first and no grant, so "export what's on screen" is one press | [picker tests](../contract/cli/tests/it/picker.rs), [Fieldnotes](../apps/fieldnotes/app.contract), [Linux's save tests](../host/painted/src/presenter/save_tests.rs) |
 | `showOpenFilePicker(id[, multiple])` | [file-picker corpus](../contract/corpus/file-pickers.contract) |
 | `showDirectoryPicker(id)` | Same corpus |
 | `showSaveFilePicker(id, suggestedName)` | Same corpus |

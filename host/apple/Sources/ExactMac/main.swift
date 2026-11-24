@@ -14,11 +14,15 @@ import ExactKit
 import ExactComposition
 import ExactLaunchParts
 
+// The session's clock starts with `main` (`ExactEnv.t0`).
+let mainAt = Date().timeIntervalSince1970
+_ = ExactEnv.t0
 AgentLink.install()
 
 ProcessRelaunch.waitIfRequested()
 // The app's preloads leave before AppKit starts (LLP 1162.000 D4).
 ExactLaunch.beginPreloads()
+ExactEnv.stamp("preloads")
 
 // The process's own start (exec), from the kernel: what happened before
 // `main` — dyld, the Swift runtime, the static library's initializers.
@@ -30,7 +34,6 @@ func processStart() -> Double? {
     let t = info.kp_proc.p_starttime
     return Double(t.tv_sec) + Double(t.tv_usec) / 1e6
 }
-let mainAt = Date().timeIntervalSince1970
 let execToMainMs = processStart().map { (mainAt - $0) * 1000 }
 
 let smoke = ExactEnv.smoke
@@ -104,6 +107,7 @@ let appReadyMs = ExactEnv.wall()
 
 /// The one session and its view; the session's clock is the agent's under a script.
 let exact = ExactComposition.app
+ExactEnv.stamp("composition")
 final class Adapter: ExactSessionDelegate {
     /// The capabilities: `setScheme` is the app's appearance — `light`,
     /// `dark`, or `system`, as the web's `color-scheme`, where following the
@@ -237,11 +241,6 @@ func footprint() -> UInt64 {
 final class ExactWindow: ExactDrivenWindow {
     override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect {
         agentMode ? frameRect : super.constrainFrameRect(frameRect, to: screen)
-    }
-    /// A navigation is timed from its input: a mouse-up or key press.
-    override func sendEvent(_ event: NSEvent) {
-        super.sendEvent(event)
-        if [.leftMouseUp, .keyDown].contains(event.type) { ExactLaunch.shared.input(at: event.timestamp) }
     }
 }
 
@@ -611,6 +610,8 @@ let session = firstWindow.session
 let view = firstWindow.view
 let window = firstWindow.window
 window.center()
+/// A drive's named display (`--display`), which the frame the person left the app at does not move it from.
+let agentScreen = AgentDisplay.named
 /// The frame the window was left at (its autosave). AppKit keeps the content
 /// rect when `.fullSizeContentView` or a toolbar goes in, so a frame restored
 /// only before the window's chrome lost the titlebar's height at every launch
@@ -618,7 +619,7 @@ window.center()
 /// again once the window has its final style (`finishLaunching`), which is
 /// when the name goes on: setting it saves the current frame. Every app's
 /// is kept, declared size or not, as AppKit apps keep theirs (LLP 1115 D8).
-let frameName = scripted ? nil : (ExactEnv.appMetadata["CFBundleIdentifier"] as? String).map { $0 + ".main" }
+let frameName = scripted || agentScreen != nil ? nil : (ExactEnv.appMetadata["CFBundleIdentifier"] as? String).map { $0 + ".main" }
 /// Where a sidebar's width, and whether the person hid it, are kept (LLP
 /// 1115.002 D3): AppKit's autosave, as the frame's is, and not a script's.
 let sidebarName = scripted ? nil : (ExactEnv.appMetadata["CFBundleIdentifier"] as? String).map { $0 + ".sidebar" }
@@ -626,10 +627,13 @@ if let frameName { window.setFrameUsingName(frameName) }
 // Agent-driven apps run side by side (every session's smoke launches one):
 // centred, each would cover the last and starve its Metal layer of drawables.
 // Spread them by pid so no window is fully hidden.
-if agentMode {
+let agentSpread: NSPoint = {
+    guard agentMode else { return .zero }
     let k = CGFloat(Int(getpid()) % 6)
-    window.setFrameOrigin(NSPoint(x: window.frame.origin.x - 120 + 48 * k, y: window.frame.origin.y + 60 - 24 * k))
-}
+    return NSPoint(x: -120 + 48 * k, y: 60 - 24 * k)
+}()
+if agentScreen != nil { AgentDisplay.place(window, offset: agentSpread) }
+else if agentMode { window.setFrameOrigin(NSPoint(x: window.frame.origin.x + agentSpread.x, y: window.frame.origin.y + agentSpread.y)) }
 ExactEnv.stamp("center")
 
 /// The window documents go to without a new one: the key window's, else
@@ -674,8 +678,8 @@ func openWindow(asTab: Bool = false, named: String? = nil, at location: String? 
     windows.append(w)
     AgentLink.route(w.label, w.session)
     if restoring != nil { return w } // AppKit positions and orders restored windows.
-    // A named window is where the person left it, as `main` is.
-    let frame = scripted || named == nil ? nil : (ExactEnv.appMetadata["CFBundleIdentifier"] as? String).map { $0 + "." + label }
+    // A named window is where the person left it, as `main` is (not on a drive's named display).
+    let frame = scripted || agentScreen != nil || named == nil ? nil : (ExactEnv.appMetadata["CFBundleIdentifier"] as? String).map { $0 + "." + label }
     if let frame, w.window.setFrameUsingName(frame) {
         w.window.setFrameAutosaveName(frame)
     } else if let beside {
@@ -684,6 +688,8 @@ func openWindow(asTab: Bool = false, named: String? = nil, at location: String? 
         } else {
             w.window.setFrameTopLeftPoint(beside.window.cascadeTopLeft(from: NSPoint(x: beside.window.frame.minX, y: beside.window.frame.maxY)))
         }
+    } else if agentScreen != nil {
+        AgentDisplay.place(w.window)
     } else {
         w.window.center()
     }
@@ -705,7 +711,7 @@ func openTarget(_ location: String, _ target: String, resume: Bool = false) {
         return
     }
     if !resume, !open.session.shows(location) {
-        if !open.rooted { open.session.navigate(location) }
+        if !open.rooted { open.session.navigate(location, followed: true) }
         else if open.session.beforeUnload() { open.session.reroot(location) }
     }
     open.front()
@@ -790,6 +796,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
         return true
     }
     override init() {
+        ExactEnv.stamp("delegate init")
         ExactLaunch.shared.delegateInit()
         ExactLaunch.shared.runLaunchParts(ExactLaunchParts.all)
         super.init()
@@ -996,6 +1003,10 @@ func finishLaunching() {
         window.setFrameUsingName(frameName)
         window.setFrameAutosaveName(frameName)
     }
+    // Placed again at its final size, and over the frames AppKit restored.
+    if agentScreen != nil {
+        for w in windows where w === firstWindow || !AgentDisplay.holds(w.window) { AgentDisplay.place(w.window, offset: w === firstWindow ? agentSpread : .zero) }
+    }
     // Becoming key can synchronously announce readiness. Initialize the guard
     // before ordering the window, not afterward (two stdin readers otherwise).
     if !launchDocuments.isEmpty {
@@ -1087,4 +1098,5 @@ func agentReady() {
     AgentLink.reply(["ready": true, "boot": session.bootMs, "views": session.viewCount, "error": planRefusal ?? session.bootError ?? session.nativeArtifactFailure ?? NSNull()])
     AgentLink.startStdio(sessions: [("main", session)])
 }
+ExactEnv.stamp("run")
 app.run()

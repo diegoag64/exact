@@ -7,6 +7,7 @@
 //! Apple and combined requests are likewise enabled only by individual tests.
 
 #[cfg(target_os = "macos")]
+use crate::source::{boxed, Source};
 use exact_runner::HoldAnswer;
 use exact_runner::{
     Answer, CallOrigin, DataError, DataSource, Dispatch, Outcome, Reply, Request, Response, Runner,
@@ -151,7 +152,7 @@ fn boot_unpreferred(name: &str) -> (App, Host, Data) {
     let data = Data::default();
     let r = Runner::boot(
         plan,
-        data.clone(),
+        boxed(data.clone()),
         exact_kernel::Kernel::with_monospace(),
         Default::default(),
         "/",
@@ -178,7 +179,7 @@ fn boot(name: &str) -> (App, Host, Data) {
 
 /// The host: the runner, and the requests whose replies a ticket's answer sends.
 struct Host {
-    r: Runner<Data>,
+    r: Runner<Source>,
     waiting: Vec<(u64, mpsc::Receiver<Outcome>)>,
 }
 
@@ -253,10 +254,8 @@ impl Host {
     #[cfg(target_os = "macos")]
     fn call(&mut self, body: &Json) -> mpsc::Receiver<Outcome> {
         let (tx, rx) = mpsc::channel();
-        match self
-            .r
-            .native_work(&Request::native(body.to_string().into_bytes()))
-        {
+        let request = Request::native(body.to_string().into_bytes());
+        match self.r.as_person(|r| r.native_work(&request)) {
             Dispatch::Run(Work::Now(work)) => tx.send(work()).unwrap(),
             Dispatch::Run(Work::Later(work)) => work(Reply::new(move |o| tx.send(o).unwrap())),
             _ => panic!("a module call is work"),

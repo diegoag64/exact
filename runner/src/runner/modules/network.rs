@@ -126,7 +126,9 @@ impl<D: DataSource> Runner<D> {
                     .resources
                     .get(*i)
                     .is_some_and(|row| row.state.is_some())
-                && self.origin_asked(*i).is_none_or(|o| o == CallOrigin::App)
+                && self
+                    .asked_cause(*i)
+                    .is_none_or(|c| c.origin() == CallOrigin::App)
         })
     }
 }

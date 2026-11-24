@@ -1656,8 +1656,14 @@ drags start only from a handle that names its target's `id` with `heightDragFor`
 `transformDragFor` or `reorderFor`, and `reorderdrop` belongs to a vertical
 `list virtualized=true`, whose rows are the only ones a host can drag. The platform owns gesture
 recognition and competition with scrolling; Contract does not define a general
-gesture arena. See [Interaction Gallery](../apps/interaction-gallery/app.contract)
-and [Spark](../apps/spark/app.contract) for complete bindings.
+gesture arena. A `heightDragFor` handle names its unique strict ancestor by `id`.
+The target needs `box-sizing="border-box"` and a finite nonnegative point height
+(such as `height=200`). A percentage, `auto` or an omitted height cannot bind.
+The handle and its ancestors must be displayed, enabled and non-inert.
+The compiler warns with `lower-height-drag-ineligible` when it can prove a
+requirement fails; computed values remain runtime checks.
+See [Interaction Gallery](../apps/interaction-gallery/app.contract) and
+[Spark](../apps/spark/app.contract) for complete bindings.
 
 `frame("id")` reads the last laid-out border box where the viewer sees it, as
 `getBoundingClientRect` does: in the viewport, every scroll offset above it

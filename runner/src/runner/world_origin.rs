@@ -9,6 +9,7 @@
 //! cannot start a device through the world's later emissions. The hosts
 //! carry the text unchanged.
 
+use super::provenance::Cause;
 use super::{CallOrigin, Command};
 use exact_plan::Value;
 
@@ -23,6 +24,7 @@ pub(super) fn unmark(text: &str) -> Option<(CallOrigin, &str)> {
     let origin = match word {
         "tool" => CallOrigin::Tool,
         "wake" => CallOrigin::Wake,
+        "action" => CallOrigin::Action,
         _ => CallOrigin::Device,
     };
     Some((origin, text))
@@ -31,7 +33,8 @@ pub(super) fn unmark(text: &str) -> Option<(CallOrigin, &str)> {
 /// Each `postMessage` to a canvas (two arguments: an iframe's carries a
 /// third) a commit of `origin` stated: its text carries the origin, unless
 /// the commit is the app's.
-pub(super) fn mark_world_posts(origin: CallOrigin, commands: &mut [Command]) {
+pub(super) fn mark_world_posts(cause: Cause, commands: &mut [Command]) {
+    let origin = cause.origin();
     if origin == CallOrigin::App {
         return;
     }

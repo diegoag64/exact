@@ -50,7 +50,17 @@ impl<D: DataSource> Presenter<D> {
         host.set_scheme(self.dark());
         // The same launch keeps what the device said about itself.
         let runner = self.host.runner();
-        let (preferences, page) = (runner.viewport().preferences, runner.page());
+        // The candidate booted under this page's facts ([`Presenter::candidate_page`])
+        // but these, whose effects only `set_page` applies.
+        let (preferences, page) = (
+            runner.viewport().preferences,
+            exact_runner::Page {
+                hidden: runner.page().hidden,
+                frozen: runner.page().frozen,
+                background: runner.page().background,
+                ..host.runner().page()
+            },
+        );
         if let Some(error) = host.set_preferences(preferences) {
             return Err(HostError::Layout(error));
         }
@@ -152,6 +162,9 @@ impl<D: DataSource> Presenter<D> {
     pub(crate) fn page_execution(&mut self, hidden: bool, eligible: bool, seekable: bool) -> bool {
         let page = self.host.runner().page();
         let frozen = if seekable { page.frozen } else { !eligible };
+        // A canvas's device work, its game audio among it, stops with the
+        // activity and starts again with it, as on Apple and Windows.
+        self.surface_lifecycle(hidden, false);
         if page.hidden == hidden && page.frozen == frozen {
             return false;
         }
@@ -587,6 +600,7 @@ mod tests {
             let page = p.host.runner().page();
             assert_eq!(page.hidden, hidden);
             assert_eq!(page.frozen, frozen);
+            assert_eq!(p.surfaces.hidden, hidden, "the canvases are told");
             assert!(
                 !p.page_execution(hidden, eligible, false),
                 "duplicate reports make no commit"

@@ -127,14 +127,14 @@ test('Swift lock discovery follows reachable interfaces and inherited dependenci
   } finally { rmSync(root, { recursive: true, force: true }); }
 }, 120000);
 
-test('Apple metadata dictionaries refuse every key together with grant or generic advice', async () => {
+test('Apple metadata dictionaries refuse Apple and Exact keys and every entitlement, with grant or generic advice', async () => {
   const { readManifest } = await import('./app.mjs');
   const dir = mkdtempSync(resolve(tmpdir(), 'manifest-apple-metadata-'));
   const save = host => writeFileSync(resolve(dir, 'app.json'), JSON.stringify({
     name: 'Metadata', app: { id: 'dev.exact.metadata', name: 'Metadata' }, host,
   }));
   try {
-    save({ ios: { infoPlist: { NSPhotoLibraryAddUsageDescription: 'Save a photo', VendorKey: true },
+    save({ ios: { infoPlist: { NSPhotoLibraryAddUsageDescription: 'Save a photo', NSVendorKey: true, ExactVendorKey: true, Exact2: true, CADisableMinimumFrameDurationOnPhone: true, SUFeedURL: 'https://example.com/appcast.xml' },
       entitlements: { 'aps-environment': 'development', 'com.apple.developer.applesignin': ['Default'], 'vendor.claim': true } },
       macos: { infoPlist: { NSMicrophoneUsageDescription: 'Record', LSUIElement: true }, entitlements: { 'com.apple.security.device.audio-input': true, 'com.apple.developer.aps-environment': 'development' } } });
     assert.throws(() => readManifest(dir, 'metadata'), error => {
@@ -146,8 +146,11 @@ test('Apple metadata dictionaries refuse every key together with grant or generi
         'LSUIElement: refused; Exact writes this key itself from its declarations',
         'host.macos.entitlements.com.apple.security.device.audio-input: refused; Exact writes this key itself from its declarations',
         'host.macos.entitlements.com.apple.developer.aps-environment: refused; Exact writes this key itself from its declarations',
-        'feedback note', 'VendorKey', 'vendor.claim',
+        'host.ios.infoPlist.NSVendorKey: refused; not supported on ios', 'feedback note',
+        'host.ios.infoPlist.ExactVendorKey: refused', 'host.ios.infoPlist.Exact2: refused', 'host.ios.infoPlist.CADisableMinimumFrameDurationOnPhone: refused; Exact writes this key itself',
+        'vendor.claim',
       ]) assert.ok(error.message.includes(text), text + '\n' + error.message);
+      assert.doesNotMatch(error.message, /SUFeedURL/);
       return true;
     });
     for (const value of [null, [], true, 'key']) {
@@ -156,6 +159,11 @@ test('Apple metadata dictionaries refuse every key together with grant or generi
     }
     save({ ios: { infoPlist: {}, entitlements: {} }, macos: { infoPlist: {}, entitlements: {} } });
     assert.deepEqual(readManifest(dir, 'metadata').host.ios.infoPlist, {});
+    const vendor = { SUFeedURL: 'https://example.com/appcast.xml', SUScheduledCheckInterval: 86400, SUEnableAutomaticChecks: true, GADApplicationIdentifier: 'ca-app-pub-0~1' };
+    save({ ios: { infoPlist: vendor }, macos: { infoPlist: { SUFeedURL: vendor.SUFeedURL, Vendor: { list: [1, 'two'], ok: false } } } });
+    assert.deepEqual(readManifest(dir, 'metadata').host.ios.infoPlist, vendor);
+    save({ macos: { infoPlist: { SUFeedURL: null } } });
+    assert.throws(() => readManifest(dir, 'metadata'), /host\.macos\.infoPlist\.SUFeedURL: expected string or number or boolean or array or object, got null/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
@@ -1208,4 +1216,37 @@ test('a variant selection names the one app the verb resolved; another app reads
     assert.equal(selectedVariant(other, env), undefined);
     assert.equal(selectedVariant(one, {}), undefined);
   } finally { for (const dir of [one, other]) rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('controls name a tool or a url, with a title and a symbol (LLP 1126.004 D1)', async () => {
+  const {validate} = await import('./app.mjs');
+  const schema = await Bun.file(new URL('./app.schema.json', import.meta.url)).json();
+  const controls = schema.properties.controls;
+  const check = (rows) => validate(rows, controls, 'controls', schema);
+  assert.deepEqual(check([
+    { kind: 'record', title: 'Record an idea', symbol: 'mic.fill', tool: 'startRecording', authentication: 'always' },
+    { kind: 'open-inbox', title: 'Inbox', symbol: 'tray', url: '/inbox' },
+  ]), []);
+  for (const bad of [
+    { title: 'Record', symbol: 'mic.fill', tool: 't' },
+    { kind: 'a b', title: 'Record', symbol: 'mic.fill', tool: 't' },
+    { kind: 'r', symbol: 'mic.fill', tool: 't' },
+    { kind: 'r', title: ' ', symbol: 'mic.fill', tool: 't' },
+    { kind: 'r', title: 'R', symbol: 'mic.fill', url: '//elsewhere' },
+    { kind: 'r', title: 'R', symbol: 'mic.fill', tool: 't', authentication: 'never' },
+    { kind: 'r', title: 'R', symbol: 'mic.fill', tool: 't', arguments: {} },
+    { kind: 'r', title: 'R', symbol: 'mic.fill' },
+    { kind: 'r', title: 'R', symbol: 'mic.fill', tool: 't', url: '/' },
+    { kind: 'r', title: 'R', symbol: 'mic.fill', url: '/', authentication: 'always' },
+  ]) assert.ok(check([bad]).length, JSON.stringify(bad));
+});
+
+test('the web manifest keeps a file handler’s file types and drops only its folder type', async () => {
+  const { webAppManifest } = await import('./app.mjs');
+  const file_handlers = [
+    { action: '/', name: 'Documents', accept: { 'application/pdf': ['.pdf'], 'inode/directory': [] } },
+    { action: '/', name: 'Folders', accept: { 'inode/directory': [] } },
+  ];
+  assert.deepEqual(webAppManifest({ file_handlers }, 'Docs').file_handlers,
+    [{ action: '/', name: 'Documents', accept: { 'application/pdf': ['.pdf'] } }]);
 });

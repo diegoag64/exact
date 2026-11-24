@@ -92,6 +92,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "activity-fixture-android"
+version = "0.1.0"
+dependencies = [
+ "activity-fixture-data",
+ "contract",
+ "exact-bake",
+ "exact-painted",
+]
+
+[[package]]
 name = "activity-fixture-apple"
 version = "0.1.0"
 dependencies = [
@@ -978,6 +988,7 @@ dependencies = [
  "exact-kernel",
  "exact-motion",
  "exact-plan",
+ "exact-route",
  "exact-runner",
  "exact-shader-uniforms",
  "libc",
@@ -1785,6 +1796,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "raw-window-handle",
+ "sha2 0.10.9",
  "swash",
  "tiny-skia 0.12.0",
  "wasm-bindgen-futures",
@@ -2056,6 +2068,7 @@ name = "exact-painted"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bytemuck",
  "caltrain",
  "caltrain-data",
  "cc",
@@ -2352,6 +2365,7 @@ dependencies = [
  "exact-runner",
  "exact-web",
  "exact-web-capabilities",
+ "libc",
  "serde_json",
 ]
 
@@ -4934,7 +4948,22 @@ dependencies = [
  "contract",
  "exact-bake",
  "exact-data-host",
+ "exact-logic",
  "exact-painted",
+ "ibex2-sqlite",
+ "photos-fixture-data",
+]
+
+[[package]]
+name = "photos-fixture-apple"
+version = "0.1.0"
+dependencies = [
+ "contract",
+ "exact-apple",
+ "exact-bake",
+ "exact-data-host",
+ "exact-logic",
+ "ibex2-sqlite",
  "photos-fixture-data",
 ]
 
@@ -4942,9 +4971,12 @@ dependencies = [
 name = "photos-fixture-data"
 version = "0.1.0"
 dependencies = [
+ "contract",
  "exact-data",
+ "exact-data-host",
  "exact-plan",
  "exact-runner",
+ "ibex2-sqlite",
  "serde_json",
 ]
 

@@ -152,9 +152,9 @@ impl<D: DataSource> Runner<D> {
         args: Json,
         reader: Option<usize>,
     ) -> Request {
-        let origin = self.call_origin();
+        let cause = self.cause();
         let body = self.forward_body(row, args, reader);
-        self.anchor_body(row, &body, origin);
+        self.anchor_body(row, &body, cause);
         Request::native(body)
     }
 
@@ -236,12 +236,17 @@ impl<D: DataSource> Runner<D> {
                 }
             }
         }
-        let origin = match reader {
-            Some(i) => self.origin_for(Some(crate::runner::Target::Resource(i))),
-            None => self.call_origin(),
+        let cause = match reader {
+            Some(i) => self.cause_for(crate::runner::Target::Resource(i)),
+            None => self.cause(),
         };
+        let origin = cause.origin();
         if origin != super::CallOrigin::App {
-            body["origin"] = json!(origin.word());
+            // A capture a live recording press may start (LLP 1126.004 D4):
+            // the implementation opens the microphone for it as for the app.
+            let press =
+                origin == super::CallOrigin::Action && self.press_starts_audio(row, &args, cause);
+            body["origin"] = json!(if press { "press" } else { origin.word() });
             // A call not the app's that would ask (LLP 1133.002 D12): the
             // host reads the status first and refuses it while `prompt`,
             // since only the implementation knows the platform's state.
@@ -259,7 +264,7 @@ impl<D: DataSource> Runner<D> {
         }
         // A person's input stands (`provenance.rs`): the implementation may take
         // the call as their act.
-        if self.user_activation(origin) {
+        if self.user_activation(cause) {
             body["userActivation"] = json!(true);
         }
         // A send's number, which `cancel` names if it is let go (LLP 1133.016 D15 item 2).

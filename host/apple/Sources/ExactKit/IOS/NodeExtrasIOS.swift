@@ -10,9 +10,12 @@ package enum NavigationPaintRole {
 }
 
 /// A transform handle's contact, which the Drag module keeps: the core asks
-/// only for its pinch, which gesture precedence orders.
+/// for its pinch, which gesture precedence orders, and tells it each touch its
+/// pan receives.
 package protocol TransformPinchContact: AnyObject {
     var pinchRecognizer: UIGestureRecognizer { get }
+    /// A touch the pan receives, at `point` (window points).
+    func panReceived(_ touch: UITouch, at point: CGPoint)
 }
 
 /// What most nodes never set — gestures and their holds, editors and
@@ -141,6 +144,9 @@ final class NodeExtras {
     var swipeOrigin: Double = 0
     var contextRecognizer: UILongPressGestureRecognizer?
     var doubleRecognizer: UITapGestureRecognizer?
+    #if os(iOS)
+    var portalRelay: MountRelay?
+    #endif
     #if !os(tvOS)
     var hoverRecognizer: UIHoverGestureRecognizer?
     var lookHoverRecognizer: UIHoverGestureRecognizer?
@@ -198,6 +204,10 @@ final class NodeExtras {
     /// While a pull-down's menu has this invoker (`MenuButton`), its fill is
     /// painted here, which UIKit's stand-in draws, instead of on its layer.
     var lentFill: CAShapeLayer?
+    /// The box's extension (`setExtension`, LLP 1123 D13), while its picture is mirrored past its border box.
+    var boxExtension: BoxExtension?
+    /// The extension's outsets as last asked (`setExtension`), which it keeps while the box does not allow it.
+    var extensionAsked = UIEdgeInsets.zero
     /// `glassGroup`'s view and a grouped glass's slot (`GlassGroup.swift`).
     var glassGroupView: GlassGroupView?
     var glassSlot: GlassSlot?
@@ -381,6 +391,10 @@ extension NodeView {
     var swipeOrigin: Double { get { extras?.swipeOrigin ?? 0 } set { if newValue != 0 || extras != nil { more.swipeOrigin = newValue } } }
     var contextRecognizer: UILongPressGestureRecognizer? { get { extras?.contextRecognizer } set { if newValue != nil || extras != nil { more.contextRecognizer = newValue } } }
     var doubleRecognizer: UITapGestureRecognizer? { get { extras?.doubleRecognizer } set { if newValue != nil || extras != nil { more.doubleRecognizer = newValue } } }
+    #if os(iOS)
+    /// A `portal` mover's relay to its declaration's listeners (`syncPortalRelay`).
+    var portalRelay: MountRelay? { get { extras?.portalRelay } set { if newValue != nil || extras != nil { more.portalRelay = newValue } } }
+    #endif
     #if !os(tvOS)
     var hoverRecognizer: UIHoverGestureRecognizer? { get { extras?.hoverRecognizer } set { if newValue != nil || extras != nil { more.hoverRecognizer = newValue } } }
     var lookHoverRecognizer: UIHoverGestureRecognizer? { get { extras?.lookHoverRecognizer } set { if newValue != nil || extras != nil { more.lookHoverRecognizer = newValue } } }
@@ -522,6 +536,8 @@ extension NodeView {
     package var pageBand: UIEdgeInsets { extras?.pageBand ?? .zero }
     /// Its reach (`NodeExtras.reach`), zero until activation applies the kernel's.
     package var reach: UIEdgeInsets { extras?.reach ?? .zero }
+    /// Its extension (`setExtension`), nil while its picture is not mirrored.
+    package var boxExtension: BoxExtension? { extras?.boxExtension }
     /// Whether the kernel has given its reach (`NodeExtras.reachGiven`).
     package var reachGiven: Bool { extras?.reachGiven ?? false }
     /// How far its scroll view lies past its box on each edge: its page band's top and bottom, or

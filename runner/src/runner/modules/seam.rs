@@ -2,7 +2,7 @@
 //! modules' code (`module_seam.rs`).
 
 use super::super::module_seam::{Modules, Readers};
-use super::super::provenance::CallOrigin;
+use super::super::provenance::{CallOrigin, Cause};
 use super::super::{CommitReceipt, DataError, DataSource, Runner, RunnerError, Target};
 use super::AppState;
 use crate::request::{Answer, Dispatch, Outcome, Request};
@@ -401,8 +401,8 @@ impl<D: DataSource> Modules<D> for LinkedModules {
         r.tool_landed_linked(ticket, outcome)
     }
 
-    fn tool_origin(&self, r: &Runner<D>) -> Option<CallOrigin> {
-        r.tool_origin_linked()
+    fn tool_cause(&self, r: &Runner<D>) -> Option<crate::runner::provenance::Cause> {
+        r.tool_cause_linked()
     }
 
     fn tool_refusal(&self, r: &mut Runner<D>, allow_ordered: bool) -> Option<(u64, &'static str)> {
@@ -413,7 +413,7 @@ impl<D: DataSource> Modules<D> for LinkedModules {
         r.tool_tickets_linked()
     }
 
-    fn view_origin(&self, r: &Runner<D>, id: ViewId, prop: Option<&str>) -> Option<CallOrigin> {
+    fn view_origin(&self, r: &Runner<D>, id: ViewId, prop: Option<&str>) -> Option<Cause> {
         r.view_origin_linked(id, prop)
     }
 

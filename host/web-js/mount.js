@@ -61,6 +61,9 @@ export function unadopted(f) {
 }
 /** Whether construction is adopting a rendered page. */
 export const adopting = () => Adopt;
+/** Placement by `portal` (portal.js), installed by a plan that says it. */
+export let Portals = null;
+export const usePortals = p => (Portals = p);
 /** Adopt a rendered row under `w` (a virtualized list's, LLP 1048.001):
  * one that isn't this plan's projection is built afresh, alone. */
 export function adoptRow(w, f) {
@@ -96,6 +99,7 @@ function range(p) {
   return [a, b];
 }
 function leave(n) {
+  Portals?.rescue(n);
   const shell = n.nodeType === 1 && n.hasAttribute('data-exact-list-item') ? n : null;
   n = shell ? listRow(shell) : n;
   if (n && !exiting(n)) Leave ? Leave(n) : sheetLeaves(n) || n.remove();
@@ -362,6 +366,7 @@ export function each(p, list, key, row, pure) {
         !viewChildren(parent).some(r => r.getAttribute('navigationPresentation') === 'modal')
       ) {
         endAll(gone);
+        Portals?.rescue(parent);
         parent.textContent = '';
         parent.append(a, b);
       } else if (gone.size) {
@@ -402,7 +407,8 @@ export function each(p, list, key, row, pure) {
             continue;
           }
           flush();
-          if (!stay.has(i)) {
+          if (!stay.has(i) && Portals) Portals.moveRange(parent, r.start, r.end, anchor);
+          else if (!stay.has(i)) {
             const f = document.createDocumentFragment();
             let n = r.start;
             while (n) {
@@ -611,7 +617,9 @@ export function mount(f) {
   root.dataset.bootMs = String(Math.round(performance.now()));
   // Replayed once, in order, on the same elements (LLP 1048.001 D5), each
   // edited control first showing what the reader left in it (its row, if it
-  // waits for a slice, adopted first, so adoption doesn't write over it).
+  // waits for a slice, adopted first, so adoption doesn't write over it). One
+  // whose element is gone, with another location's document or an abandoned
+  // one, is dropped.
   for (const t of early) adoptAt(t.target);
   for (const [e, v, c] of shown)
     if (e.isConnected) {
@@ -619,8 +627,9 @@ export function mount(f) {
       else if (e.type !== 'file') e.value = v;
     }
   for (const t of early)
-    if (t.target.isConnected)
-      t.type === 'click' ? t.target.click() : t.target.dispatchEvent(new Event(t.type, { bubbles: true }));
+    if (!t.target.isConnected) say(`document: an early ${t.type} was dropped (its element is gone)`);
+    else if (t.type === 'click') t.target.click();
+    else t.target.dispatchEvent(new Event(t.type, { bubbles: true }));
 }
 /** The page's checkpoint (LLP 1048.000 D6): the time the render stopped at, and by resource name the `source` and
  * `answers` its document used, each `[args, value, open, reads]`: one, or a list's elements', where a new element
@@ -638,14 +647,20 @@ export function checkpoint() {
   const cp = JSON.parse(el.textContent);
   // Render fresh, seeding nothing, where the browser's path is not the page's once both are canonical, the query aside
   // (LLP 1048.000 D6): a page a static host serves at another path, its `404.html` or its fallback to `/`, is another
-  // location's document, and its answers are another location's. Both paths keep a mounted build's base.
-  if (canonical(location.pathname) !== canonical(cp.location).split('?')[0]) {
+  // location's document, and its answers are another location's. Both paths keep a mounted build's base. Repeated and
+  // trailing slashes make no other page (`canonical_location`, host/web/src/page.rs): put the page's own path in the
+  // address bar, as the server redirects to it (D11), since no route matches a path with an empty segment.
+  const at = canonical(cp.location).split('?')[0], one = path => path.split('/').filter(Boolean).join('/');
+  if (one(canonical(location.pathname)) !== one(at)) {
     Checkpoint.elsewhere = true;
     say(`document: rendered at ${cp.location}, not ${location.pathname}; rendering fresh`);
     return Checkpoint;
   }
+  // (its origin too: a path that opens with two slashes would name a host)
+  if (canonical(location.pathname) !== at) history.replaceState(history.state, '', location.origin + at + location.search + location.hash);
   const open = new Set(cp.open),
-    readers = new Set(cp.readers);
+    readers = new Set(cp.readers),
+    paths = new Map(cp.instances);
   // A drive starts at zero even when its document was rendered on a wall clock.
   const driven = typeof location !== 'undefined' && agentMode() && !globalThis.__exactRender;
   if (driven) for (const k of checkpointFaults(cp)) open.add(k);
@@ -655,7 +670,7 @@ export function checkpoint() {
     if (!Checkpoint.kept.has(name)) {
       Checkpoint.kept.set(name, { source, answers: [], next: 0 });
     }
-    Checkpoint.kept.get(name).answers.push([value_(args), value_(value), open.has(k), readers.has(k)]);
+    Checkpoint.kept.get(name).answers.push([value_(args), value_(value), open.has(k), readers.has(k), paths.get(k)]);
   });
   Checkpoint.time = clock.now = driven ? 0 : cp.time || 0;
   return Checkpoint;

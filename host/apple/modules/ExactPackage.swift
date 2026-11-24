@@ -253,9 +253,11 @@ public final class ExactPackageContext {
     /// `app:/tmp`: the app's own, or under the agent its drive's store (a
     /// named one, `EXACT_AGENT_STORAGE`, kept across the drive's launches).
     public let data: URL, cache: URL, temporary: URL
-    /// Who made the call being answered now (`app`, `tool`, `wake`): set by
-    /// the host before each `later`, read by an implementation at its entry,
-    /// as a capture's first lease is refused to a tool's read (LLP 1133.009 D6).
+    /// Who made the call being answered now (`app`, `tool`, `wake`,
+    /// `action`, `device`, or `press`: a live press of a recording control,
+    /// which may start the microphone, LLP 1126.004 D4): set by the host before each `later`,
+    /// read by an implementation at its entry, as a capture's first lease is
+    /// refused to a tool's read (LLP 1133.009 D6).
     public var origin = "app"
     /// The runner's number for the send being answered now, set beside
     /// `origin`: the one `cancel(_:)` names when the call is let go (LLP
@@ -298,6 +300,14 @@ public final class ExactPackageContext {
     public let push: ExactPushRegistration
     /// The host events held for this session (LLP 1133.001.000 D2).
     public let hostEvents: ExactHostEvents
+    /// The package's configuration (LLP 1133.021 §9 item 7): each key its
+    /// interface's `exact.json` declares under `config.ios`, `config.macos`
+    /// or `config.tvos`, for this build's platform, that the app's
+    /// `app.json` gives under `packages.<interface>.<platform>`, a key typed
+    /// `env` as the variable's value when the app was built: a `String`, a
+    /// number or a `Bool` as declared. A key given no value is absent. Read at
+    /// build: changing one is a new binary.
+    public let config: [String: Any]
 
     public init(agent: Bool, session: String, hostSession: String = "", label: String? = nil,
                 data: URL? = nil, cache: URL? = nil, temporary: URL? = nil, changed: @escaping (String) -> Void,
@@ -325,7 +335,7 @@ public final class ExactPackageContext {
                 push: ExactPushRegistration = ExactPushRegistration { nil },
                 hostEvents: ExactHostEvents = ExactHostEvents { _ in [] },
                 expireWake: @escaping (String) -> Void = { _ in },
-                state: @escaping ([String: Any]) -> Void = { _ in }) {
+                state: @escaping ([String: Any]) -> Void = { _ in }, config: [String: Any] = [:]) {
         self.agent = agent; self.session = session; self.hostSession = hostSession; self.label = label ?? session
         credentials = ExactCredentialMembers.table(session)
         let scratch = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
@@ -336,6 +346,7 @@ public final class ExactPackageContext {
         self.surfaces = surfaces; orientationFn = orientation; viewFn = view; invokeFn = invoke
         emitFn = emit; activationFn = activation; wakeFn = wake; self.wakes = wakes; self.transfers = transfers
         self.pads = pads; afterFn = after; self.regions = regions; self.push = push; self.hostEvents = hostEvents; expireWakeFn = expireWake; stateFn = state
+        self.config = config
     }
 
     /// `body` once, `ms` later on the session's clock: the agent's under the
@@ -907,7 +918,7 @@ public final class ExactTrackEntry {
 /// joining takes the track's lease (D6), and tells it the track's changes.
 public protocol ExactTrackOwner: AnyObject {
     /// `consumer` joins track `id`; `start` is an explicit start, which
-    /// reopens an idle track; `origin` is `app`, `tool` or `wake`.
+    /// reopens an idle track; `origin` is `app`, `tool`, `wake` or `press`.
     func subscribe(_ id: String, _ consumer: ExactTrackConsumer, start: Bool, origin: String) throws -> ExactSubscription
     /// `observer` joins track `id` as an output that is not a consumer (LLP
     /// 1133.027 D17 item 1): told what a consumer is told, attaching its

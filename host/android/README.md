@@ -27,7 +27,8 @@ An `iframe` with `sandbox`, including `sandbox=""`, is refused before a WebView 
 names `iframe <id>: sandbox is unsupported on Android`. Adding `sandbox` destroys the frame's existing WebView.
 
 A frame whose renderer ends, by a crash or because Android reclaimed it, keeps the app running: its WebView is
-destroyed and a new one silently reloads its `src` (LLP 1020 D2). The log names `iframe <id>: the page's renderer
+destroyed and a new one silently reloads its `src` (LLP 1020 D2); a kept partition's frame (`FrameBrowser.kt`) reports
+the end and reloads what it showed as LLP 1020.002 D2 has it. The log names `iframe <id>: the page's renderer
 crashed; loading its src again`. The frame reports `load` for completed documents, including error pages.
 AndroidX's navigation listener identifies each document separately. With web messaging, the reader observes
 the document's load from document start when available, or from the main-frame commit on older providers.
@@ -439,7 +440,7 @@ their own (a group: ops 20 and 21) is translated on the UI thread in the frame t
 far, mounts and retires rows behind it, and its next stream draws the rows where it then has them; the reader places
 the node by the difference. This is what a driver's `scroll` always did, now for the scroller under the finger.
 
-Six calls cross, all in the view's pixels:
+Six calls cross between the reader and exact2.
 
 | Call | Direction | What it says |
 |---|---|---|
@@ -448,7 +449,7 @@ Six calls cross, all in the view's pixels:
 | `Native.scrollDrag(id, ended, vx, vy, rest, restX, restY)` (`CanvasHost::drag_began`, `drag_ended`; `presenter/scroll_drag.rs`) | reader tells | A finger began dragging scroller `id`, at the drag's first move of it (each scroller the drag moves, an outer one the hand-off reaches too); or let go of it, before the fling's first frame, with `VelocityTracker`'s velocity (px/s, positive as the offset grows) and where the scroller will rest (`OverScroller`'s end, or where it is when nothing is thrown). The app hears `scrolldragstart` and `scrolldragend`. From the start the scroller's moves owe no `scrollend` until the lift with nothing thrown, or until the fling stops |
 | `Native.refresh(id)` (`CanvasHost::refresh`, `Presenter::reader_refresh`) | reader tells | A pull to refresh of scroller `id` was let go of past its threshold: the app hears `refresh` |
 | `Native.flingEnded(id)` (`CanvasHost::fling_ended`, `Presenter::reader_fling_ended`) | reader tells | The fling a drag of scroller `id` threw stopped: at rest, caught by a finger, or ended by the app's scroll. Its `scrollend` is due now |
-| `Native.scrollers()` (`CanvasHost::scrollers`, `Presenter::reader_scrollers`) | exact2 tells, with each stream | For every scroller it has told the reader of: its id, its axes, its revision, where it is, the offset its rows were last painted at, and its farthest offset. Null when nothing of it changed; a scroller it leaves out is gone, and the reader forgets it |
+| `Native.scrollers()` (`CanvasHost::scrollers`, `Presenter::reader_scrollers`) | exact2 tells, with each stream | The producer’s scale, then each scroller’s id, flags, revision, current offset in points, recorded offset in pixels, and farthest offset in points. Null when nothing of it changed; a scroller it leaves out is gone, and the reader forgets it |
 
 **Who is the authority.** While a drag or a fling runs, the reader: exact2 takes each move as told. A scroll the app
 makes goes the other way (a `scrollTop` or `scrollLeft` write, `scrollIntoView` of an element, `scrollBy`, a field kept
@@ -683,11 +684,27 @@ capability has a call of its own.
 | 20 | a signed update activated with its own assets (LLP 1030.006 D1, D5) | the generation's asset directory as a string, empty for the APK's | opens every video and page again, and the next sound batch its files, under `Native.assetRoot()` (`AssetRoot`); calls `Native.drew()` after its next drawing, which makes the new generation's boot good | none |
 | 22 | the active `head` title (LLP 1048.003 D1) | a string, including an empty string, or no words when no active `head` sets a title | sets the activity's window title, restoring the activity's original label when no title is set | none |
 | 23 | a node's drag out of the app (LLP 1094.000 D7) | the node; its box (x, y, width, height) and the finger (x, y) in the view's pixels; 1 when an assistive service started it, else 0; two strings, text and URL; the files' count, then each file as the node names it (a shipped `assets/` name or an `app:/` path) | `DragOut`: each file as a content URI of `Files`, then the URL and the text as `text/plain` items, in `View.startDragAndDrop` with `DRAG_FLAG_GLOBAL`, `DRAG_FLAG_GLOBAL_URI_READ` and, for a service's drag, `DRAG_FLAG_ACCESSIBILITY_ACTION`; the shadow is the window's picture of the box | none; a file it cannot read and a drag the platform refuses are journaled |
+| 24 | a live activity's send or the source's first read (LLP 1126 D13) | a string: `{"ticket", "command", "args"}` as the runner wrote its `exact-activity:` body, or `{"enumerate": true}` | `Activities`: posts, replaces or cancels the activity's ongoing notification (its tag the activity id), which asks to be promoted to a Live Update | `Native.activities` with `{"ticket", "status", "body": {"id"}}` or `{"ticket", "status": 400, "error"}`, then the list `{"activities", "frequentPushesEnabled"}`, never by the request's id |
 
 Kinds 5, 6, 7, 8, 13, 14 and 22 are statements of the app's state, told when it changes and anew to a reader made
 again. `Presenter::tell_shell` reads them as the queue is taken. Back, the wake lock, the orientation lock and the
 window title are read after a commit. Opening or closing a surface also updates Back. None of these statements are
 read during a scroll's own frames.
+
+**Live activities** (LLP 1126 D13). A `live_activities` row with an `android` mapping is an ongoing notification
+(`Activities.kt`; the mapping is docs/reference.md's "Live Activities"). The build writes the bake's
+`reach.androidActivities` as `res/raw/exact_activities.json` and adds `POST_PROMOTED_NOTIFICATIONS`; the presenter
+links the sends only then. Each post asks for promotion by `Notification.EXTRA_REQUEST_PROMOTED_ONGOING`, the extra
+the framework's 36.1 builder method and AndroidX's set, so no version check guards the request; the chip's text
+(`setShortCriticalText`) and `ProgressStyle` need API 36, and below it the progress is `setProgress`. An activity
+is `promoted` when its posted notification carries `FLAG_PROMOTED_ONGOING`. The list is read from
+`getActiveNotifications()` at the source's first read, after each send once the system shows its post (`notify` takes
+effect a few main-thread turns later), at `onResume` and when the window regains focus, so a cold start relists the
+activities and one the person dismissed leaves the list.
+`adb shell dumpsys notification --noredact` shows each post: its `flags` (`ONGOING_EVENT`, `PROMOTED_ONGOING`) and
+extras (`android.requestPromotedOngoing`, `android.shortCriticalText`, `android.progress`). The agent's drives
+force-stop the app, and Android cancels a force-stopped app's notifications, so a drive that reads them back is a
+`--live` one, read while it runs.
 
 For sound diagnostics in a debuggable APK, capture `adb logcat -v monotonic -s exact:D AAudio:D AudioTrack:D`
 alongside emulator PCM and `dumpsys audio` / `dumpsys media.audio_flinger`. The `sound` lines give foreground
@@ -1539,7 +1556,12 @@ Not built of D11:
   matches Compose's height, corners, outline, colours and baselines, headless and on an API 36 emulator; a hugging
   group is 2 dp wider (QUEUE). The outline is whole pixels, as `Modifier.border` rounds it. A phone run remains
   owed, as does Compose's motion (the label slides and the check grows; here both change at once).
-- **List items** and their dividers (rows as cells land on every host at once).
+- **List items' slots and type.** A grouped list's rows take `ListItem`'s padding, leading gap and 56 dp
+  minimum height. A statically visible title and subtitle stacked in a column take a 72 dp minimum.
+  Conditional content grows from the 56 dp minimum. The page, list and cards share `ListItem`'s
+  `surface` colour, and rows have no separator (`grouped-*` rows' Material cells).
+  The leading and trailing slots' sizes and colours, the supporting text's style, the three-line item
+  and Material's section headers remain open.
 - **A header's rich title**: the avatar, the subtitle and the tap on the title that iOS shows are not read here.
 - **`onSecondaryContainer`** for the selected symbol, badges, a navigation rail on a wide window, and hiding the
   navigation bar for a route pushed while the tablist is hidden (the bar follows the tablist's own `display`).

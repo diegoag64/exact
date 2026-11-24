@@ -33,6 +33,7 @@
 //! Outside the agent a bound implementation takes the call, and journals
 //! its own outcome; a data-code call settles from its reply.
 
+use super::super::provenance::Cause;
 use super::super::{DataSource, Runner};
 use super::{error_code, response, CallOrigin, Json, ModulesRow, Pending, Waits};
 use crate::request::{Dispatch, Outcome, Reply, Work};
@@ -99,7 +100,7 @@ struct HeldEffect {
     args: Json,
     /// The permission its ticket asks: its own, or one its own requires.
     permission: String,
-    origin: CallOrigin,
+    cause: Cause,
     /// A data-code call's reply, settled when the ticket is answered.
     reply: Option<Arc<Mutex<Pending>>>,
 }
@@ -152,12 +153,12 @@ impl<D: DataSource> Runner<D> {
 
     /// Run the effects a commit stated, in order, once it stands.
     pub(super) fn run_module_effects_linked(&mut self, effects: Vec<(ModulesRow, Vec<Value>)>) {
-        let origin = self.call_origin();
+        let cause = self.cause();
         for (row, args) in effects {
             let mut args = self.args_json(&row, &args);
             self.clamp_bounds(&row, &mut args);
             self.resolve_of(&row, &mut args);
-            let _ = self.module_effect(&row, args, None, origin);
+            let _ = self.module_effect(&row, args, None, cause);
         }
     }
 
@@ -168,7 +169,7 @@ impl<D: DataSource> Runner<D> {
         row: &ModulesRow,
         args: Json,
         reply: Option<Arc<Mutex<Pending>>>,
-        origin: CallOrigin,
+        cause: Cause,
     ) -> Effect {
         let declared = self.plan.str(row.declared).to_owned();
         // The grants, origin and foreground every call is held to (LLP
@@ -181,7 +182,7 @@ impl<D: DataSource> Runner<D> {
         if let Some(refused) = self.undeclared(row, &args) {
             return Effect::Now(refused);
         }
-        if let Err(why) = self.admit(row, &args, origin) {
+        if let Err(why) = self.admit(row, &args, cause) {
             self.log(format!("{}: refused, {why}", self.key(row)));
             let message = why
                 .starts_with("person-required")
@@ -198,7 +199,7 @@ impl<D: DataSource> Runner<D> {
         // The implementation answers: bound as in production, or, for an
         // interface that is its own substitute, told it runs under the agent.
         if self.route(row) != super::Route::Substitute {
-            let request = self.as_origin(origin, |r| r.bound_request(row, args, None));
+            let request = self.as_cause(cause, |r| r.bound_request(row, args, None));
             let lines = self.extensions.declared.lines.clone();
             let slot = self.native_slot();
             let Some(handler) = slot.extension_handler() else {
@@ -206,10 +207,9 @@ impl<D: DataSource> Runner<D> {
             };
             // A background action owns a native statement until its reply;
             // ordinary wakes keep fire-and-forget statements (LLP 1133.004 stage 2).
-            let owner = if reply.is_none() && origin == CallOrigin::Action {
-                self.invocation_id()
-            } else {
-                0
+            let owner = match reply.is_none() && self.action_owns(cause.owner()) {
+                true => cause.owner(),
+                false => 0,
             };
             let statements = self.extensions.declared.statements.clone();
             if owner != 0 {
@@ -257,7 +257,7 @@ impl<D: DataSource> Runner<D> {
                 None => Effect::Now(Json::Null),
             };
         }
-        let said = self.say_person_required(row, true, origin);
+        let said = self.say_person_required(row, true, cause);
         // The permission that settles the call: its own, or one it requires.
         let sub = self.substitute_for(row, &args);
         let permission = &sub["permission"];
@@ -281,13 +281,13 @@ impl<D: DataSource> Runner<D> {
                     .to_owned();
                 let permission = self.permission_name(row, &args);
                 let hold =
-                    self.device_hold(row, declared, Waits::Permission, origin, &permission, &args);
+                    self.device_hold(row, declared, Waits::Permission, cause, &permission, &args);
                 self.extensions.declared.held.push(HeldEffect {
                     hold,
                     source,
                     args,
                     permission,
-                    origin,
+                    cause,
                     reply,
                 });
                 Effect::Held
@@ -297,7 +297,7 @@ impl<D: DataSource> Runner<D> {
                 .map_or_else(|| self.apply_effect(row, &args), Err)
             {
                 Ok(()) => {
-                    self.effect_played(row, &args, origin);
+                    self.effect_played(row, &args, cause);
                     Effect::Now(self.effect_answer(row, &args))
                 }
                 Err(refusal) => {
@@ -349,14 +349,9 @@ impl<D: DataSource> Runner<D> {
 
     /// A data-code call of a send that answers nothing, substituted: it
     /// settles once the effect is done or refused.
-    pub(super) fn effect_call(
-        &mut self,
-        row: &ModulesRow,
-        args: Json,
-        origin: CallOrigin,
-    ) -> Dispatch {
+    pub(super) fn effect_call(&mut self, row: &ModulesRow, args: Json, cause: Cause) -> Dispatch {
         let slot = Arc::new(Mutex::new(Pending::default()));
-        if let Effect::Now(answer) = self.module_effect(row, args, Some(slot.clone()), origin) {
+        if let Effect::Now(answer) = self.module_effect(row, args, Some(slot.clone()), cause) {
             return Dispatch::Run(Work::Now(Box::new(move || response(&answer))));
         }
         Dispatch::Run(Work::Later(Box::new(move |reply| {
@@ -591,7 +586,7 @@ impl<D: DataSource> Runner<D> {
                         &row,
                         declared,
                         Waits::Permission,
-                        h.origin,
+                        h.cause,
                         &next_name,
                         &h.args,
                     );

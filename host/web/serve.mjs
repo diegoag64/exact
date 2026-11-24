@@ -14,6 +14,7 @@ import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from '
 import { fileURLToPath } from 'node:url';
 import { filesystem, filesystemRead, filesystemTree } from '../../scripts/filesystem.mjs';
 import { withLock } from './build-lock.mjs';
+import { linkedSourcesChanged } from '../../scripts/web-build.mjs';
 import { canonicalBytes, readAssetIndex } from '../../scripts/deploy-signing.mjs';
 import { copyShaders, developmentURLScheme, resolveApp, webDist, webHostFiles } from '../../scripts/app.mjs';
 import { settingChanges } from '../../js/bake/src/__exact_env.mjs';
@@ -877,7 +878,8 @@ export function jsTargetBuild(dist) {
  * index.html (a page rendered at build); else, for an HTML navigation (`acceptsHTML`) whose path a route in the
  * build's `routes.json` matches, `shell.html`. With `miss`, a request the rule finds nothing for gets the build's
  * `404.html`, else, for a navigation to a page, the shell, whose client draws the notfound route; either marked
- * `status: 404`. The previous build answers during a rebuild's rename. */
+ * `status: 404`; and a navigation's other spelling of a page's path gets `status: 301` and the page's `location`. The
+ * previous build answers during a rebuild's rename. */
 export function buildTreeFile(dist, pathname, accept = '', { miss = false } = {}) { return runReads(treeFile(dist, pathname, accept, miss)); }
 export function buildTreeFileAsync(dist, pathname, accept = '', { miss = false } = {}) { return runReadsAsync(treeFile(dist, pathname, accept, miss)); }
 function* treeFile(dist, pathname, accept, miss) {
@@ -924,6 +926,9 @@ function* treeFile(dist, pathname, accept, miss) {
       // A route table that cannot be read is no answer yet (503 when serving), never "no route" (a 404 for a page).
       if (routes === null) return miss ? { status: 503 } : null;
       const at = appDocumentPath(pathname, true, routes) ? matchPattern(routes, canonical(pathname)) : -1;
+      // One URL per page: a path with an empty segment redirects to the page's (LLP 1048.000 D11), except a directory's own page.
+      const one = '/' + pathname.split('/').filter(Boolean).join('/'), own = routes[matchPattern(routes, canonical(one))];
+      if (miss && at < 0 && one !== pathname && own && (!index || own.render === 'build') && appDocumentPath(one, true, routes)) return { status: 301, location: one };
       const render = at >= 0 ? routes[at].render : null, shell = file('/shell.html'), served = (policy) => policy === 'request' || policy === 'cached';
       // The shell, with its route's render policy, which `serve` renders in its place (`render=request` or `cached`):
       // before a directory's index.html for such a route, since the root's is the shell too; a page built for its
@@ -976,12 +981,13 @@ export async function serveBuildTree(dist, req, res, { base = buildBase(dist), p
   // server rendering pages answers it; a route the client draws stays a browser's.
   if (pages && target && r !== markdown && asksPage(req, path) && !acceptsHTML(req.headers.accept)) {
     const page = await servedFile(dist, target.pathname, 'text/html', { pinned, base });
-    if (page.route === '/shell.html' && ['request', 'cached'].includes(page.render)) r = page;
+    if (page.status === 301 || page.route === '/shell.html' && ['request', 'cached'].includes(page.render)) r = page;
   }
   if (markdown && r.status === 404 && (await servedFile(dist, target.pathname, 'text/html', { pinned, base })).status === 404) {
     const missing = await servedFile(dist, `${prefix}/404.md`, req.headers.accept, { pinned, base });
     if (missing.status === 200 && missing.route === '/404.md') r = { ...missing, status: 404 };
   }
+  if (r.status === 301) { res.writeHead(...(['GET', 'HEAD'].includes(req.method) ? [301, { location: r.location + target.search, 'cache-control': 'no-store' }] : [404])); res.end(); return; }
   if (r.status === 410) { res.writeHead(410, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' }); res.end(`build generation ${r.id} is no longer kept here: load the page again\n`); return; }
   if (pages && [200, 404].includes(r.status) && r.route === '/shell.html' && ['request', 'cached'].includes(r.render) && ['GET', 'HEAD'].includes(req.method)) {
     let page = null;
@@ -1405,12 +1411,16 @@ export function rebuildOnChange(dist, build = null) {
   // wrote, which tells a receipt another build wrote apart.
   let covered = receipt(), ours = null, checked = 0, running = null;
   const newer = (sources) => sources.newest > (receipt() === ours ? covered : Math.max(covered, receipt()));
+  const readMarker = () => {
+    try { return JSON.parse(readFileSync(resolve(out, '.exact-build.json'), 'utf8')); } catch { return null; }
+  };
+  const linkedChanged = card => !card || linkedSourcesChanged(app, out, card.linkedSources);
   const again = async () => {
     for (;;) {
       const basis = appSources(app, out).newest, { code, said } = await build();
       if (code !== 0) { console.error(said.trimEnd()); return said; }
       covered = basis; ours = receipt();
-      if (!newer(appSources(app, out))) return null;
+      if (!newer(appSources(app, out)) && !linkedChanged(readMarker())) return null;
       console.log(`${app}: a source changed while it built: building it again`);
     }
   };
@@ -1418,10 +1428,11 @@ export function rebuildOnChange(dist, build = null) {
     if (running) return running;
     if (Date.now() - checked < 300) return null;
     checked = Date.now();
-    let settings = [], built = null;
-    try { const now = JSON.parse(readFileSync(resolve(dist, '.exact-build.json'), 'utf8')); settings = settingChanges(now.env ?? {}, env, app); built = now.sources; } catch { /* being replaced */ }
+    const card = readMarker(), settings = settingChanges(card?.env ?? {}, env, app);
     const sources = appSources(app, out);
-    if (!settings.length && !newer(sources) && sources.digest === built) return null;
+    // Older local release receipts did not record their package imports.
+    const legacy = card?.release && card.target === 'js' && !('linkedSources' in card);
+    if (!legacy && !settings.length && !newer(sources) && sources.digest === card?.sources && !linkedChanged(card)) return null;
     console.log(`${app}: ${settings.length ? `the build has other settings than this server (${settings.map((c) => c.name).join(', ')})` : 'a source changed since the build'}: building it again`);
     running = again().finally(() => { running = null; });
     return running;

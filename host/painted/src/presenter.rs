@@ -31,6 +31,7 @@ use std::time::Duration;
 use tiny_skia::Pixmap;
 
 pub mod access;
+mod activities;
 mod addressed_tap;
 mod ahead;
 mod alert;
@@ -65,6 +66,7 @@ mod field_tests;
 mod file_drop;
 #[cfg(test)]
 pub(crate) mod frame_target_tests;
+mod frames;
 mod group;
 mod hatch;
 mod history;
@@ -81,6 +83,7 @@ mod pointer;
 mod present;
 mod reader_selection;
 mod replacement;
+pub use frames::with_partitions;
 pub use present::Carried;
 use replacement::Waiting;
 pub use replacement::{ReloadResult, ReplacementOutcome};
@@ -146,7 +149,7 @@ struct TestWork;
 impl exact_runner::HostWork for TestWork {}
 mod shortcuts;
 mod status_bar;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", test))]
 pub(crate) mod still;
 mod swipe;
 mod timeline_scroll;
@@ -460,6 +463,9 @@ pub struct Presenter<D: DataSource> {
     last_region_scale: Option<u32>,
     /// The app's hatches (LLP 1075.003.000.001; `presenter/hatch.rs`).
     pub(crate) hatches: crate::hatches::Session,
+    /// Whether the platform keeps an iframe's partition, where only the
+    /// platform can say (`exactPage().iframePartition`; `presenter/frames.rs`).
+    pub frame_partitions: Option<fn() -> Option<bool>>,
 }
 /// Two decimals, the agent API's precision.
 fn r2(x: f32) -> f64 {
@@ -769,6 +775,7 @@ impl<D: DataSource> Presenter<D> {
             last_region_frame: None,
             last_region_scale: None,
             hatches: Default::default(),
+            frame_partitions: None,
         };
         p.read_ranges();
         p.set_system_scheme(false);
@@ -984,6 +991,14 @@ impl<D: DataSource> Presenter<D> {
                 self.surfaces.enqueue(r, &admitted);
                 continue;
             }
+            // A live activity's send: the reader posts its notification and
+            // answers the ticket (`Native.activities`, LLP 1126 D13). The
+            // runner refuses a send before `link_activities`, so only a shell
+            // that links them sees one.
+            if r.request.url == "exact-activity:" && self.has_shell() {
+                self.activity_send(r.ticket, &r.request.body);
+                continue;
+            }
             // Android's reader opens the browser. The headless hosts keep D5's 501;
             // the agent holds the request before either path (LLP 1146 D4).
             if r.request.is_auth() {
@@ -1013,6 +1028,10 @@ impl<D: DataSource> Presenter<D> {
         // An abort made in this batch's turns is answered at the next pump: wake it.
         if self.host.runner_mut().collected_aborts() {
             self.executor.notify();
+        }
+        // `exactActivities`' first read: the reader lists what it shows.
+        if self.host.runner_mut().take_activities_demand() {
+            self.request(requests::Request::Activity(r#"{"enumerate":true}"#.into()));
         }
         // The platform's checks for presence calls: the shell's (LLP 1133.010 D8).
         for ask in self.host.runner_mut().take_presence_asks() {
@@ -1372,6 +1391,8 @@ impl<D: DataSource> Presenter<D> {
         self.host.runner_mut().measure(on, true);
         // The live table is development's too (LLP 1121 stage 4).
         self.host.runner_mut().admit_live(Some(&self.compat));
+        self.host.runner_mut().place_controls(&self.compat);
+        self.link_activities();
     }
 
     /// The binary's delivery facts (LLP 1030 D7), from its `compat.json`:

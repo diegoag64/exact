@@ -43,7 +43,7 @@ pub(crate) struct Sources {
     /// Every package a `use` reached, by each name it was reached by (one
     /// directory installed under two names is two), in order.
     pub(crate) packages: Vec<Package>,
-    /// Every `package.json` a resolution read, refused or not.
+    /// Files checked while resolving imports, package designs and library components.
     pub(crate) consulted: Vec<PathBuf>,
     /// Each source's text as compiled, its SHA-256 (hex), by source id: the
     /// source map says them, so a reader knows a file has not moved since
@@ -310,6 +310,7 @@ impl Loader<'_> {
             .with_runtime(self.units.iter().map(|u| &u.file)),
         );
         let library = library::read(&self.sources, self.app_root);
+        self.sources.consulted.extend(library.read);
         match self.scope() {
             Ok((mut file, scopes)) => {
                 let escaped = contract_lower::params::escaped(&file, &owned);

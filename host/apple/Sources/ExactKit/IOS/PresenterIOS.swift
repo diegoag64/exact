@@ -72,6 +72,7 @@ package final class Presenter {
     /// made modal, which a cleared prop drops from the index (`syncModal`).
     var announcedModal: (id: UInt32, incarnation: UInt64)?
     static var postScreenChanged: (Any?) -> Void = { UIAccessibility.post(notification: .screenChanged, argument: $0) }
+    static var postAnnouncement: (NSAttributedString) -> Void = { UIAccessibility.post(notification: .announcement, argument: $0) }
     let modalViews = NSHashTable<NodeView>.weakObjects()
     weak package var session: ExactSession?
     /// The document: the roots live here, content-sized like a page.
@@ -200,6 +201,10 @@ package final class Presenter {
     /// what a canvas painted through its surface captures every frame for
     /// (LLP 1014 D4 d), and what the keyboard reveals.
     weak package var editing: NodeView?
+    #if os(iOS)
+    /// The focus a batch carries across a move (CarriedFocusIOS.swift).
+    var carriedFocus: CarriedFocus?
+    #endif
     /// The first root's `viewportFit` prop (`"cover"` or nothing), as of the
     /// last batch; `onViewportFit` fires when it changes.
     private(set) package var viewportFit: String?
@@ -722,6 +727,9 @@ package final class Presenter {
         }
     }
     package func commitEdit(_ id: UInt32, _ value: String, change: Bool) {
+        #if os(iOS)
+        if carriesFocus(id) { carriedFocus?.commit = (value, change); return }
+        #endif
         guard edited == id, !menus.preservesFocus(id) else { return }
         edited = nil
         var value = value
@@ -903,7 +911,12 @@ package final class Presenter {
             }
         }
         svg?.seek(clock: session?.clock); boxAnimations.seek(clock: session?.clock)
+        // A clock's move can put on or take off a background colour's animation, which the colour strip cannot follow (LLP 1123 D13)
+        if !NodeView.extensionMirrors { NodeView.extensionsLookAgain() }
         let outermost = !applying
+        #if os(iOS)
+        if outermost { carryFocus(batch) }
+        #endif
         applying = true
         // Hatched nodes this batch destroys end first, so a reusable hatch has
         // undone its additions before the pool looks at their rows; inside
@@ -940,6 +953,9 @@ package final class Presenter {
                 textSelection.batchEnded()
                 #endif
                 if moved { session?.natives.refreshWorldGeometry() }
+                #if os(iOS)
+                landFocus()
+                #endif
                 flushPendingFocus(); elementScrolls.flush()
                 #if os(iOS)
                 session?.view?.syncKeyboardFocus()
@@ -1036,6 +1052,7 @@ package final class Presenter {
             case .animations:
                 if flats.isFlat(id) { flats.promote(id) }
                 boxAnimations.animations(id, op.payload, layer: views[id]?.layer, clock: session?.clock)
+                views[id]?.applyExtension() // looks at an extension again, which a background colour's animation holds off before iOS 26 (LLP 1123 D13)
             case .command:
                 let name = op.payload["name"] as? String ?? ""
                 if name == "preventDefault" { defaultPrevented = true; break }

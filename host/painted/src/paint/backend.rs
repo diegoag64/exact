@@ -139,6 +139,11 @@ pub trait Backend {
     fn present_statistics(&self) -> Option<exact_ink::device::d3d11::PresentStatistics> {
         None
     }
+    /// The hardware device a hidden window keeps (`D3d11::keep_hidden`).
+    #[cfg(windows)]
+    fn keep_hidden_device(&self) -> Option<exact_ink::device::d3d11::Hidden> {
+        None
+    }
     /// Attach the carrier's owned window when the device can present directly.
     #[cfg(windows)]
     fn attach_window(
@@ -165,6 +170,10 @@ pub trait Backend {
     /// A new frame of this size in points at this scale, cleared to the
     /// page's colour ([`Backend::page`]; white until one is told).
     fn begin(&mut self, width: f32, height: f32, scale: f32);
+    /// The raster backing's origin and size in device pixels after `begin`.
+    fn raster_extent(&self) -> Option<crate::placement::RasterExtent> {
+        None
+    }
     /// Release idle renderer storage, keeping the visible frame unless hidden.
     fn trim(&mut self, _hidden: bool) {}
     /// Storage from a presented frame after its last reader releases it.
@@ -332,6 +341,9 @@ pub trait Backend {
         _direct: bool,
     ) {
     }
+    /// A video alive and shown nowhere, in a hidden `portal` mover (LLP
+    /// 1013.002 D5): a reader that hosts players keeps its player.
+    fn held_video(&mut self, _id: ViewId, _props: &str) {}
     /// An audio player whose element has no visible controls to place.
     fn boxless_audio(&mut self, id: ViewId, props: &str) {
         self.native(
@@ -402,6 +414,12 @@ pub trait Backend {
     }
     /// Whether this backend keeps rows' recordings ([`rows`]).
     fn rows(&self) -> bool {
+        false
+    }
+    /// Whether what this backend draws is replayed on a display's pixels,
+    /// box by box: the painter then draws each box on whole pixels
+    /// (`Painter::drawn`).
+    fn pixel_grid(&self) -> bool {
         false
     }
     /// Whether this geometry walk can read existing row metadata without
@@ -558,6 +576,10 @@ impl super::Painter {
     #[cfg(windows)]
     pub(crate) fn present_statistics(&self) -> Option<exact_ink::device::d3d11::PresentStatistics> {
         self.backend.present_statistics()
+    }
+    #[cfg(windows)]
+    pub(crate) fn keep_hidden_device(&self) -> Option<exact_ink::device::d3d11::Hidden> {
+        self.backend.keep_hidden_device()
     }
     #[cfg(windows)]
     pub(crate) fn attach_window(

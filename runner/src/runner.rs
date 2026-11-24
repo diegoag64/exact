@@ -87,8 +87,8 @@ mod source;
 mod tabs;
 pub use source::{
     Announce, BackgroundState, DataError, DataSource, DataSourceWrapper, InFlight, Interrupt,
-    Native, NativeCall, NativeHandler, Overlaid, PreloadWake, Report, Reporter, ResourceChange,
-    SnapshotModule, Target, Write, BACKGROUND,
+    Native, NativeCall, NativeHandler, Overlaid, PreloadWake, QueuedSendReplacer, Report, Reporter,
+    ResourceChange, SnapshotModule, Target, Write, BACKGROUND,
 };
 mod delivery;
 mod links;
@@ -162,7 +162,7 @@ mod provenance;
 mod seams;
 pub use audio_seam::{Audio, LinkedAudio, NoAudio};
 pub use list_seam::Lists;
-pub(crate) use processes::refusal as process_refusal;
+pub(crate) use processes::held as process_held;
 pub use provenance::CallOrigin;
 pub use seams::{ModuleLinks, PresenceSecrets, TextAxes, Tools};
 mod wakes;
@@ -371,11 +371,9 @@ impl PendingReq {
 
 type FocusPath = Vec<(ViewId, NodesId, Vec<Frame>)>;
 
-/// A send made before the data source was ready: its target, source and
-/// arguments, and the origin and invocation of the commit that made it,
-/// which `data_ready` sends it under (LLP 1133.002 D12), as a queue's
-/// waiting send keeps them (`queue.rs`).
-type Unsent = (Target, String, Vec<Value>, (CallOrigin, u64));
+/// A send made before the data source was ready: its target, source,
+/// arguments and the cause `data_ready` sends it under (LLP 1133.023 D7a).
+type Unsent = (Target, String, Vec<Value>, provenance::Cause);
 /// A send's request this commit hands out once it stands.
 type Later = (Target, String, Vec<Value>, Request);
 
@@ -485,7 +483,7 @@ pub struct Runner<D: DataSource> {
     pending_mut: Vec<bool>,
     failed_mut: Vec<Option<crate::failure::Failure>>,
     /// Mutations whose answer landed in the commit being made; their `then` actions are armed once it stands (LLP 1016.001).
-    landed: Vec<usize>,
+    landed: Vec<(usize, provenance::Cause)>,
     /// Sends made before the data source was ready, sent at `data_ready`
     /// (LLP 1027 D4): pending meanwhile, one per mutation but a parallel
     /// one, which keeps each.
@@ -769,8 +767,8 @@ impl<D: DataSource> Runner<D> {
                 fix: format!(
                     "the plan names {plan:?} and this binary's data source {host:?}. If the plan is this app's own \
                      (baked from its app.json), the data source is wrong: a Rust data crate's `fn app_id` (one copied \
-                     from a sample keeps the sample's) or app.ts's `appId` must say {plan:?}, or remove that \
-                     `fn app_id` to take app.json's. If the plan came from elsewhere (another app's dev server, \
+                     from a sample keeps the sample's) or app.ts's `appId`, its own or one it re-exports from shared \
+                     code, must say {plan:?}, or not be exported, to take app.json's. If the plan came from elsewhere (another app's dev server, \
                      update or link), the plan is the wrong one: change nothing in the app",
                     plan = plan.app_id,
                     host = data.app_id()
@@ -882,6 +880,7 @@ impl<D: DataSource> Runner<D> {
             strings,
             failed_mut: vec![None; plan.mutations.len()],
             audio: audio_seam::AudioState(seams.audio.state(&plan, &data)),
+            page: crate::time::launch_page(&plan),
             plan,
             inspection_digest: std::cell::OnceCell::new(),
             panel_navigation: std::cell::OnceCell::new(),
@@ -981,7 +980,8 @@ impl<D: DataSource> Runner<D> {
             churn: Default::default(),
             activities: activities::Activities::default(),
             extensions: module_seam::ModuleState(seams.modules.state()),
-            origins: Default::default(),
+            // Boot is the app's (LLP 1133.023 D7a), until `booted` below.
+            origins: provenance::Origins::booting(),
             processes: Default::default(),
             wakes: Default::default(),
             calls: Default::default(),
@@ -992,7 +992,6 @@ impl<D: DataSource> Runner<D> {
             viewport,
             viewport_geometry,
             geometry: Default::default(),
-            page: Default::default(),
             presented: crate::page::Presented::at_boot(),
             time: crate::time::launch_time(),
             live_times: Default::default(),
@@ -1168,6 +1167,7 @@ impl<D: DataSource> Runner<D> {
         }
         drop(booting);
         runner.roles.install();
+        runner.origins.booted();
         Ok(runner)
     }
 

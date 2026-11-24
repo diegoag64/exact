@@ -3,7 +3,7 @@
 import { exclusiveIOS, simulatorDisplay, refuseBackendOrigin } from './agent-launch.mjs';
 import { nativeBuild, planOverride, refuseBuild } from './agent-build.mjs';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
@@ -17,6 +17,8 @@ import {
   keepInstalledRelease,
   showSimulator,
   simulator,
+  simulators,
+  forgetSimulator,
   displayAsIs,
   withDisplay,
   withMaterials,
@@ -26,6 +28,8 @@ import {
   simulatorAppContainer,
 } from '../host/apple/devices.mjs';
 import { appleExecutableName, resolveApp } from './app.mjs';
+const appContainers = new Map();
+const containerKey = (udid, id) => JSON.stringify([udid, id]);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 /** The simulator carrier: the bundle `build.mjs --ios` assembled, installed and launched on a simulator with the
  * agent socket's path in its environment (simctl passes SIMCTL_CHILD_*); then the same JSON lines over that socket
@@ -56,18 +60,31 @@ export async function openIOS({
   const id = hostFixture ? `${a.id}.host` : a.id;
   // An app's exact.mjs builds first instead, or bakes a plan-only edit to run on this build (agent-build.mjs,
   // LLP 1116.003).
-  const override = plan || hostFixture ? null : planOverride('ios', a, built);
+  const override = plan || Object.hasOwn(extra, 'EXACT_PLAN') || hostFixture ? null : planOverride('ios', a, built);
   if (override) plan = override.plan;
   else refuseBuild('ios', built, a, { sample: hostFixture });
-  const dev = simulator(undefined, { app: id, dir: a.dir, hint: '--sim <udid|name> (or EXACT_SIM)' });
-  return withSoftwareKeyboard(dev, () =>
-    exclusiveIOS(dev.udid, id, () =>
-      // An AX drive turns UIKit's accessibility runtime on for its launch (`withAccessibilityRuntime`).
-      withAccessibilityRuntime(dev.udid, touch === 'agent' && ax, () => // `ax`, not a bool of it: verify's is 'try'
-        openIOSOwned({ a, bundle, id, dev, plan, size, extra, session, hostFixture, touch, onProcess }),
+  const dev = simulator(undefined, { app: id, dir: a.dir, cached: true, hint: '--sim <udid|name> (or EXACT_SIM)' });
+  try {
+    return await withSoftwareKeyboard(dev, () =>
+      exclusiveIOS(dev.udid, id, () =>
+        // An AX drive turns UIKit's accessibility runtime on for its launch (`withAccessibilityRuntime`).
+        withAccessibilityRuntime(dev.udid, touch === 'agent' && ax, () => // `ax`, not a bool of it: verify's is 'try'
+          openIOSOwned({ a, bundle, id, dev, plan, size, extra, session, hostFixture, touch, onProcess }).catch(error => {
+            if (dev.cachedBooted) {
+              try {
+                if (simulators().find(d => d.udid === dev.udid)?.state !== 'Booted') error.retrySimulator = true;
+              } catch { /* preserve the launch error */ }
+            }
+            throw error;
+          }),
+        ),
       ),
-    ),
-  );
+    );
+  } catch (error) {
+    forgetSimulator(dev.udid, { retryBoot: error.retrySimulator });
+    for (const key of appContainers.keys()) if (JSON.parse(key)[0] === dev.udid) appContainers.delete(key);
+    throw error;
+  }
 }
 /** Whether the app `simctl launch --console` started (`simulatorConsole`'s pid) still runs, and where a screenshot of
  * the simulator's display went. */
@@ -100,10 +117,14 @@ async function openIOSOwned({ a, bundle, id, dev, plan, size, extra, session, ho
       : null;
   // A Release build installed under the bundle id is copied aside first, and the note says how to put it back
   // (`keepInstalledRelease`).
-  let kept = null;
+  const key = containerKey(dev.udid, id);
+  let kept;
   try {
-    kept = keepInstalledRelease(dev.udid, id, bundle, hostFixture ? 'ExactHostIOS' : appleExecutableName(a, true));
-    if (kept.install) install(dev, bundle, a, hostFixture, true);
+    kept = keepInstalledRelease(dev.udid, id, bundle, hostFixture ? 'ExactHostIOS' : appleExecutableName(a, true), { container: appContainers.get(key) });
+    if (kept.install) {
+      appContainers.delete(key);
+      install(dev, bundle, a, hostFixture, true);
+    }
   } catch (e) {
     await touches?.close();
     throw e;
@@ -130,9 +151,12 @@ async function openIOSOwned({ a, bundle, id, dev, plan, size, extra, session, ho
   // The launch brings the app to the front: not while another drive reads this simulator's display. The caller
   // holds the display lock (`simulatorDisplay`) through the accessibility setup and the launch.
   try {
-    env.EXACT_ASSETS = simulatorAssetRoot(
-      extra.EXACT_ASSETS ? null : simulatorAppContainer(dev.udid, id, 'app'), extra.EXACT_ASSETS, resolve(dir, 'assets'),
-    );
+    let container = kept.container ?? appContainers.get(key);
+    if (!extra.EXACT_ASSETS) {
+      if (!container || !existsSync(container)) container = simulatorAppContainer(dev.udid, id, 'app');
+      appContainers.set(key, container);
+    }
+    env.EXACT_ASSETS = simulatorAssetRoot(extra.EXACT_ASSETS ? null : container, extra.EXACT_ASSETS, resolve(dir, 'assets'));
     const selectedPlan = env.EXACT_PLAN ?? process.env.SIMCTL_CHILD_EXACT_PLAN;
     if (selectedPlan) env.EXACT_PLAN = simulatorPlanPath(selectedPlan, resolve(dir, 'plan'));
     const childEnv = { ...process.env };

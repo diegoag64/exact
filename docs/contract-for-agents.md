@@ -29,6 +29,7 @@ capabilities.
   - [Tools: what a call answers](#tools-what-a-call-answers)
 - [Views, layout, and interaction](#views-layout-and-interaction)
   - [Tabular numbers](#tabular-numbers)
+  - [Announcing a change](#announcing-a-change)
   - [Sound, MIDI and media](#sound-midi-and-media)
 - [Routes and web documents](#routes-and-web-documents)
 - [Tabs and stacks](#tabs-and-stacks)
@@ -119,7 +120,7 @@ To preview a component declared in your app's root, add a frame such as
 `frames/card.contract` inside the app. Its first component is the preview's
 root. It can pass props to the app's components and use the app's data handlers.
 
-```contract
+```text
 use Inspector from "../app.contract"
 component Frame
   view
@@ -164,7 +165,7 @@ exit status: 0 success, 1 compilation/I/O failure, 2 invalid invocation. Read al
 diagnostics, including related locations, before making the next repair. Each has
 a `severity`: `"error"` refuses the build; `"warning"` (after the errors, also on a
 success) builds and runs but is not what you meant, such as a header node the iOS
-bar hides (`lower-header-unplaced`), a route's `header` a box below the route,
+bar hides (`lower-header-unplaced`: beside the heading in its own box), a route's `header` a box below the route,
 which iOS leaves in the page (`lower-header-nested`), a heading header at the head of
 an app with no navigation route (`lower-header-routeless`: a lone `navigationKey`
 is only a root; add a navigation root holding
@@ -215,6 +216,10 @@ bun exact.mjs test web                          # the app's *.test.contract; bui
 bun exact.mjs agent web tree "tap add" state logs "screenshot out.png"
 bun exact.mjs agent web --size 390x844 "screenshot phone.png"   # a phone-sized viewport
 ```
+
+On macOS and the iOS simulator, `agent` and `test` check the native build once
+at startup and use it for every launch, including an authored test's `reload`
+(LLP 1012.001.000 D1). Edits made during the run are checked by the next run.
 
 The web carrier opens at 420×900; `--size <w>x<h>` (before the operations) opens
 another viewport, and a test's first step `size <w>x<h>` does the same for that test.
@@ -890,6 +895,56 @@ caller's nodes in its view. The fill keeps its caller's variables and providers,
 not the receiving component's provider override. Do not invent named slots or
 render-function props.
 
+### One element shown in another place: `portal`
+
+An `if` arm creates and destroys, and a key keeps a row only within its own
+list, so declaring a playing video again in a detail screen restarts it. Write
+it once, outside the screens, and name where it shows with `portal` (LLP
+1013.002). The same element moves; its state, handlers and lifetime stay its
+declaration's.
+
+```contract
+component App
+  state open = false
+  state alive = true
+  action toggle
+    open = not open
+  view
+    column
+      button press=toggle
+        text (open ? "Close" : "Open")
+      box id="card-player" width=168 height=148
+      box id="detail-player" width="100%" height=320
+      if alive
+        column portal=(open ? "detail-player" : "card-player")
+          video "assets/motion.mp4" autoplay=true muted=true playsinline=true loop=true
+```
+
+- The destination is the first element with that `id` in declaration order in
+  the app root. It must be a plain box (`box`, `view`, `column`, `row`, `main`,
+  `section`, `article`, `aside`, `nav` or `footer` with no `role`,
+  `navigationKey` or `popover`) that its parent lays out. A list's row, a
+  table's part, a route's header item, a button's face, a dialog or a route
+  can't receive content or move; the compiler refuses what it can prove.
+- The element goes after the destination's own children. An empty value
+  leaves it where it is written.
+- With no destination (a missing id, its own descendant, a cycle, a box inside
+  hidden content) it is alive but not shown: no space, no input, not in
+  `tree`, journaled once. A muted autoplay video there pauses at its position
+  and plays on from it when shown (Firefox keeps it playing).
+- Its press, pointer-button and key events bubble through where it is written,
+  not where it is shown; hover, focus on the web and the painted hosts' pan,
+  swipe and long press still follow where it is shown.
+  Colours, `color-scheme` and modes come from where it is shown (on the web;
+  native hosts still resolve design-token modes at the declaration).
+- Removing the declaration removes it; a new one starts fresh.
+- Hosts: the web, macOS, iOS and Android move the same element, and a playing
+  video plays on through the move; Linux and Windows move it with no video
+  decoder. A page rendered ahead leaves it out and builds afresh. The
+  reference's "A `portal` element on each host" has each host's table.
+  `docs/recipes/keep-a-playing-video.md` is a card that opens into a detail;
+  `apps/shared-elements`' Player and Flight screens show both forms.
+
 Imports resolve local `.contract` declarations, with cycle and app-boundary
 checks. Paths begin with `./` and cannot contain `..` segments. They do not load app logic or expand the available built-in function
 roster. Compiler-owned router names exist only with a `routes` declaration.
@@ -944,8 +999,9 @@ is idle and keeps its last answer; when the tab shows again it is asked again,
 and that answer shows until the new one lands (`current(days)` is false until
 then). `refresh days` reaches only the instance whose action ran: two instances
 ask, refresh and answer apart, even with equal arguments. A state initializer
-does not read its own component's resources (`type-state-reads-request`); a
-derive or the view does.
+does not read its own component's resources, nor, through a prop, those of a
+component around it with no `if`, `match` or `for` between them
+(`type-state-reads-request`); a derive or the view does.
 
 A component may own a mutation the same way (LLP 1035.005.004 D6). Each
 instance sends it on its own, with its own `pending`, failure, queue and answer,
@@ -2182,6 +2238,227 @@ signIn: async (_a, store) => {
   the signing identities and association files. Native Google approval and
   token rotation still need a check against the app's real Convex deployment.
 
+### Supabase
+
+The `supabase` recipe wires the session and a table; this is the rest. It was
+tried against a loopback stand-in for Supabase's APIs, not a live project.
+
+#### Supabase session
+
+Copy `supabase.ts` whole, this section's code and the next one's. The origin and the publishable key are settings:
+`"env": ["SUPABASE_URL", "SUPABASE_KEY"]` in app.json, their values in
+`.env.local`. Each Auth call keeps its reply under the `secret.keep` name; a
+change to the session holds that name's lease (`store.exclusive`, LLP 1146 D5),
+whose work must not throw after a request, or the secret is forgotten.
+
+```ts
+import { PostgrestClient } from '@supabase/postgrest-js';
+import { StorageClient } from '@supabase/storage-js';
+import { FunctionsClient } from '@supabase/functions-js';
+import type { Store } from './app.contract.d.ts';
+
+// The project's URL and publishable key, settings in app.json's `env`: neither is a secret.
+export const PROJECT = import.meta.env.SUPABASE_URL ?? 'http://127.0.0.1:54321';
+const KEY = import.meta.env.SUPABASE_KEY ?? 'anon-key';
+export const SESSION = 'supabase.session';
+
+type Session = { project: string; access_token: string; refresh_token: string; expires_in: number; expires_at: number; user: { id: string; is_anonymous: boolean } };
+export class AuthError extends Error {
+  readonly reason: string; // what a failed resource or mutation shows as its code
+  constructor(readonly status: number, readonly code: string, message: string) { super(message); this.reason = code; }
+}
+// Auth's answers to a refresh token it will never take again.
+const ENDED = ['refresh_token_not_found', 'refresh_token_already_used', 'session_not_found', 'session_expired'];
+
+// The session's changes, one at a time: a refresh, a sign-in and a sign-out each
+// read what is kept inside the lease, so none writes over another's result. A
+// lease whose work throws after a POST forgets the secret (LLP 1146 D5), so the
+// work's error is carried out of the lease and thrown there.
+async function exclusive<T>(store: Store, work: () => Promise<T>): Promise<T> {
+  type Done = { value: T } | { error: unknown };
+  const leased = store as Store & { exclusive(name: string, work: () => Promise<Done>): Promise<Done> };
+  const done = await leased.exclusive(SESSION, () => work().then((value) => ({ value }), (error: unknown) => ({ error })));
+  if ('error' in done) throw done.error;
+  return done.value;
+}
+// A session kept for another project's URL is not this one's.
+const kept = (store: Store): Session | null => {
+  const s: Session | null = JSON.parse(store.get(SESSION) ?? 'null');
+  return s?.project === PROJECT ? s : null;
+};
+
+// One Auth (GoTrue) call that answers a session, kept with its expiry on the app's clock.
+async function auth(store: Store, now: number, path: string, body: object, jwt = KEY): Promise<Session> {
+  const res = await fetch(`${PROJECT}/auth/v1/${path}`, { method: 'POST', body: JSON.stringify(body),
+    headers: { apikey: KEY, Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' } });
+  const out = await res.json();
+  if (!res.ok) throw new AuthError(res.status, typeof out.error_code === 'string' ? out.error_code : '', out.msg ?? out.message ?? `Auth answered ${res.status}`);
+  if (typeof out.access_token !== 'string' || typeof out.refresh_token !== 'string' || typeof out.user?.id !== 'string' || !(out.expires_in > 0))
+    throw new AuthError(res.status, 'bad_session', 'Auth answered no session');
+  const s = { ...out, project: PROJECT, expires_at: Math.floor(now / 1000) + out.expires_in };
+  store.set(SESSION, JSON.stringify(s));
+  return s;
+}
+
+/** A new anonymous user, unless a session is kept. */
+export const signInAnonymously = (store: Store, now: number) =>
+  exclusive(store, async () => kept(store) ?? auth(store, now, 'signup', { data: {} }));
+
+// Due for a refresh at `now` (`time.epochAtZero + performanceNow()`): a quarter of its life left, at most five
+// minutes, so the minute tick reaches a five-minute token in time.
+const due = (s: Session | null, now?: number): s is Session => s !== null && now !== undefined
+  && s.expires_at * 1000 - now <= Math.min(300_000, s.expires_in * 250);
+// The refreshed session, or `null` when Auth has ended it. A reply lost on the way is
+// asked for again at once, inside Auth's reuse interval, which answers it as before.
+async function refresh(store: Store, s: Session, now: number): Promise<Session | null> {
+  const ask = () => auth(store, now, 'token?grant_type=refresh_token', { refresh_token: s.refresh_token });
+  try {
+    return await ask().catch((e: unknown) => { if (e instanceof AuthError) throw e; return ask(); });
+  } catch (e) {
+    if (!(e instanceof AuthError && ENDED.includes(e.code))) throw e;
+    store.forget(SESSION);
+    return null;
+  }
+}
+
+/** The kept session, or `null` when signed out; given `now`, refreshed first when due. */
+export async function session(store: Store, now?: number): Promise<Session | null> {
+  if (!due(kept(store), now)) return kept(store);
+  return exclusive(store, async () => {
+    const s = kept(store);
+    return due(s, now) ? refresh(store, s, now!) : s;
+  });
+}
+
+/** Supabase's own clients, sending the session's access token; given `user`, only that user's. */
+export async function supabase(store: Store, now?: number, user?: string) {
+  const s = await session(store, now);
+  if (s === null || (user !== undefined && s.user.id !== user)) throw new AuthError(401, 'signed_out', 'Signed out');
+  const headers = { apikey: KEY, Authorization: `Bearer ${s.access_token}` };
+  return {
+    user: s.user, headers,
+    db: new PostgrestClient(`${PROJECT}/rest/v1`, { headers }),
+    storage: new StorageClient(`${PROJECT}/storage/v1`, headers),
+    functions: new FunctionsClient(`${PROJECT}/functions/v1`, { headers }),
+  };
+}
+```
+
+#### Supabase sign-out and Apple sign-in
+
+The rest of `supabase.ts`:
+
+```ts
+/** Signs this device out. Revoking its refresh token is best effort: offline, the token stays valid on the server. */
+export const signOut = (store: Store, now: number) => exclusive(store, async () => {
+  let s = kept(store);
+  if (due(s, now)) s = await refresh(store, s, now).catch(() => s);
+  store.forget(SESSION);
+  if (s !== null) await fetch(`${PROJECT}/auth/v1/logout?scope=local`, { method: 'POST',
+    headers: { apikey: KEY, Authorization: `Bearer ${s.access_token}` } }).catch(() => undefined);
+});
+
+/** Sign in with Apple's ID token, linked to `user`, the anonymous user the sheet
+ * opened for. An Apple ID that already has an account throws `identity_already_exists`
+ * and keeps the anonymous session: switching leaves its data behind, so it is the
+ * app's choice (`true`). */
+export const signInWithApple = (store: Store, idToken: string, nonce: string, now: number, user: string, switching = false) =>
+  exclusive(store, async () => {
+    let s = kept(store);
+    if (s?.user.id !== user) throw new AuthError(401, 'signed_out', 'Signed out');
+    if (due(s, now)) s = await refresh(store, s, now);
+    if (s === null) throw new AuthError(401, 'signed_out', 'Signed out');
+    const body = { provider: 'apple', id_token: idToken, nonce };
+    if (!s.user.is_anonymous || switching) return auth(store, now, 'token?grant_type=id_token', body);
+    return auth(store, now, 'token?grant_type=id_token', { ...body, link_identity: true }, s.access_token);
+  });
+
+// Auth checks that an ID token's nonce is the hex SHA-256 of the nonce it is given: ask Apple for this.
+export async function sha256(text: string) {
+  const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+  return [...bytes].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+```
+
+#### Supabase accounts
+
+- **The project:** enable anonymous sign-ins; give each table a `user_id uuid
+  default auth.uid()` column and row-level security policies on it for the
+  `authenticated` role (an anonymous user has it too), and the bucket policies
+  on the first folder of an object's name, which is the user's id here. Row
+  security that refuses a read answers an empty list, not an error.
+- **Sign out** from a mutation that refreshes `session`, passing the press's
+  time: `signOut: async ([now], store) => { await signOut(store, now); return {
+  ok: true, error: '' }; }`. The recipe's `anonymous` task then signs in a new
+  anonymous user. Until a read of the new user lands, and while a `when` is
+  false, a resource shows its last answer: put the user in the answer and show
+  rows only when it is `session.userId`, as [your own REST
+  server](recipes/rest-backend.md) does with `owner`.
+- **A refused refresh** (`refresh_token_not_found` and the other ended
+  sessions) forgets the session, and `session` answers `null`; a 429, a 5xx or
+  no network keeps it for the next tick, and a reply lost on the way is asked
+  for again at once. Auth takes a refresh token again within its reuse interval (10 s
+  by default), or when it is the active token's parent, and revokes the session
+  for any other reuse ([Supabase
+  sessions](https://supabase.com/docs/guides/auth/sessions)); the lease keeps
+  two answers from spending one token. A session kept for another
+  `SUPABASE_URL` is ignored, and its token never sent there.
+- **Sign in with Apple** links the Apple ID to the anonymous user. The project
+  enables manual linking, and its Apple provider lists the app's bundle ID.
+  `@exact/sign-in` passes `params.nonce` to Apple unchanged, and Auth compares
+  the token's nonce with the hex SHA-256 of the nonce it is given: before the
+  press, draw `raw = crypto.randomUUID()` and ask Apple for `await sha256(raw)`,
+  then call `signInWithApple(store, credential.token.authorization.id_token,
+  raw, now, user)`, `user` being the `session.userId` the sheet opened for. That
+  is the native credential. On the web the ID token stays with the app's server
+  ([sign-in recipe](recipes/sign-in.md)), whose token's audience is the
+  Services ID, which the Apple provider then lists too; that server makes the
+  exchange, with the anonymous session to link, and hands back the session.
+  An Apple ID with an account of its own throws `identity_already_exists`
+  (`failure(x).code`, from `AuthError`'s `reason`) and keeps the anonymous
+  user; switching (`signInWithApple(…, true)`) leaves that user's rows behind.
+- **The tokens:** on the web `secret.keep` is the page's `localStorage`, where
+  supabase-js keeps them in a browser, readable by any script on the origin;
+  on Linux an unencrypted file. A web refresh token out of scripts' reach needs
+  the exchange behind your server and an HttpOnly cookie ([web
+  sessions](recipes/web-sessions.md)).
+
+#### Supabase Storage and Functions
+
+From a test app's sources, after `const { db, storage, functions, user,
+headers } = await supabase(store, now, owner)` and `images =
+storage.from('images')`, `owner` being the `session.userId` the file was chosen
+under, so a write queued across a sign-out is refused:
+
+```ts
+ok(await images.upload(`${user.id}/a.png`, new Uint8Array([137, 80, 78, 71]), { contentType: 'image/png', upsert: true }));
+(ok(await storage.from('images').list(user.id)) ?? []).map(f => f.name)
+ok(await images.remove([`${user.id}/a.png`]));
+ok(await functions.invoke<{ greeting: string }>('hello', { body: { name: 'Ada' } }))?.greeting ?? ''
+```
+
+A native request holds at most 4 MiB, so a photo goes up from its file
+(`fs.read` of its folder) with `fetch`, which streams it from disk:
+
+```ts
+const res = await fetch(`${PROJECT}/storage/v1/object/images/${user.id}/photo.jpg`, { method: 'POST', exactBodyFrom: 'app:/tmp/photo.jpg',
+  headers: { ...headers, 'Content-Type': 'image/jpeg', 'x-upsert': 'true' } });
+if (!res.ok) throw new Error((await res.json()).message);
+```
+
+#### Supabase limits
+
+- **`@supabase/auth-js`, and so `@supabase/supabase-js`.** The build refuses
+  both for their uses of the DOM's and Node's globals: the Auth client reads
+  `window`, `location`, `localStorage` and `navigator.locks` on browser-only
+  paths, and Realtime's socket factory reads `process`. With that refusal
+  lifted, Auth still fails: each session call reads `Date.now()`, which every
+  executor refuses (LLP 1027.000). The umbrella client with `accessToken`
+  would serve tables, Storage and Functions, at 403 KB of web JavaScript to
+  these three packages' 92 KB.
+- **Realtime.** Its socket outlives an answer; `QUEUE.md`, "A stream that can
+  send: Supabase Realtime without polling".
+
 ### Child processes (`@exact/child-process`)
 
 A desktop app's data code starts a program with Node's names (LLP 1133.007).
@@ -2252,7 +2529,7 @@ says `cancelled: true`, and the journal that the caller left.
   once the page has loaded. A declared `activate` is kept.
 - `document.modelContext` exists only in a secure context: on `https`, on
   `localhost` and on `127.0.0.1`, not on a LAN address over `http`
-  (Chrome 156 with `--enable-features=WebMCPTesting`: none at
+  (Chrome 157 with `--enable-features=WebMCP`: none at
   `http://10.0.0.4:<port>`). To try a LAN host, serve it over HTTPS or
   start Chrome with `--unsafely-treat-insecure-origin-as-secure=<origin>`.
 
@@ -2609,8 +2886,8 @@ naming a popover to naming something else still opens that popover, and one
 changing it the other way leaves the popover nested.
 
 On macOS, iOS and the web, an action can call `showModal(id)` or `close(id)`
-for a `dialog`. macOS and the web follow the invoker's modal focus path; iOS
-presents the dialog as an alert. Bare `close()` still closes the window.
+for a `dialog`. macOS and the web follow the invoker's modal focus path. On
+iOS a confirmation opens as an alert. Bare `close()` closes the window.
 
 On the Mac a `dialog` that is not a confirmation is a sheet on its window, as
 iOS's is a sheet (LLP 1115.002 D7.2): AppKit centres it, dims the window under
@@ -2625,10 +2902,13 @@ on the side its `position-area` names (`top …` above, `right …` beside, else
 below): `popover="auto"` closes on Escape, a click elsewhere or another window,
 `popover="manual"` only by its own buttons. Write no surface for either: the
 sheet and the popover are the platform's. A popover of a dialog's is written
-inside it, as in HTML (outside it, it is inert while the dialog is open). Under
-the agent both paint in the page as before; `--chrome platform` on `macos`
-shows them, `tap`, `type` and `tree` reach what is in them, and `screenshot
-"file" window` draws them over the window.
+inside it, as in HTML (outside it, it is inert while the dialog is open). The Mac
+driver paints both in the page by default. Launch with `--chrome platform`
+to show the AppKit sheet or popover. In an open dialog, `state dialog`
+reports `presentation` as `sheet` or `painted`. Use `screenshot sheet.png
+window` to include the sheet and the dimmed parent window. The screenshot
+reply lists the windows it drew in `attached`. Both presentations support
+`tap`, `type` and `tree`.
 
 `popover` alone also accepts an optional string. For example,
 `popover=(expanded ? some("manual") : none)` keeps the same mounted box:
@@ -2681,7 +2961,10 @@ right the `id="back"` control (Cancel) and then the one prominent button
 Anything else in the header (a search field, a menu's button) stays in it, at
 the top of the sheet. Escape and ⌘. go back as the `id="back"` control does;
 `closedby` is a dialog's. A heading inside a pressable keeps the route painted
-in the window, and `logs` says so. `--chrome platform` shows the sheet: `tap
+in the window, and `logs` says so. A `dialog`'s first-child `header` is its
+sheet's rows the same way (LLP 1141.004 D6), the button that closes the dialog
+(`command="close"`) as the Cancel; Escape stays the dialog's close request,
+which fires `cancel`. `--chrome platform` shows the sheet: `tap
 "add-save"` presses its button (`native: "NSButton"`), `back` dismisses it,
 and `state navigation.sheet` names its title, its buttons and its size.
 
@@ -2720,7 +3003,7 @@ lists any literal colour, font size or weight an app's `.contract` files still w
 | Write | iOS draws |
 | --- | --- |
 | `button` (`buttonStyle`, native by default) | `UIButton` |
-| `list appearance="auto" listStyle="inset-grouped"` of `section`s (`header`, rows, `footer`) | `UICollectionView` list, as Settings ([human guide](contract-for-humans.md#choosing-a-native-button)); a row of your own parts starts and ends at the cell's margin, as UIKit's own rows do, so write no padding at its ends |
+| `list appearance="auto" listStyle="inset-grouped"` of `section`s (`header`, rows, `footer`) | `UICollectionView` list, as Settings ([human guide](contract-for-humans.md#choosing-a-native-button)); a row of your own parts starts and ends at the cell's margin, as UIKit's own rows do, so write no padding at its ends. Android shows Material's list items, with no line between rows |
 | the same, `listStyle="plain"`, each `section`'s `header` one letter (Contacts) | the list with UIKit's A–Z section index at its trailing edge, when every section has a row; sections above the letters (Favorites) stay out of it; a name that starts with no letter A–Z goes under `#`, not nowhere. Its headers pin as the list scrolls, over UIKit's blur; a `grouped` list's scroll away |
 | a `section`'s `header` holding boxes of your own, not one `text`: `header` › `row gap=8 align-items="center"` › a sized `image` (or a box around one) and a `text` | UIKit's header holding your views (an avatar beside a name), laid out as you wrote them and starting at the cell's margin, so write no padding at its ends; a `padding-left` or `padding-right` you write is from the card's edge, as UIKit's header view spans the card (16 for a hand-built view pinned 16 inside it). Above and below them is UIKit's header inset, 10 points; `padding-top` and `padding-bottom` on the `header` replace it (12 for a hand-built header view's). Pinned in a plain list as a one-text header is, and one VoiceOver heading named by its texts (a header that holds a button keeps each part its own element). Several bare `text`s are refused: put them in a `row` or a `column`. A `footer` holds one `text` |
 | `list` with no `appearance`, its rows down the page (each child is a row) | a plain list's cells: UIKit's separators, the cell's grey ground while a row is pressed, the row selected under the screen it pushed. Draw none of it, and no inset either: a row's content stands at the cell's margin (16 at each end; UIKit's, 20 in an iPhone's landscape) where you write no padding, the row `border-box` (LLP 1138); write a padding to choose your own. The row is your box; a border you write on a row is yours and replaces the separator there (`border-bottom="none"`: none), and `appearance="none"` keeps rows of your own (a transcript, a feed of cards). The Mac shows a table, the web and the Linux desktop one line between rows, Android none (LLP 1115.000 D16) |
@@ -2736,15 +3019,24 @@ lists any literal colour, font size or weight an app's `.contract` files still w
 | `popover="auto" role="menu"` of `button`s, opened by `popovertarget` (a row whose `popovertarget` names another menu: its submenu; one naming any other popover opens it from the menu's own invoker, Exact's menu rule; a `role="group"` box of rows with an `aria-label`: a titled section) | `UIMenu`, nested; a section an inline `UIMenu(title:)` (LLP 1021) |
 | `dialog role="alertdialog" aria-label="Remove book?"` of a `text`, its action(s) and one Cancel; or a `text` and one closing button alone | `UIAlertController(.alert)`: the label its title, the text its message; the one-button alert when it has no action (LLP 1115 D6; recipe [below](#a-confirmation)) |
 | a `dialog` whose own `background-color` or `background-image` you write (your panel, your colours), of any rows | HTML's top layer (LLP 1035.001 D11): presented full screen over whatever is up, a sheet included, with no transition of UIKit's, laid out as written and centred in the window, over UIKit's 20% dimming (a `::backdrop` block's `background-color` in its place, below). Its `animation` is its entrance; removed by an `if`, it stays until its `-exact-exit-animation` ends. `closedby="any"` closes it on a tap outside its box, Escape and VoiceOver's escape are its close request, and a field in it is centred above the keyboard. A box in the page with `z-index` stays under every sheet: use this |
-| any other `dialog` (a field, Save, Cancel), opened by `showModal(id)` or a button's `command="show-modal"` | a sheet as tall as its content, up to the large detent, its content laid out as written and centred across it. The `dialog` has `fit-content` width, as in HTML. Put `width="100%" box-sizing="border-box"` on the `dialog` itself to fill the sheet between its side insets; a percentage width on a child alone resolves against the dialog's width. `close(id)`, its `command="close"` button or a swipe down closes it. `closedby="none"` refuses the swipe, `"any"` also takes a tap on the page behind, and a dismissal the person made fires `cancel` (LLP 1115.000 D11.5). A form with a title bar is still a sheet route |
+| any other `dialog` (a field, Save, Cancel), opened by `showModal(id)` or a button's `command="show-modal"` | a sheet as tall as its content, up to the large detent, its content laid out as written and centred across it. The `dialog` has `fit-content` width, as in HTML. Put `width="100%" box-sizing="border-box"` on the `dialog` itself to fill the sheet between its side insets; a percentage width on a child alone resolves against the dialog's width. `close(id)`, its `command="close"` button or a swipe down closes it. `closedby="none"` refuses the swipe, `"any"` also takes a tap on the page behind, and a dismissal the person made fires `cancel` (LLP 1115.000 D11.5). A `header` as its first child is the sheet's bar, below |
+| a `dialog` of that kind whose first child is a `header` of one heading, the text after it and buttons | a sheet in a navigation controller, as a hand-built form sheet is (LLP 1141.004 D6): the heading the bar's title (large at `aria-level=1`), the text after it the subtitle, its buttons before the heading leading and those after it trailing, a `buttonStyle="filled"` one prominent; a button that only closes the dialog (`commandfor` naming it, `command="close"`) is an item, its Cancel. A header that also holds a search field, a tablist, a readout or anything the bar has no item for stays in the dialog as written |
 | `role="tablist"`: each tab a symbol over a label / one text or image | `UITabBar` / `UISegmentedControl`, the tablist at least its native height unless `min-height` says otherwise (LLP 1059) |
 | `role="radiogroup"` of `button role="radio" aria-checked=…`, each one text or image (a value chosen from a few) | `UISegmentedControl`, as a tablist's; never a tab bar (LLP 1116.004 D5.2). Android draws Material's segmented buttons (two or more radios: equal shares of the row, the checked one filled with a check), and the Linux desktop and Windows the web's track with the checked radio raised on it. Keys of your own design: a radio that paints itself (its own background, border or radius, LLP 1104 D2), or `appearance="none"` on the `radiogroup`, keeps its buttons as you paint them; on the web, iOS, the Mac and the painted hosts (Linux, Windows and Android’s reader), the group keeps one Tab stop (the checked eligible radio, else the first) and arrow keys that press the next or previous eligible radio (Left and Right swapped right to left); on tvOS the focus engine moves between them |
 | a route whose first child is a `header` holding one heading (`text role="heading"`; an `aria-level` alone is not one), a text after it and its buttons | the navigation bar; a level-1 heading (`aria-level=1`) is a large title, in a sheet too, and any other level an inline one; the text after it the subtitle |
+| a readout of that header, outside a box around the heading (`role="status"`: words, symbols, dots and one `progress`) | an item on its side of the heading: `UIBarButtonItem(customView:)` holding the element's own views, laid out as written and live (LLP 1141.004), with no glass (`backgroundMaterial` its own) and in UIKit's "⋯" menu its name, dimmed. Any other element there (a spinner or a picture alone, a second text, a switch) fails the build of an app that ships iOS (`lower-header-item`), naming the repair. Android's top app bar and tvOS's bar leave a readout out, and the Mac draws the header in the page for one holding a spinner (warning `header-item-left-out` for the targets an app ships); an automatic size at most a third of the bar wide and 44 points high; desktop Linux and the web draw the header as written |
 | a route whose first child is a `header` holding buttons and no heading (readouts, a search field, a tablist and plain boxes around them too, nothing else) | the navigation bar with no title, its buttons trailing and the root's `navigationBack` control leading; a text or an image in it keeps the whole header in the page (`lower-header-no-bar`) |
 | a pushed route with no such `header` | a bar holding the system Back button alone (LLP 1115.000 D5.2) |
 | a route with `navigationBar="none"` | no navigation bar: a full-bleed screen that draws its own way back; the edge swipe still goes back unless the route's control named by `navigationBack` is disabled; [disable that control during a run](recipes/navigation-stack.md) to refuse Back |
 | a route with `navigationPresentation="modal"` | a sheet |
 | a route pushed while a sheet is on top, with no `navigationPresentation` of its own | pushed inside the sheet, with the system Back; the sheet's swipe down, or a tap behind a `closedby="any"` one, closes the sheet with every route pushed inside it |
+
+On iOS, a system dialog sheet can use the same resting heights as a modal route.
+For a form that opens tall and can be dragged down to half height, write
+`navigationDetent="medium large" navigationInitialDetent="large"` on the
+`dialog`. A sheet with several heights shows a grabber by default.
+`navigationGrabber="visible"` or `"hidden"` chooses its visibility.
+A dialog that omits `navigationDetent` fits its content.
 
 A native `select` fits its widest option by default, as on the web
 (LLP 1069.001 D3). Write `field-sizing="content"` to fit the shown value, as a
@@ -2866,7 +3158,8 @@ the words arrive. Before iOS 26 a route pushed over it with no back control of i
 shows that title on its Back button.
 
 The bar shows a header's heading, the first text after it (its subtitle), one search
-field, one tablist and its buttons; anything else in the header is not shown on iOS. A
+field, one tablist and its buttons, and each other element as an item of its own, drawn
+as written; of a box around the heading it shows only the title. A
 menu or `dialog` written in the header is its opener's, as on the web, not bar buttons.
 On iOS the search field scrolls away with the content while it is empty, as UIKit's
 does; `position="sticky" top=0` on the `input` keeps it in view (React Navigation's
@@ -3034,6 +3327,34 @@ beneath its own directory, an absolute path or a `data:` URL, a regular file of 
 64 MiB; it downloads nothing and has no app directories yet, so an `http(s)` or `app:/`
 source is an `error` there. A drive sees both after `clock +<ms>
 real`; `clock settle` can return just before them.
+
+### Announcing a change
+
+There is no announce call. A screen reader reads a live region as its text changes: a
+`text role="status"` (or `aria-live="polite"`) is polite, asking to wait for current
+speech, and a `text role="alert"` (or `aria-live="assertive"`) asks to interrupt it.
+`aria-live` wins over the role's, and `aria-live="off"` silences a `status`. To announce
+a result, a form's error or "3 selected", keep such a `text` mounted, empty until there is
+something to say, and change its text ([recipe](recipes/announce.md)):
+
+- Put the role on the `text` itself. Apple hosts read the text under a live box, but on
+  Windows a box is read by its own accessible name, which it takes only from an
+  `aria-label`, so a `row role="status"` whose child text changes says nothing there;
+  Android sends the change from the box, and what TalkBack reads of it is untested.
+- Leave `aria-label` off the region: on Android and Windows it is what is read, and a
+  change of the text alone is not.
+- Text the region already had is not read again. One that arrives holding its text is read
+  on some hosts and not others (below), so mount it first.
+
+| Host | What it does |
+| --- | --- |
+| iOS, iPadOS, tvOS | `UIAccessibility.post(notification: .announcement)` with the region's text, queued behind current speech when polite. An `alert` that arrives is also announced, except one already there when the app launches. A region under `aria-hidden` says nothing |
+| macOS | `NSAccessibility.post(… .announcementRequested)` with the text, at low priority when polite and high when assertive; an arriving `alert` as on iOS. VoiceOver may still finish the focused control's speech first |
+| Web | the browser: the element carries its `role` and any `aria-live`, and the screen reader treats it as any page's live region |
+| Android | the node is a polite or assertive live region (`AccessibilityNodeInfo.setLiveRegion`), and a content change is sent from it when its accessible name changes and, usually, when it arrives; that is what TalkBack reads a live region by. TalkBack itself has not been heard reading one |
+| Windows | AccessKit's UI Automation adapter: the node's `LiveSetting`, and a `LiveRegionChanged` event when its name changes or it arrives with one. Not yet heard from Narrator |
+| Linux | nothing yet: the Linux host serves no screen reader (no AT-SPI) |
+| watchOS | nothing: the watch entry refuses `aria-live`, and its SwiftUI driver posts no announcement for a `status` or `alert` |
 
 ### Sound, MIDI and media
 
@@ -3532,9 +3853,9 @@ restart, start another drive on the same `--storage`. See [host commands](contra
 - The header's `input type="search"` hides when scrolling while it is empty, as UIKit's
   does; `position="sticky" top=0` on it keeps the search field visible.
 - A header's buttons that press, and its disabled ones (dimmed, as UIKit's), are bar
-  items; a readout nothing presses ("● Clock") is a `row` or `text` with `role="status"`
-  ("Tabs and stacks"). Past the subtitle, the first text after the heading, other texts
-  and boxes are hidden on iOS (`lower-header-unplaced`).
+  items; any other element is an item drawn as written ("Tabs and stacks"). Inside a box
+  around the heading, what the title does not show is hidden on iOS
+  (`lower-header-unplaced`).
 
 ### A horizontal strip in a sheet
 
@@ -3642,7 +3963,10 @@ entry, built-in inputs only, one `@location(0) vec4f` output and at most one
 resource: a uniform struct at group 0, binding 0. Members may be `f32`, `i32`,
 `u32` or `vec2f`–`vec4f`, without aliases,
 `@align` or `@size`. `time` and `devicePixelRatio` must be `f32`; `resolution` must
-be `vec2f`. `src`, `maxFps` and `animationPlayState` are reserved surface arguments.
+be `vec2f`. `src`, `maxFps`, `animationPlayState` and `alphaMode` are reserved surface
+arguments, and the compiler refuses a literal value of the last three that the surface would
+refuse. `alphaMode` is `"opaque"` (the default) or `"premultiplied"`, whose fragment returns
+colour already multiplied by alpha.
 Other named arguments bind members, with a CSS colour accepted for a `vec4f`.
 The compiler checks literal values and compares the uniform reader's layout with
 naga. Failures report `analyze-surface-shader` at the shader declaration or canvas,
@@ -3799,6 +4123,10 @@ SwiftPM verifies binary targets by checksum. One shared dynamic library links
 all declared products used by the app's Swift and its bound implementations,
 so SDK singletons and configuration are shared across consumers. It loads with
 the first consumer that needs it; an unused implementation stays unloaded.
+A dynamic framework a package brings, such as `Sparkle.framework`, goes into
+the Mac app's `Contents/Frameworks` whole, with its helpers and XPC services;
+`exact release` signs each inside out with the Developer ID and the hardened
+runtime ([Mac binary updates](recipes/mac-binary-updates.md)).
 App-local `.xcframework`s remain supported. Package resources ship with the
 app and are available through `Bundle.module`. SDK privacy manifests and the
 requesting implementations' declarations accompany the shared library and
@@ -3808,6 +4136,94 @@ Android implementations declare pinned `group:artifact:version` coordinates
 in `android/exact.json`'s `maven` array; an app's own Kotlin uses
 `host.android.maven`. See [Maven libraries](../host/android/README.md#maven-libraries-one-locked-verified-gradle-graph-llp-1133008-d8-item-5)
 for the shared Gradle graph, lock and verification files.
+
+### A package's configuration
+
+A package that needs a value from the app, such as a vendor SDK's API key or a
+tile server, declares it per target in its interface's `exact.json` (LLP
+1133.021 §9 item 7):
+
+```json
+"config": {
+  "android": { "apiKey": { "type": "env", "required": "release", "missing": "yandex-mapkit-key-missing" } },
+  "ios": { "apiKey": { "type": "env", "required": "release", "missing": "yandex-mapkit-key-missing" } },
+  "web": { "tiles": { "type": "string", "required": true }, "maxZoom": "number" }
+}
+```
+
+A target is `web`, `android`, `ios`, `macos` or `tvos`; each is declared on its
+own, since a package binds per target. `type` is `string`, `number`, `boolean`
+or `env`, and `"maxZoom": "number"` is short for `{"type": "number"}`.
+`required` is `true` or `"release"`, and `missing` is the error code a build
+without the key reports (else `bake-config-missing`).
+
+The app gives the values in `app.json`, under the interface's name and the
+target. A key typed `env` names the environment variable that holds its value:
+
+```json
+"packages": {
+  "exact-yandex-mapkit": {
+    "android": { "apiKey": { "env": "YANDEX_MAPKIT_API_KEY" } },
+    "ios": { "apiKey": { "env": "YANDEX_MAPKIT_API_KEY" } }
+  }
+}
+```
+
+The build reads the values, with each variable's value as the build runs, and
+writes them into the code it generates for the app. The package's code reads
+the declared keys for its target from its context. A key given no value is
+absent.
+
+| Target | What the package reads |
+| --- | --- |
+| Android | `context.config`, a `JSONObject` on `ExtensionContext` |
+| iOS, macOS, tvOS | `context.config`, a `[String: Any]` on `ExactPackageContext` |
+| Web | `config`, an object passed to `implementation({ config })` |
+
+```kotlin
+val key = context.config.optString("apiKey")   // "" when absent
+```
+
+```swift
+let key = context.config["apiKey"] as? String
+```
+
+Every build refuses these, naming the key and never its value:
+
+- `bake-config-type`: a value of another type than declared, such as a key
+  written into `app.json` where `{"env": "…"}` is declared.
+- `bake-config-unknown`: a key the interface does not declare for that target.
+  The error suggests the nearest declared name.
+- The declared `missing` code: a required key with no value. A key that is
+  `"required": "release"` is required only in a release build. On Android, that
+  is `--release` or production trust. On Apple, it is production trust
+  (`--release`, or `EXACT_UPDATE_TRUST=production`) or a distributed build
+  (`--distribution`, or an archive that is not `--development`). On the web,
+  it is a site to host (`--out`).
+  A development build without the key warns and builds.
+
+An `app.json` entry for a package that is not installed is a warning.
+
+**`env` keeps a value out of the repository, not out of the app.** Anything in
+`config` ships inside the APK, the IPA or the page, and anyone with the app
+can read it, as with a setting an app reads through `import.meta.env` (LLP
+1153 D4). A value that must stay secret belongs on a server. Restrict a vendor key to the
+app instead: by package name and signing certificate for Google's keys, or by
+bundle id where the vendor offers it.
+
+A native app's configuration is part of its binary. Changing a value, or the
+value of a variable it names, needs a new binary, and `exact deploy` and
+`exact push` classify the change that way. The binary's receipt records an
+`env` value only as its SHA-256. Publishing an update therefore needs the same
+variables set as the build had.
+
+**A vendor SDK that reads its key from the Android manifest.** An `android` key
+may also fill a `<meta-data>` the SDK reads by its own name:
+`"metadata": "com.google.android.geo.API_KEY"`. The name must be on Exact's
+list (`CONFIG_METADATA` in `scripts/android-manifest.mjs`), which today holds
+only the Google Maps SDK's key. Two bound packages may not fill one name. A
+package that needs another name asks for a row. An SDK that takes its key in
+code, such as Yandex MapKit's `MapKitFactory.setApiKey`, needs no row.
 
 ### A package's storage and session
 
@@ -4165,7 +4581,11 @@ the complete original URL percent-encoded in `u`; read it with
 `searchParam(top(nav), "u")`. The handler needs an `/open` route and a
 navigation root with `navigate=`. At cold launch it is the initial location;
 when already running, each link fires one `navigate` event in arrival order.
-An app without `protocol_handlers` keeps ordinary URL-to-location behavior.
+A scheme registered with `host.ios.urlSchemes` or `host.macos.urlSchemes` alone
+needs no `/open` route: the link arrives as its path. A non-empty authority is the first
+segment and an empty one is none, so `notes://post/42?x=1`, `notes:///post/42?x=1` and
+`notes:/post/42?x=1` are all `/post/42?x=1`. Expo's `Linking.createURL("/post/42")`
+writes the three-slash form.
 For the app's own web addresses, declare `"handle_links": "preferred"` beside
 `app.origin` (and `scope`, `scope_extensions` to narrow or widen the claim):
 iOS, macOS and Android then open links to them in the app, at the link's path,
@@ -4279,28 +4699,71 @@ main navigationKey=`${top(nav).id}` navigationBack="close" navigate=follow displ
   later neighbouring bar items share one glass capsule, as UIKit groups them;
   `buttonStyle="glass"` on a header button gives that item a capsule of its own
   (`sharesBackground = false`).
-- A header button is its bar item: a symbol is its image and a text its title, in
-  the bar's type, the platform's. A `font-size` or `font-weight` on a native button or
-  its text sets that title's font, as on a button in the page, and its glass fits the
-  words (`buttonStyle="glass" font-size=12` is a small "● Clock" chip). A face that
-  says more keeps what it says: a status dot (a childless filled box) beside its
-  label, or a label in a `font-family` of yours (which makes the button a custom
-  one), is drawn as written, in its colours, as the
-  item's image inside the bar's capsule (a "● Clock" chip in 12-point monospace).
-  The button's left and right padding is room the face keeps inside that capsule
-  (`padding="0px 7px"`). A filled box holding a text, a symbol or a picture (an avatar, a badge) is drawn without the
-  capsule; on a button that says `backgroundMaterial="glass"` (or `"glass-clear"`) it
-  sits in a glass capsule of its own, as a `buttonStyle="glass"` button does. A picture
-  (`image url`, an avatar's photo) fills the box by its `object-fit`, clipped to the box's
-  corners; until it loads the face is the box's fill. Leave the font unsaid for an ordinary Edit or Done.
-- A readout nothing presses (a "● Clock" or "Saved" beside the title) is
-  `role="status"` in the header, beside the buttons. (A `button disabled=true` is a
-  dimmed bar item, UIKit's disabled one, which VoiceOver reads as a button that cannot
-  be pressed, not as a status.) A readout is an item on its side of the heading, a custom view in the bar's
-  glass drawn as written (its fonts, colours, a dot's size and corners, the gap) that
-  follows the state in place, read by VoiceOver as static text (its `aria-label`, else
-  its words). Its texts are never the subtitle. The web, the Mac and the agent's own
-  chrome draw it where it stands in the header (LLP 1075.003 §9.15):
+- A header `button` (or `link`) is UIKit's own bar item (LLP 1141.004 D1). Its own children
+  are one symbol, one text, or a symbol and a text, and they write only where they sit
+  (a size, `flex`, a margin or padding): the symbol is the item's image and the text its
+  title, in the bar's type, the platform's; with both, the symbol is the image and the
+  text its spoken name, as a hand-built bar's item has them. Write its colour on the
+  button (`color`, the item's tint), and on a native button its `font-size` or
+  `font-weight` (`buttonStyle="glass" font-size=12` is a small "● Clock" chip, its glass
+  fitting the words). The button's own fill, border and padding give way to the bar's
+  glass. A button whose one child is a filled box holding one text, one symbol or one
+  picture (an avatar, a badge) is UIKit's item too, drawn from the box without the
+  capsule. The box writes its fill, `border-radius`, size and layout. Text takes
+  `font-size` and `font-weight`, and text and symbols take `color`. On a button that says
+  `backgroundMaterial="glass"` (or `"glass-clear"`) the
+  badge sits in a glass capsule of its own. A picture (`image url`, an avatar's photo)
+  fills the box by its `object-fit`, clipped to its corners; until it loads the face is
+  the box's fill. Leave the font unsaid for an ordinary Edit or Done.
+- A readout (`role="status"`) of words, symbols, dots and one `progress`, holding nothing
+  that presses, is an item on its side of the heading: its own views in a custom view,
+  laid out as written and following the state in place, so its `progress` turns there
+  (LLP 1141.004 D3). It sits on the bar with no glass; `backgroundMaterial` written on it
+  is drawn as its own. VoiceOver speaks a change of it, its texts are never the subtitle,
+  and where the bar is too narrow UIKit's "⋯" menu lists it by its accessible name,
+  dimmed (give it an `aria-label`). (A `button disabled=true` is a dimmed bar item,
+  UIKit's disabled one, which VoiceOver reads as a button that cannot be pressed, not as
+  a status.) A row after the heading that is a symbol and words is the subtitle; one
+  that changes says `role="status"` to be a readout.
+- **The iOS bar holds a closed set, and the compiler refuses the rest.** In an app that
+  ships iOS, a route's `header` that is the bar holds its heading; the first text after
+  it as the subtitle (or the first text in a plain box after it, or a line of symbols and
+  words); an avatar before the heading in its box; buttons, links and badges as above;
+  readouts; one search field; and one tablist of titled tabs. Plain boxes around them,
+  or empty between them, lay them out. Anything else (a spinner or a picture beside the
+  heading, a second text, a switch, a pressed row of more than words, a button with a
+  dot beside its label or a coloured text, a button inside a readout) fails the build
+  (`lower-header-item`), and the error names the repair: make it one of those, move it
+  below the `header` into the route's content, or say `navigationBar="none"` on the
+  route's element and draw the header yourself. The compiler reads each arm of an `if`
+  or a `match` as if taken, so a branch does not get past it. An app that does not ship
+  iOS, and a header that is not the bar (no heading, two headings, `appearance="none"`
+  on it), draw the header as written. What the compiler cannot see (a value computed as
+  the app runs) iOS keeps out of the bar.
+- On the other targets:
+  - **Android's top app bar and tvOS's bar leave out a readout**, and Android the title's
+    own parts too: the subtitle, the avatar and the tap on the title. The Mac's toolbar
+    takes a header only when it has a place for every part: the heading, the first text
+    after it (in a box or not) as the window's subtitle, buttons whose face is words,
+    symbols, dots and at most one picture, readouts of words, symbols and dots, one
+    search field and a tablist of two or more tabs that each show a title alone.
+    Anything else (a readout holding a spinner, a pressable title, a tablist of one tab,
+    a second search field) sends the whole header to the page. For the targets your app
+    ships, the compiler names each readout Android or tvOS leaves out and the first part
+    the Mac has no place for, once a header (`header-item-left-out`, information); it
+    does not name the title's own parts, and where an `if` or a `match` decides which
+    text is the subtitle or which search field is the second, it gives it the benefit.
+    The web and desktop Linux draw the header as written. To show something on every
+    target, put it below the `header`, in the route's content.
+  - **A readout's automatic size is held to a third of the bar's width and 44 points of
+    height**, and UIKit shrinks or hides the title before the items; a `width`, `height`
+    or minimum you write wins, and the item takes that size. A trailing or bottom
+    `margin` on it is not kept; use `padding`.
+  - **Inside the heading's own box only the title shows**: the rest is hidden
+    (`lower-header-unplaced`). Put an item outside that box.
+  - A readout is drawn as the page draws it, so it takes the page's type and colour, not
+    the bar's: write the `font-size` and `color` you want (`-exact-secondary-label` for a
+    quiet label).
 
   ```
   header display="flex" align-items="center"
@@ -4310,6 +4773,10 @@ main navigationKey=`${top(nav).id}` navigationBack="close" navigate=follow displ
     row role="status" aria-label=(live ? "Clock, receiving" : "Clock") display="flex" align-items="center" gap=6
       column width=7 height=7 border-radius=3.5 background-color=(live ? "c.cyan" : "c.dim")
       text "Clock" font-family="Menlo" font-size=12 color=(live ? "c.cyan" : "c.dim")
+    if refreshing
+      row role="status" aria-label="Getting latest status" align-items="center" gap=6
+        progress
+        text "Updating" color="-exact-secondary-label"
   ```
 - Each tab names its panel with `aria-controls`; the panels are the stacks, and every
   tab's stack stays mounted, so a pushed screen, a draft and a scroll offset survive
@@ -4398,7 +4865,7 @@ main navigationKey=`${top(nav).id}` navigationBack="close" navigate=follow displ
   `id="back"` control the bar's own Back, which is the back/forward pair where the
   navigation root offers Forward (its `navigationHistory`, both when it says nothing).
   A header holding anything else (a picture, a text before the heading or a second one
-  after the subtitle, a pressable title, a button drawn as a box) stays in the page as
+  after the subtitle, a pressable title, a button holding a spinner or a second picture) stays in the page as
   written, whole, and `logs` says what it was. Under the agent
   the authored header paints; `--chrome platform` on `macos` shows the bar, `tap` and
   `type` naming a header's button, tab or search input go through it
@@ -5125,7 +5592,11 @@ For the Mac menu bar, put `-exact-menu="app"` on an ordinary button to add
 an item without a shortcut. Literal destinations are `about` (directly under
 About, where Check for Updates… goes), `app`, `file`, `edit`, `view`, `go`,
 `window`, `help`, and `none` (no item: the chord stays a shortcut);
-explicit placement overrides the usual `aria-keyshortcuts` chord filing. Its
+explicit placement overrides the usual `aria-keyshortcuts` chord filing. A
+placed item shows and takes the button's chord holding ⌘, or else one holding ⌃
+(`aria-keyshortcuts="Control+Space"`); a chord of ⌥ or ⇧ alone stays out of
+the menu, since those type. ⌃Space is macOS's default shortcut for Select the
+Previous Input Source, and where it is on the system takes it first. Its
 accessible label or text titles it, and `disabled` disables it. An item in the
 app menu or Help is the app's, so it stays enabled while no window is key and
 under a sheet or a Contract modal dialog. Keep the button reachable: the agent taps it,
@@ -6408,8 +6879,10 @@ input does not wait for a request its action sends; `clock data` lands it.
 `tap <target> drag <dx> <dy> … during "<op>" …` runs the quoted reads after the
 move, with the finger still down, before the hold. Under `--touch platform` the
 lift is scripted, so the reads run inside the hold and `during` needs one
-(`hold 300 during "state"`); the hold then moves the clock by its length on real time,
-as a `clock +<ms> real` would, so the app's `every` and `after` run while it is held. `tap <target> drag to <other> [at <x> <y>]`
+(`hold 300 during "state"`). Under the agent's clock the gesture moves the clock by its
+`press`, `over` and `hold` as the finger makes them (under `--touch platform` on real
+time, as a `clock +<ms> real` would), so the app's `every` and `after` run while it is
+held and `performanceNow()` in its pointer actions reads how long it was pressed. `tap <target> drag to <other> [at <x> <y>]`
 ends the drag on another node (refused by name when it is not mounted or off
 screen); a drag that should autoscroll a list or a board is `drag dx dy hold ms`. On iOS
 without `--touch platform` a drag scrolls the scroll or list it starts on with the
@@ -6426,12 +6899,13 @@ press. The start stays in the viewport. For a held dismissal, write
 `tap transcript drag 0 200 hold 1000 into keyboard during "state"` and compare
 `keyboard.top` with the finger's endpoint.
 
-On an iOS simulator, append `then dx dy [over ms] [hold ms] [during "op" …]`
-to script another leg with the same finger. For example:
+Append `then dx dy [over ms] [hold ms] [during "op" …]` to script another leg
+with the same finger, in a drive or a test file. For example:
 `tap handle drag 0 120 over 300 hold 500 during "layout" then 0 -120 over 300 hold 500 during "state"`.
-Each delta starts at the previous endpoint. All legs play in one XCTest
-synthesizer record, with one down and one up. Reads run inside their leg's hold;
-if they outlast it, the drive fails. The complete path must stay inside the
+Each delta starts at the previous endpoint. Under `--touch platform` all legs play
+in one XCTest synthesizer record, with one down and one up, and reads run inside
+their leg's hold; if they outlast it, the drive fails. Elsewhere the carrier's
+contact plays them; on iOS without `--touch platform` only a test's drag can. The complete path must stay inside the
 viewport (or the extended end bounds with `into keyboard`), last at most
 10 seconds, and spend at most 2 seconds moving, across at most eight legs.
 Library calls use `drag.path: [{dx, dy, over, hold, during}]`
@@ -7417,10 +7891,10 @@ the platform has no role for is the one place for a literal.
 already (the root font size: Dynamic Type's body on iOS, 13 on the Mac, the
 browser's 16). A `text role="heading"` with no `font-size` or `font-weight` of
 its own is the platform's text style for its `aria-level` (LLP 1115 D3): 1
-`title1`, 2 (the default) `title2`, 3 `title3`, 4 and on `headline`, sized for
-the reader's Dynamic Type by Apple's own ramp (iOS at the default size:
-28/22/20/17 pt; the Mac: 22/17/15/13; the web reads the ramp at its
-16 px root: 27/21/19/16, in `rem`). iOS, macOS and Material keep each style's
+`title1`, 2 (the default) `title2`, 3 `title3`, 4 and on `headline`. Apple's ramp
+gives 28/22/20/17 pt at the iOS default, 22/17/15/13 pt on the Mac and
+27/21/19/16 px at a 16 px web root. Android's Material look uses 28/24/22/16 sp
+at a font scale of 1 (LLP 1115.001 D4). iOS, macOS and Material keep each style's
 weight and leading. The web, neutral and terminal looks use bold for levels 1
 and 2, semibold for 3. Omit heading sizes and weights unless customizing them.
 An authored `font`, `font-size` or `font-weight` wins; an inherited one does not.

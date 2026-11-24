@@ -10,6 +10,7 @@ import android.graphics.fonts.Font
 import android.os.Looper
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewTreeObserver
 import java.io.File
 import java.nio.ByteOrder
 import java.nio.IntBuffer
@@ -140,8 +141,10 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
     private var taken = false
     /** The last take was a move: no new drawing, only the groups' translations. */
     private var moved = false
-    /** exact2 is booting on a thread of its own ([Native.startAsync] or [Owner.boot]); false: it boots here. */
+    /** An ownerless async boot ([Native.startAsync]), or a cold owner boot that holds the first draw. */
     var booting = false
+    // The first app frame dismisses the starting window even if the reader has nothing to draw yet.
+    private val bootDraw = ViewTreeObserver.OnPreDrawListener { !booting && owner?.waitingForColdWindow != true }
     /** The window's size in pixels, which a host that boots here boots in ([Native.start]). */
     var window = 0 to 0
     /** What the host says to draw around the page ([Native.chrome]), when exact2 runs here: told as it changes. */
@@ -426,7 +429,13 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
         // Asynchronous: a traversal this frame schedules (rows made on the worker draw at the next) holds posted
         // messages behind its barrier, and the mark then waited for that frame, which waits for this one's on
         // RenderThread (30-45 ms, the first with text): 82 ms where the same launch otherwise marked 47.
-        if (first) { first = false; android.os.Handler.createAsync(android.os.Looper.getMainLooper()).post(onFirst); if (warm) postDelayed({ warmer.prepare() }, 300) }
+        if (first) {
+            first = false
+            owner?.endColdDraw()
+            viewTreeObserver.removeOnPreDrawListener(bootDraw)
+            android.os.Handler.createAsync(android.os.Looper.getMainLooper()).post(onFirst)
+            if (warm) postDelayed({ warmer.prepare() }, 300)
+        }
         if (blessing) { blessing = false; android.os.Handler.createAsync(android.os.Looper.getMainLooper()).post(bless) }
         if (!owned) schedule()
     }
@@ -443,7 +452,13 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
     internal fun blessNext() { blessing = true; invalidate() }
 
     /** The owner booted (or could not). */
-    fun ownerStarted(ok: Boolean) { started = ok; contacts.started(); invalidate() }
+    fun ownerStarted(ok: Boolean) {
+        booting = false
+        if (!ok) viewTreeObserver.removeOnPreDrawListener(bootDraw)
+        started = ok
+        contacts.started()
+        invalidate()
+    }
 
     /** The owner published: what it made, drawn (a move through the ticker, a paint through this view). */
     fun onPublished() { publish() }
@@ -479,13 +494,19 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
     private val presents = Presents(this, { owner?.queue?.isNotEmpty() ?: true }) { t, at ->
         owner?.presented(t, at) ?: run { if (Native.picturePresented(t, at)) pump() }
     }
-    override fun onAttachedToWindow() { super.onAttachedToWindow(); presents.attach() }
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (owner?.awaitingColdDraw == true) viewTreeObserver.addOnPreDrawListener(bootDraw)
+        presents.attach()
+    }
     internal fun stopMainWakes() {
+        owner?.endColdDraw()
         removeCallbacks(timer)
         wakes?.close()
         wakes = null
     }
     override fun onDetachedFromWindow() {
+        viewTreeObserver.removeOnPreDrawListener(bootDraw)
         presents.detach()
         running(false, host = false)
         stopMainWakes()
@@ -540,11 +561,7 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
             applyMove(moveOps)
             groups[feed]?.let { feedBaseX = it.translationX; feedBaseY = it.translationY }
         }
-        // The feed where a driver's scrolls put it, then every scroller a finger moved where the reader has it, and
-        // the hosted fields with their scrollers' rows.
-        if (any) { placeFeed(); scrolling.place(); fields?.place() }
-        // A view lent to another element by these streams (a paint, or a move's `placeFeed`) is asked at its new place.
-        if (any) { Formas.placed(); textSelection.refresh() }
+        if (any) { placeScrolled(); textSelection.refresh() }
         if (coverTrace && painted) traceNewRows()
         moved = !painted
         quiet = painted && allQuiet && move == null
@@ -577,6 +594,10 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
         groupSigs.clear(); groupSigs.putAll(structure.groupSigs)
         return same
     }
+
+    /** After a stream, and each move of the reader's own, which may make none ([Owner]): the feed, the scrollers' rows,
+     * the hosted fields and a view lent to another element. */
+    internal fun placeScrolled() { placeFeed(); scrolling.place(); fields?.place(); Formas.placed() }
 
     private fun placeFeed() {
         nearNatives()
@@ -704,8 +725,6 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
             }
         }
         n.near(nearShow, nearKeep, nearKnown, nearSeen)
-        // A pooled view lent to another row as the feed scrolls is asked at its new place.
-        Formas.placed()
     }
 
     /** Where the feed's group is drawn: the last stream's place, less the scrolls the owner has yet to apply; where a
@@ -768,7 +787,7 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
         val s = ++mainSeq
         sent.addLast(s to dy)
         o.scroll(dy, s)
-        if (groups[feed] != null) { placeFeed(); fields?.place(); ticker?.invalidate() }
+        if (groups[feed] != null) { placeFeed(); fields?.place(); Formas.placed(); ticker?.invalidate() }
     }
 
     /** How far the feed's drawn rows reach from the view, down ([reachDown]) and up ([reachUp]), in the group's own
@@ -1074,7 +1093,7 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
         // A moved paint is owed a paint once scrolling pauses: each step pushes this back.
         if (Native.owed() && (due < 0 || due > 16)) due = 16.0
         removeCallbacks(timer)
-        if (due >= 0) postDelayed(timer, due.toLong().coerceAtLeast(0))
+        if (due >= 0) postDelayed(timer, kotlin.math.ceil(due).toLong())
     }
     private fun f(b: IntBuffer, i: Int) = java.lang.Float.intBitsToFloat(b.get(i))
     /** Faces, pictures and rows announced in a new stream, made once. */
@@ -1120,7 +1139,7 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
                     // A hosted text field (kind 4) is not the stream's to make: exact2 says its fields apart ([Fields]),
                     // and the stream says only that it draws one.
                     if (kind == 4) fields?.drawn(id) else natives?.ensure(id, kind, w, h, String(bytes), ingestRow,
-                        b.get(i + 2) and 256 != 0, if (slotOwner < 0) -1 - slotOwner else null)
+                        b.get(i + 2) and 256 != 0, if (slotOwner < 0) -1 - slotOwner else null, b.get(i + 2) and 512 != 0)
                     i += 16 + (len + 3) / 4
                 }
                 26 -> {
@@ -1302,6 +1321,7 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
             streamFrame = false
             if (later.isNotEmpty()) { laterPosted = true; android.view.Choreographer.getInstance().postFrameCallback(laterFrame) }
         } else makeLater(laterNs)
+        if (done.isNotEmpty()) regroupFrame.doFrame(0L) // the groups of rows made here ([makeOne]), for this frame
     }
 
     /** The waiting rows the scroll is about to bring into view (within a quarter of the view, or three frames of
@@ -1358,6 +1378,8 @@ class ExactView(context: Context, private val live: Boolean, private val onFirst
         val id = l.b.get(l.at + 1)
         laterRows.remove(id)
         makeRow(l.b, l.at, now || l.b.get(l.at + 2) < 0 || near(id, f(l.b, l.at + 4)))
+        // Its groups were recorded without it: they are recorded again once it is made, not with the next stream.
+        if (pending.containsKey(id)) awaited.add(id) else done.add(id)
         val outer = skipDefs
         skipDefs = true
         ingest(l.b, l.sets, l.end)

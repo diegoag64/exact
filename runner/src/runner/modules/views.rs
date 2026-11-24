@@ -21,8 +21,8 @@
 //! An extension the host binds after a view is shown (its module loads after
 //! first pixel) is told each of its views' state then, with the kept origins.
 
+use super::super::provenance::Cause;
 use super::super::{DataSource, Runner};
-use super::CallOrigin;
 use crate::request::Reply;
 use exact_kernel::{PropId, ViewId};
 use serde_json::{json, Value as Json};
@@ -33,20 +33,21 @@ use std::collections::BTreeMap;
 pub(in crate::runner) struct Views {
     /// Each package view node, by id.
     seen: BTreeMap<ViewId, Viewed>,
-    /// The origin of the last commit applied: what a change found after it
-    /// (the host's covers set as it lays the commit out) is reported with.
-    pub(in crate::runner) last: CallOrigin,
+    /// The cause of the last commit applied: what a change found after it
+    /// (the host's covers set as it lays the commit out) is reported with;
+    /// none before one.
+    pub(in crate::runner) last: Option<Cause>,
 }
 
 struct Viewed {
     tag: String,
     extension: String,
     shown: bool,
-    /// The origin of the commit that last changed `shown`.
-    shown_by: CallOrigin,
-    /// Each binding prop's value as JSON text, and the origin of the commit
+    /// The cause of the commit that last changed `shown`.
+    shown_by: Cause,
+    /// Each binding prop's value as JSON text, and the cause of the commit
     /// that set it.
-    bound: BTreeMap<String, (String, CallOrigin)>,
+    bound: BTreeMap<String, (String, Cause)>,
 }
 
 impl<D: DataSource> Runner<D> {
@@ -65,7 +66,7 @@ impl<D: DataSource> Runner<D> {
         if self.plan.views.is_empty() && !self.fed_any() {
             return;
         }
-        self.extensions.views.last = self.call_origin();
+        self.extensions.views.last = Some(self.cause());
         self.report_views();
     }
 
@@ -80,7 +81,8 @@ impl<D: DataSource> Runner<D> {
         if self.plan.views.is_empty() || (none_placed && self.extensions.views.seen.is_empty()) {
             return;
         }
-        let origin = self.extensions.views.last;
+        let cause = (self.extensions.views.last).unwrap_or(Cause::device());
+        let origin = cause.origin();
         let kernel = &self.kernel;
         let plan = &self.plan;
         let found = kernel.preorder_where(&kernel.roots(), |_, props| {
@@ -115,7 +117,7 @@ impl<D: DataSource> Runner<D> {
                 tag: tag.to_owned(),
                 extension,
                 shown: false,
-                shown_by: origin,
+                shown_by: cause,
                 bound: BTreeMap::new(),
             };
             if let Some(was) = was.as_mut() {
@@ -125,7 +127,7 @@ impl<D: DataSource> Runner<D> {
             }
             if row.displayed && viewed.shown != shown {
                 viewed.shown = shown;
-                viewed.shown_by = origin;
+                viewed.shown_by = cause;
                 said.push(json!({ "extension": viewed.extension, "view": id.to_string(), "tag": tag, "displayed": shown, "origin": origin.word() }));
             }
             for prop in plan.str(row.binds).split_whitespace() {
@@ -136,7 +138,7 @@ impl<D: DataSource> Runner<D> {
                 if viewed.bound.get(prop).is_some_and(|(v, _)| *v == value) {
                     continue;
                 }
-                viewed.bound.insert(prop.to_owned(), (value, origin));
+                viewed.bound.insert(prop.to_owned(), (value, cause));
                 said.push(json!({ "extension": viewed.extension, "view": id.to_string(), "tag": tag, "bound": prop, "origin": origin.word() }));
             }
             now.insert(id, viewed);
@@ -161,10 +163,10 @@ impl<D: DataSource> Runner<D> {
                 continue;
             }
             if v.shown {
-                said.push(json!({ "extension": v.extension, "view": id.to_string(), "tag": v.tag, "displayed": true, "origin": v.shown_by.word() }));
+                said.push(json!({ "extension": v.extension, "view": id.to_string(), "tag": v.tag, "displayed": true, "origin": v.shown_by.origin().word() }));
             }
             for (prop, (_, by)) in &v.bound {
-                said.push(json!({ "extension": v.extension, "view": id.to_string(), "tag": v.tag, "bound": prop, "origin": by.word() }));
+                said.push(json!({ "extension": v.extension, "view": id.to_string(), "tag": v.tag, "bound": prop, "origin": by.origin().word() }));
             }
         }
         for body in said {
@@ -172,10 +174,10 @@ impl<D: DataSource> Runner<D> {
         }
     }
 
-    /// The origin the runner reported for view `id`'s displayed state, or for
-    /// its binding `prop`: what an acquisition the view makes is admitted
-    /// with (LLP 1133.008 D3).
-    pub(super) fn view_origin_linked(&self, id: ViewId, prop: Option<&str>) -> Option<CallOrigin> {
+    /// The cause of the commit that made view `id`'s displayed state, or
+    /// set its binding `prop`, as the runner reported it: what an
+    /// acquisition the view makes is admitted under (LLP 1133.008 D3).
+    pub(super) fn view_origin_linked(&self, id: ViewId, prop: Option<&str>) -> Option<Cause> {
         let v = self.extensions.views.seen.get(&id)?;
         match prop {
             Some(prop) => v.bound.get(prop).map(|(_, by)| *by),
@@ -190,9 +192,9 @@ impl<D: DataSource> Runner<D> {
             .filter(|(_, v)| v.extension == extension)
             .map(|(id, v)| {
                 let bound: serde_json::Map<String, Json> = (v.bound.iter())
-                    .map(|(p, (_, by))| (p.clone(), json!(by.word())))
+                    .map(|(p, (_, by))| (p.clone(), json!(by.origin().word())))
                     .collect();
-                json!({ "view": id, "tag": v.tag, "displayed": v.shown, "origin": v.shown_by.word(), "bound": bound })
+                json!({ "view": id, "tag": v.tag, "displayed": v.shown, "origin": v.shown_by.origin().word(), "bound": bound })
             })
             .collect()
     }

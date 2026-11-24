@@ -84,8 +84,9 @@ public struct Batch {
     public var routeInspectors: [RouteInspector]? = nil
     /// The kernel transactions it carries, while the runner measures (LLP 1079 D3).
     public var seq: (UInt64, UInt64)?
-    /// When `ExactSession.applyInput` marked it as a person's input: on iOS
-    /// a glass it adds to a group in the window materializes.
+    /// When `ExactSession.applyInput` took it as a person's input: a
+    /// navigation it makes is the person's (`NavigationMarks`), and on iOS a
+    /// glass it adds to a group in the window materializes.
     public var input: Double? = nil
     /// Failure lines the session writes to the unified log, each once (LLP 1142 D4).
     public var alerts: [String] = []
@@ -1123,6 +1124,21 @@ package final class Runtime {
             let n = write(request)
             let len = export(rt, n)
             return String(decoding: Data(bytes: exact_out(rt), count: Int(len)), as: UTF8.self)
+        }
+    }
+    /// `ask`, read on the owner after the jobs queued before it and never
+    /// waited for (LLP 1072 T3): `answer` runs there with the reply, the
+    /// `CACurrentMediaTime` it was read at and its job's number
+    /// (`Owner.jobsBegun`); the reply is nil for a runtime destroyed or
+    /// replaced since.
+    package func askLater(_ export: @escaping (ExactRuntime, Int) -> UInt32, _ request: String,
+                          answer: @escaping (_ reply: String?, _ at: Double, _ job: UInt64) -> Void) {
+        let lease = completionLease
+        Owner.shared.post { [self] in
+            let job = Owner.shared.jobsBegun
+            guard accepts(lease) else { return answer(nil, CACurrentMediaTime(), job) }
+            let len = export(rt, write(request))
+            answer(String(decoding: Data(bytes: exact_out(rt), count: Int(len)), as: UTF8.self), CACurrentMediaTime(), job)
         }
     }
     /// A command's ruling (`share`, LLP 1069.003; `saveFile`, LLP 1069.010):
