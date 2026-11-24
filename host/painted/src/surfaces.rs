@@ -25,6 +25,8 @@ mod android_init;
 pub(crate) use android_init::bind as bind_application;
 #[cfg(any(target_os = "android", test))]
 mod fingers;
+#[cfg(target_os = "android")]
+mod headset;
 mod performance;
 #[cfg(any(target_os = "android", test))]
 mod retry;
@@ -169,6 +171,11 @@ impl Abi {
             {
                 android_init::run(&abi, path)?;
                 abi.initialized = true;
+            }
+            // A headset app's runtime makes the primary module's device.
+            #[cfg(target_os = "android")]
+            if artifact.is_empty() {
+                headset::attach(path);
             }
             if artifact.is_empty()
                 && compat["inputs"]["gpuModules"]

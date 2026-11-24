@@ -73,10 +73,9 @@ pub use tier::{set_thread_tier, set_tier, tier, GpuTier};
 mod storage;
 mod uniform;
 mod xr;
-pub use xr::{fov_projection, pose_view, XrEye, XrScratch, XrStereo, XrView};
-pub mod xr_capture;
+pub use xr::{XrEye, XrScratch, XrStereo, XrView};
 pub mod xr_input;
-pub use xr_input::{XrHand, XrInput, XrPose};
+pub use xr_input::{XrHand, XrInput, XrPose, XR_INPUT_FLOATS};
 #[cfg(windows)]
 mod window;
 pub use uniform::FrameUniform;
@@ -352,7 +351,7 @@ pub trait Surface {
     ) -> Option<bool> {
         None
     }
-    /// One stereo frame (OpenXR on a headset): advance once, then draw both
+    /// One stereo frame (a native headset): advance once, then draw both
     /// eyes of `stereo` into its two-layer array target (of `format`). The
     /// surface records and submits its own commands, as in
     /// [`Surface::render_xr`]. The default draws each eye on its own through
@@ -1477,16 +1476,13 @@ pub use device::{
 
 pub mod android;
 mod headset;
-pub use headset::{debug_applied, debug_switch, headset, set_debug_switches};
+pub use headset::{debug_applied, debug_switch, headset, set_debug_switches, set_headset};
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fixture;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
-/// A native headset session (OpenXR on Android; `docs/quest.md`).
-#[cfg(all(target_os = "android", feature = "openxr"))]
-pub mod openxr;
-#[cfg(all(target_os = "android", feature = "openxr"))]
-mod openxr_input;
+#[cfg(target_os = "android")]
+pub mod vulkan;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 

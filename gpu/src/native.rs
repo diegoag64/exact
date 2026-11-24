@@ -18,7 +18,7 @@ thread_local! {
     static ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }
 
-fn with<T>(f: impl FnOnce(&mut Module) -> T) -> Option<T> {
+pub(crate) fn with<T>(f: impl FnOnce(&mut Module) -> T) -> Option<T> {
     MODULE.with(|m| m.borrow_mut().as_mut().map(f))
 }
 
@@ -128,9 +128,9 @@ pub fn load(
 fn create_gpu(
     requirements: &[crate::grants::Requirements],
 ) -> Result<crate::Gpu, crate::DeviceFailure> {
-    // A headset's runtime makes the device where one answers.
-    #[cfg(all(target_os = "android", feature = "openxr"))]
-    if let Some(made) = crate::openxr::create_gpu(requirements) {
+    // A provider that owns the Vulkan objects (a headset's runtime) makes them.
+    #[cfg(target_os = "android")]
+    if let Some(made) = crate::vulkan::create_gpu(requirements) {
         return made;
     }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
@@ -490,11 +490,6 @@ pub fn render(id: u32, width: f32, height: f32, scale: f32, now_ms: f64) -> u32 
         shader_generation: 0,
         headroom: 1.0,
     };
-    // A headset session draws the canvas into the headset instead.
-    #[cfg(all(target_os = "android", feature = "openxr"))]
-    if let Some(code) = with(|m| crate::openxr::render(m, id, now_ms)).flatten() {
-        return code;
-    }
     match with(|m| m.render(id, &frame)).flatten() {
         Some(true) => 1,
         Some(false) => 0,
@@ -821,6 +816,16 @@ pub fn on_presented(callback: Option<extern "C" fn()>) {
     crate::frame::on_presented(callback);
 }
 
+/// Where canvas `id`'s immersive subject stands ([`Module::xr_focus`]).
+pub fn xr_focus(id: u32) -> Option<[f32; 3]> {
+    with(|m| m.xr_focus(id)).flatten()
+}
+
+/// How canvas `id` drew its last stereo frame ([`Module::xr_stereo_mode`]).
+pub fn xr_stereo_mode(id: u32) -> &'static str {
+    with(|m| m.xr_stereo_mode(id)).unwrap_or("none")
+}
+
 /// Drop a canvas's surface.
 pub fn destroy(id: u32) {
     with(|m| m.destroy(id));
@@ -836,6 +841,14 @@ pub fn error() -> String {
     with(|m| m.take_error()).unwrap_or_default()
 }
 
+/// The external Vulkan seams' exports are Android's alone (`vulkan.rs`).
+#[cfg(not(target_os = "android"))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __vulkan_exports {
+    () => {};
+}
+
 /// The exports for one app's registry, C ABI (see LLP 1009 D2).
 #[macro_export]
 macro_rules! module {
@@ -845,7 +858,7 @@ macro_rules! module {
             static EXACT_GPU_OUT: ::std::cell::RefCell<Vec<u8>> = const { ::std::cell::RefCell::new(Vec::new()) };
         }
 
-        $crate::__openxr_android_init!();
+        $crate::__vulkan_exports!();
 
         /// Create the device. 0 on success.
         #[no_mangle]

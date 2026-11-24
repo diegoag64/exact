@@ -1,10 +1,70 @@
-//! A headset's debug eye capture (`docs/quest.md`, "Seeing what the headset
-//! shows"): the pieces that do not need a headset. The OpenXR host polls a
-//! trigger file, parses it here ([`Request::parse`]), may replace the head's
-//! pose with a fixed one looking at the stage ([`StagePose::eyes`]), and
-//! writes each eye's layer as a PNG ([`png_rgb`]).
+//! Each eye's matrices, and the debug eye capture (`docs/quest.md`, "Seeing
+//! what the headset shows"): the pieces that do not need a headset. The
+//! session polls a trigger file, parses it here ([`Request::parse`]), may
+//! replace the head's pose with a fixed one looking at the stage
+//! ([`StagePose::eyes`]), and writes each eye's layer as a PNG ([`png_rgb`]).
 //!
-//! Nothing here runs unless the trigger file appears.
+//! No capture runs unless the trigger file appears.
+
+/// Eye → clip (column-major, 0–1 depth, right-handed, looking down −Z)
+/// from a field of view's angles in radians, `[left, right, up, down]`
+/// (left and down negative, as OpenXR's `XrFovf`), and the near and far
+/// planes.
+pub fn fov_projection(angles: [f32; 4], near: f32, far: f32) -> [f32; 16] {
+    let [l, r, u, d] = angles.map(f32::tan);
+    let (w, h) = (r - l, u - d);
+    [
+        2.0 / w,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        2.0 / h,
+        0.0,
+        0.0,
+        (r + l) / w,
+        (u + d) / h,
+        far / (near - far),
+        -1.0,
+        0.0,
+        0.0,
+        near * far / (near - far),
+        0.0,
+    ]
+}
+
+/// Reference space → eye (column-major): the inverse of an eye's pose, its
+/// orientation a unit quaternion `[x, y, z, w]` and its position in metres.
+pub fn pose_view(orientation: [f32; 4], position: [f32; 3]) -> [f32; 16] {
+    let [x, y, z, w] = orientation;
+    // Rows of the pose's rotation.
+    let r = [
+        [
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - z * w),
+            2.0 * (x * z + y * w),
+        ],
+        [
+            2.0 * (x * y + z * w),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - x * w),
+        ],
+        [
+            2.0 * (x * z - y * w),
+            2.0 * (y * z + x * w),
+            1.0 - 2.0 * (x * x + y * y),
+        ],
+    ];
+    let p = position;
+    // The inverse is Rᵀ with −Rᵀp; column j of Rᵀ is row j of R.
+    let t = [0, 1, 2].map(|i| -(r[0][i] * p[0] + r[1][i] * p[1] + r[2][i] * p[2]));
+    [
+        r[0][0], r[0][1], r[0][2], 0.0, //
+        r[1][0], r[1][1], r[1][2], 0.0, //
+        r[2][0], r[2][1], r[2][2], 0.0, //
+        t[0], t[1], t[2], 1.0,
+    ]
+}
 
 /// What one capture asks for: the head as tracked, or a fixed pose.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -170,26 +230,13 @@ impl StagePose {
     }
 }
 
-/// Tightly packed RGB rows from a layer read back with `bytes_per_row`
-/// padding, four bytes a pixel, red first unless `bgra`.
-pub fn rgb_rows(
-    data: &[u8],
-    bytes_per_row: usize,
-    width: usize,
-    height: usize,
-    bgra: bool,
-) -> Vec<u8> {
-    let mut out = Vec::with_capacity(width * height * 3);
-    for row in data.chunks(bytes_per_row).take(height) {
-        for px in row[..width * 4].as_chunks::<4>().0 {
-            if bgra {
-                out.extend_from_slice(&[px[2], px[1], px[0]]);
-            } else {
-                out.extend_from_slice(&px[..3]);
-            }
-        }
-    }
-    out
+/// Packed RGB from packed RGBA (the alpha dropped).
+pub fn rgb(rgba: &[u8]) -> Vec<u8> {
+    rgba.as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| [p[0], p[1], p[2]])
+        .collect()
 }
 
 fn crc32(chunks: &[&[u8]]) -> u32 {
@@ -296,7 +343,7 @@ mod tests {
         for i in 0..3 {
             assert!((head[i] - eye[i]).abs() < 1e-5, "{head:?}");
         }
-        let view = crate::pose_view(q, head);
+        let view = pose_view(q, head);
         let ahead = [0, 1, 2]
             .map(|r| (0..3).map(|c| view[c * 4 + r] * target[c]).sum::<f32>() + view[12 + r]);
         assert!(
@@ -327,7 +374,7 @@ mod tests {
         );
         assert!(head[0].abs() < 1e-6);
         // The view (`pose_view`) puts the focus straight ahead.
-        let view = crate::pose_view(q, head);
+        let view = pose_view(q, head);
         let ahead = [0, 1, 2]
             .map(|r| (0..3).map(|c| view[c * 4 + r] * focus[c]).sum::<f32>() + view[12 + r]);
         assert!(ahead[0].abs() < 1e-5 && ahead[1].abs() < 1e-5, "{ahead:?}");
@@ -345,8 +392,46 @@ mod tests {
         assert_eq!(&png[png.len() - 8..png.len() - 4], b"IEND");
         // IEND's CRC is fixed.
         assert_eq!(&png[png.len() - 4..], &[0xAE, 0x42, 0x60, 0x82]);
-        // Padded BGRA rows become packed RGB.
-        let padded = [3u8, 2, 1, 255, 9, 9, 9, 9, 6, 5, 4, 255, 9, 9, 9, 9];
-        assert_eq!(rgb_rows(&padded, 8, 1, 2, true), vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(
+            super::rgb(&[1, 2, 3, 255, 4, 5, 6, 0]),
+            vec![1, 2, 3, 4, 5, 6]
+        );
+    }
+
+    /// `m` (column-major) applied to a point, divided through.
+    fn project(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
+        let v = [p[0], p[1], p[2], 1.0];
+        let out: Vec<f32> = (0..4)
+            .map(|row| (0..4).map(|col| m[col * 4 + row] * v[col]).sum())
+            .collect();
+        [out[0] / out[3], out[1] / out[3], out[2] / out[3]]
+    }
+
+    #[test]
+    fn a_fov_projection_maps_the_frustum_edges_and_depth() {
+        let (l, r, u, d) = (-0.9f32, 0.7f32, 0.8f32, -0.85f32);
+        let m = fov_projection([l, r, u, d], 0.1, 50.0);
+        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+        assert!(close(project(&m, [r.tan() * 2.0, 0.0, -2.0])[0], 1.0));
+        assert!(close(project(&m, [l.tan() * 2.0, 0.0, -2.0])[0], -1.0));
+        assert!(close(project(&m, [0.0, u.tan() * 3.0, -3.0])[1], 1.0));
+        assert!(close(project(&m, [0.0, d.tan() * 3.0, -3.0])[1], -1.0));
+        assert!(close(project(&m, [0.0, 0.0, -0.1])[2], 0.0));
+        assert!(close(project(&m, [0.0, 0.0, -50.0])[2], 1.0));
+    }
+
+    #[test]
+    fn a_pose_view_takes_the_eye_to_the_origin_looking_down_minus_z() {
+        // Turned 90° left about +Y (looking down −X), standing at (1, 1.6, 2).
+        let half = std::f32::consts::FRAC_PI_4;
+        let m = pose_view([0.0, half.sin(), 0.0, half.cos()], [1.0, 1.6, 2.0]);
+        let eye = project(&m, [1.0, 1.6, 2.0]);
+        assert!(eye.iter().all(|c| c.abs() < 1e-5), "{eye:?}");
+        // A point a metre down −X from the eye is a metre ahead (−Z).
+        let ahead = project(&m, [0.0, 1.6, 2.0]);
+        assert!(
+            (ahead[2] + 1.0).abs() < 1e-5 && ahead[0].abs() < 1e-5,
+            "{ahead:?}"
+        );
     }
 }

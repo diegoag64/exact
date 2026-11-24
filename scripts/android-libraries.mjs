@@ -1,11 +1,12 @@
 /** What the Android build reads in the libraries it packages: ELF images and alignments, a zip archive's entries,
- * and the OpenXR loader a headset app packages (docs/quest.md). */
+ * and what a headset app packages (docs/quest.md): the OpenXR artifact and the OpenXR loader. */
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 import { inflateRawSync } from 'node:zlib';
+import { androidCargo } from './cargo-check.mjs';
 
 /** The SHA-256 of what an ELF64 file loads: its PT_LOAD segments' bytes, past the ELF header. AGP strips a
  * packaged library's debug symbols, which rewrites the header and nothing a segment holds, so this is the same
@@ -57,8 +58,8 @@ export function loadAlignment(path) {
   return least;
 }
 
-/** The Khronos OpenXR loader a headset app (app.json `host.android.xr`, docs/quest.md) packages beside its GPU module,
- * which opens it at run time: Maven Central's AAR at a pinned version and digest, cached under ~/.cache/exact. */
+/** The Khronos OpenXR loader a headset app (app.json `host.android.xr`, docs/quest.md) packages beside its OpenXR
+ * artifact, which opens it at run time: Maven Central's AAR at a pinned version and digest, cached under ~/.cache/exact. */
 export const OPENXR_LOADER = {
   version: '1.1.63',
   sha256: '622419d2f6741c3443a3beb4779af0764318edd01830de967f24c741ebcded73',
@@ -83,4 +84,17 @@ export function stageOpenxrLoader(jniLibs, abi, env = process.env) {
   if (!library) throw new Error(`the OpenXR loader ${version} has no ${abi} library`);
   mkdirSync(jniLibs, { recursive: true });
   writeFileSync(resolve(jniLibs, 'libopenxr_loader.so'), library);
+}
+
+/** Builds the OpenXR artifact a headset app packages (`gpu/openxr`, `libexact_openxr.so`, docs/quest.md) for `target`
+ * at `profile`, into `targetDir`, and copies it into `jniLibs`. It depends on no app, so it builds in exact2's own
+ * workspace, at exact2's lock. Its path. */
+export function stageOpenxrArtifact(jniLibs, { target, profile, env, targetDir }) {
+  const run = androidCargo('cargo', ['build', '--locked', '-p', 'exact-openxr', '--target', target, '--profile', profile],
+    { cwd: resolve(import.meta.dir, '..'), env: { ...env, CARGO_TARGET_DIR: targetDir }, stdio: 'inherit' });
+  if (spawnSync(...run).status !== 0) throw new Error('the OpenXR artifact (gpu/openxr) did not build');
+  const library = resolve(jniLibs, 'libexact_openxr.so');
+  mkdirSync(jniLibs, { recursive: true });
+  copyFileSync(resolve(targetDir, target, profile, 'libexact_openxr.so'), library);
+  return library;
 }

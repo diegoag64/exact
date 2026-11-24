@@ -517,7 +517,15 @@ impl<D: DataSource> Presenter<D> {
             let render = unsafe {
                 abi.symbol::<unsafe extern "C" fn(u32, f32, f32, f32, f64) -> u32>(b"gpu_render")
             };
-            let result = unsafe { render(c.id, w, h, scale, now) };
+            // A headset session draws the primary module's canvas instead.
+            let headset = c
+                .artifact
+                .is_empty()
+                .then(|| super::headset::render(c.id, now));
+            let result = match headset.flatten() {
+                Some(result) => result,
+                None => unsafe { render(c.id, w, h, scale, now) },
+            };
             match result {
                 1 => wants = true,
                 2 => self.surfaces.error = abi.error(),

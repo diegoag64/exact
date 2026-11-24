@@ -25,13 +25,14 @@ in its world.
 
 ## What the build does
 
-- `game/app/shells.mjs` turns on exact-gpu's `openxr` feature for the game's
-  GPU module on Android.
-- `scripts/agent-android.mjs` (`stageOpenxrLoader`) packages the Khronos
-  OpenXR loader (`libopenxr_loader.so`, Maven Central's
+- `scripts/agent-android.mjs` builds the OpenXR artifact (`gpu/openxr`,
+  `libexact_openxr.so`; `stageOpenxrArtifact`) in exact2's own workspace and
+  packages it beside the GPU module, with the Khronos OpenXR loader
+  (`libopenxr_loader.so`, Maven Central's
   `org.khronos.openxr:openxr_loader_for_android`, version and sha256 pinned in
-  `OPENXR_LOADER`, cached under `~/.cache/exact/openxr-loader`) beside the
-  module.
+  `OPENXR_LOADER`, cached under `~/.cache/exact/openxr-loader`;
+  `stageOpenxrLoader`). No other APK has either. The GPU module is the same as
+  a phone's: it has no OpenXR in it.
 - `host/android/app/build.gradle.kts` adds to the manifest: the launcher
   activity's `com.oculus.intent.category.VR` and
   `org.khronos.openxr.intent.category.IMMERSIVE_HMD` categories,
@@ -42,52 +43,67 @@ in its world.
 
 ## What runs
 
-`gpu/src/openxr.rs`, in the GPU module (only with the feature, only on
-Android):
+The OpenXR artifact (`gpu/openxr`), which the Android host loads where the
+APK has it (`host/painted/src/surfaces/headset.rs`). It never links the GPU
+module or wgpu: it reaches the module through the module's C exports
+(`gpu/src/vulkan.rs`), and the module through them makes its device and
+draws its canvas as on any other host.
 
-1. `gpu_android_init` keeps the Java VM and the application `Context`.
-   `ExactActivity` registers itself as `dev.exact.canvas.Immersive.activity`
-   before the host boots; the module reads it over JNI and gives it to the
-   loader and `xrCreateInstance` (`XR_KHR_android_create_instance`).
-2. Making the device (`gpu_prepare`, at boot): OpenXR instance and system,
-   then `XR_KHR_vulkan_enable2`: the runtime makes the `VkInstance` (with the
-   extensions wgpu-hal wants) and the `VkDevice` (wgpu-hal's extensions and
-   features for the granted wgpu features, Vulkan 1.1, queue family 0 /
-   index 0 as wgpu-hal opens). Where the GPU has them, the device also gets
-   `MULTIVIEW` with `max_multiview_view_count = 2` (wgpu's default limit is
-   0, which refuses a two-view pass) and `MULTISAMPLE_ARRAY`, for single-pass
-   stereo at 4x; the log line `device … multiview … multisample array …`
-   says what was granted. wgpu wraps
-   both (`Instance::from_raw`, `expose_adapter`, `device_from_raw`,
-   `create_adapter_from_hal`, `create_device_from_hal`), and the session is
-   made on that device. The wgpu instance is made with the module's instance
-   flags and no backend of its own, then given the runtime's adapter: not
-   with `wgpu::Instance::from_hal`, whose instance takes wgpu-core's default
-   flags (see "What the headset drew white" below). With no loader or runtime (a phone) the device is made
-   as always and the app draws to its window; the log says so.
-3. Each frame the host renders (`gpu_render`), the first canvas it asks for
-   draws into the headset instead of its window: events are polled
+1. The host calls the artifact's `xr_android_init` as it calls a GPU
+   artifact's `gpu_android_init`: it keeps the Java VM and the application
+   `Context`. `ExactActivity` registers itself as
+   `dev.exact.canvas.Immersive.activity` before the host boots; the artifact
+   reads it over JNI and gives it to the loader and `xrCreateInstance`
+   (`XR_KHR_android_create_instance`).
+2. Making the device. Once the primary GPU module is open, and before it
+   makes its device, the host calls `xr_open` with the module's path: the
+   artifact makes the OpenXR instance and system, hands the module the
+   `xr-debug` switches (`gpu_debug_switches`) and a Vulkan provider
+   (`gpu_vulkan_provider`). The module then makes its device as it always
+   does (`gpu_prepare`, at boot), but through the provider's hooks, which
+   are `XR_KHR_vulkan_enable2`'s: the runtime makes the `VkInstance` (with
+   the extensions wgpu-hal wants), chooses the physical device and makes the
+   `VkDevice` (wgpu-hal's extensions and features for the granted wgpu
+   features, Vulkan 1.1, queue family 0 / index 0 as wgpu-hal opens). Where
+   the GPU has them, the device also gets `MULTIVIEW` with
+   `max_multiview_view_count = 2` (the provider's `multiview_views`; wgpu's
+   default limit is 0, which refuses a two-view pass) and
+   `MULTISAMPLE_ARRAY`, for single-pass stereo at 4x; the log line `device …
+   multiview … multisample array …` says what was granted. wgpu wraps both
+   (`Instance::from_raw`, `expose_adapter`, `device_from_raw`,
+   `create_adapter_from_hal`, `create_device_from_hal`), and the provider's
+   last hook makes the session on that device. The wgpu instance is made
+   with the module's instance flags and no backend of its own, then given
+   the runtime's adapter: not with `wgpu::Instance::from_hal`, whose
+   instance takes wgpu-core's default flags (see "What the headset drew
+   white" below). With no loader or runtime (a phone) `xr_open` says so in
+   the log and the module makes its device as always: the app draws to its
+   window.
+3. Each frame the host renders, it asks the artifact first (`xr_render`): the
+   first canvas it asks for draws into the headset instead of its window
+   (`gpu_render` is not called for it), and any other draws nowhere. Events are polled
    (`READY` begins the session and asks for 72 Hz through
    `XR_FB_display_refresh_rate`; `STOPPING` ends it; losing focus tells the
    canvas `Interrupted`, regaining it `Resumed`), then `xrWaitFrame` (the
    host's thread is paced by the headset), `xrBeginFrame`, `xrLocateViews`,
    the swapchain image is acquired and waited for, the canvas draws a stereo
-   frame (`Module::render_xr_stereo`, below), the image goes back in
+   frame into it (`gpu_render_stereo`, which wraps the `VkImage` and calls
+   `Module::render_xr_stereo`, below), the module hands the image back in
    `COLOR_ATTACHMENT_OPTIMAL`, and `xrEndFrame` submits one projection layer.
    The world ticks once per headset frame on its predicted display time.
 4. The swapchain: one colour swapchain at the runtime's recommended size with
    two array layers (left, right), sRGB (the canvas's own format when the
-   runtime offers it, else `R8G8B8A8_SRGB`, else `B8G8R8A8_SRGB`), each image
-   wrapped as a wgpu `D2` texture of two layers. No depth swapchain yet.
+   runtime offers it, `gpu_vulkan_format`, else `R8G8B8A8_SRGB`, else
+   `B8G8R8A8_SRGB`), each image wrapped by the module as a wgpu `D2` texture
+   of two layers the first time it is drawn into. No depth swapchain yet.
 5. Foveation: `XR_FB_foveation` (HIGH, dynamic) is applied to the colour
    swapchain where offered. On Vulkan the runtime foveates through a fragment
    density map the app's render passes must use, which wgpu's do not, so it
    has no effect yet.
 6. Each eye's matrices: the view is the inverse of the eye's pose
-   (`exact_gpu::pose_view`), the projection the asymmetric frustum of its
-   field of view with 0–1 depth, near 0.05 m and far 200 m
-   (`exact_gpu::fov_projection`; not reversed). `XrStage::eye` then places the
-   world.
+   (`pose_view`, `gpu/openxr/src/pose.rs`), the projection the asymmetric
+   frustum of its field of view with 0–1 depth, near 0.05 m and far 200 m
+   (`fov_projection`; not reversed). `XrStage::eye` then places the world.
 
 ### The stereo entry
 
@@ -147,7 +163,7 @@ them, the canvas gets an event, the world's next tick reads it from `Input`.
 Nothing in a game calls OpenXR, so a run with hands replays and saves as any
 run does.
 
-**The host** (`gpu/src/openxr_input.rs`). With the session it makes one
+**The host** (`gpu/openxr/src/controls.rs`). With the session it makes one
 action set and attaches it: per hand an aim pose and a grip pose, the trigger
 and the grip button (each as its travel and as pressed), the thumbstick and
 its click, the two face buttons and the menu button. Bindings are suggested
@@ -157,8 +173,9 @@ controllers answer to it) and for `/interaction_profiles/khr/simple_controller`
 after `xrLocateViews`, it syncs the actions, locates both hands' poses and the
 head (the `VIEW` space) in the frame's reference space at the predicted
 display time, and delivers one `InputEvent::Xr` to the canvas before the
-world advances (`Module::input`), stamped with the last frame's time so the
-next tick takes it. A frame equal to the last sends nothing. Without focus
+world advances (`gpu_input_xr`, which takes the input as
+`exact_gpu::XR_INPUT_FLOATS` numbers), stamped with the last frame's time so
+the next tick takes it. A frame equal to the last sends nothing. Without focus
 (the system menu) the runtime reports every action inactive, which arrives as
 both hands inactive with nothing held. The log says which profile each hand
 took and when a hand comes and goes (`adb logcat -s exact-xr | grep
@@ -219,7 +236,7 @@ done.
 ### Driving the controllers without hands
 
 A debug stand-in, in any build, for hands nobody has (a headset on a desk, a
-scripted check with the eye capture below): the module looks about six times
+scripted check with the eye capture below): the artifact looks about six times
 a second for a file named `xr-input` in the app's external files directory,
 takes its lines as a script and removes it. A hand the script posed or
 pressed stays the script's, held where it was left, until the script
@@ -248,7 +265,7 @@ in the reference space (the floor where the app started, +Y up, −Z ahead).
 | `message <text>` | post text to the canvas, as Contract's `postMessage` |
 | `recenter` | count a recenter (`XrInput::recenters`), as the runtime does when the Meta button is held; the poses stay where they are, so script a `head` first to stand somewhere else |
 
-A wrong line refuses the whole file, by line. `gpu/src/xr_input.rs`
+A wrong line refuses the whole file, by line. `gpu/openxr/src/script.rs`
 (`Injector`) holds the grammar and its tests; nothing runs until the file
 appears.
 
@@ -273,7 +290,7 @@ Unknown Sources.
 
 ## Debugging
 
-- `adb logcat -s exact-xr` (the module's lines): the runtime, the device, the
+- `adb logcat -s exact-xr` (the artifact's lines): the runtime, the device, the
   swapchain, every session state, `first frame submitted`, and once a second
   `perf mode=… fps=… cpu_ms=… encode_ms=… worst_ms=… wait_ms=… skipped=…`
   (`mode` how the canvas drew its stereo frames, `multiview-direct-4x` or
@@ -289,7 +306,7 @@ Unknown Sources.
 
 A debug capture of what the app itself draws, in any build (release
 included), without Meta's capture service (which uploads to the account):
-the module looks about twice a second for a file named `capture` in the app's
+the artifact looks about twice a second for a file named `capture` in the app's
 external files directory, and when it appears the next drawn stereo frame's
 two swapchain layers are read back and written beside it as PNGs (8-bit RGB,
 uncompressed, about 9 MB an eye at 1680×1760). Nothing happens, and nothing
@@ -323,7 +340,7 @@ undistorted.
   the stage's centre (a panel over a hand, a controller, one tile).
 - Captures are numbered from 1 in each process (`eye-<n>-left.png`,
   `eye-<n>-right.png`) and overwrite an earlier process's of the same number.
-  The module removes the trigger after reading it; where it cannot, the same
+  The artifact removes the trigger after reading it; where it cannot, the same
   file is not taken twice (write it again to take another).
 - Three seconds into a session (the 216th stereo frame) the canvas also logs
   its world once, under the `exact` tag: `xr state: args [...] tick=…
@@ -338,21 +355,22 @@ For measurements that must see the same picture run after run (a headset on
 a desk, a benchmark): a file named `xr-hold` in the same directory, holding
 `stage …` or `look …` as the capture trigger takes them, makes every frame
 draw from that fixed pose until a later `xr-hold` says `head` or `release`.
-The module looks for it as often as for the capture trigger, removes it and
+The artifact looks for it as often as for the capture trigger, removes it and
 logs `hold: …`. Like a capture's pose, a held one draws whether or not the
 head is tracked; the compositor shows it as it shows any frame.
 
     adb shell "echo 'look 0 1.4 0  0 0.85 -0.9' > $D/xr-hold"
     adb shell "echo release > $D/xr-hold"
 
-`gpu/src/xr_capture.rs` holds what needs no headset (the trigger's grammar,
-the fixed pose, the PNG writer, with their tests); `gpu/src/openxr.rs`
-(`Capture`) polls, reads back and writes.
+`gpu/openxr/src/pose.rs` holds what needs no headset (the trigger's grammar,
+the fixed pose, the PNG writer, with their tests); `gpu/openxr/src/capture.rs`
+(`Capture`) polls, reads the layers back through the module
+(`gpu_read_stereo`) and writes.
 
 ### Debug switches
 
 A file `xr-debug` in the same directory holds whitespace-separated switches
-the module reads once, when it makes the device (relaunch the app after
+the artifact reads once, when it makes the device (relaunch the app after
 changing it; `adb shell rm $D/xr-debug` turns them all off). The log names
 them (`debug switches: …`) and the `device …` line says what was granted.
 They exist to bisect a picture that is wrong on the headset only:
@@ -401,6 +419,7 @@ What a frame applied is logged under `exact-xr` as `applied: …`: the skip
 switches in force, and the sun filter's state (`sun shadow early-out true
 (cascades 1, fixed box true, shadow-all-taps false)`) whenever it changes.
 
+The artifact hands them to the GPU module (`gpu_debug_switches`), and
 `exact_gpu::debug_switch(name)` reads them anywhere in the module.
 With the state line the canvas also logs `xr cull: …`, the GPU cull's
 indirect arguments for this frame read back (instances per view, the first
@@ -434,7 +453,7 @@ takes its flags from the instance. Every other host makes its instance with
 renderer writes its own arguments, valid by construction). On the headset
 wgpu's validation pass ran before every render pass and rewrote each culled
 draw as an empty one. The fix makes the headset's wgpu instance with the
-module's flags (`gpu/src/openxr.rs`, `make`).
+module's flags (`gpu/src/vulkan.rs`, `make`).
 
 With the island drawn, Hexguard's level 1 (the headset demo, seven towers,
 the first wave) is GPU-bound on a Quest 3 under the immersive profile's

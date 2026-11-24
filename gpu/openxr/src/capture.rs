@@ -1,9 +1,9 @@
 //! The headset's debug eye capture and its per-second log line
 //! (`docs/quest.md`).
 
-use super::{external_files_dir, log, JAVA};
-use crate::xr_capture::{self, Request};
-use crate::{wgpu, Gpu};
+use crate::java::{self, log};
+use crate::module::Module;
+use crate::pose::{self, Request};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -26,7 +26,7 @@ pub(super) struct Capture {
     taken: u32,
     /// A fixed head pose every frame draws from (the `xr-hold` file), for
     /// measurements that must see the same picture run after run.
-    pub(super) hold: Option<xr_capture::StagePose>,
+    pub(super) hold: Option<pose::StagePose>,
     /// The hold file's last stamp, as `seen` for the trigger.
     hold_seen: Option<(SystemTime, u64)>,
 }
@@ -48,10 +48,7 @@ impl Capture {
             return;
         }
         self.since_poll = 0;
-        let dir = self
-            .dir
-            .get_or_insert_with(|| JAVA.get().and_then(external_files_dir))
-            .clone();
+        let dir = self.dir.get_or_insert_with(java::files_dir).clone();
         let Some(dir) = dir else { return };
         self.poll_hold(&dir);
         let trigger = dir.join(CAPTURE_TRIGGER);
@@ -109,101 +106,32 @@ impl Capture {
         }
     }
 
-    /// Copy both layers of `target` into a buffer and write them as PNGs
-    /// (on another thread, so the frame loop waits only for the copy).
-    pub(super) fn take(
-        &mut self,
-        gpu: &Gpu,
-        target: &wgpu::Texture,
-        format: wgpu::TextureFormat,
-        size: (u32, u32),
-        what: &str,
-    ) {
+    /// Read both layers of the frame just drawn back through the module and
+    /// write them as PNGs beside the trigger, on a thread of their own.
+    pub(super) fn take(&mut self, module: &Module, size: (u32, u32), what: &str) {
         let Some(Some(dir)) = self.dir.clone() else {
             return;
         };
-        let bgra = matches!(
-            format,
-            wgpu::TextureFormat::Bgra8UnormSrgb | wgpu::TextureFormat::Bgra8Unorm
-        );
         let (w, h) = size;
-        let bytes_per_row = (w * 4).div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT)
-            * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
-        let layer_bytes = u64::from(bytes_per_row) * u64::from(h);
-        let buffer = gpu.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("exact xr capture"),
-            size: layer_bytes * 2,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        let mut encoder = gpu
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("exact xr capture"),
-            });
-        for layer in 0..2u32 {
-            encoder.copy_texture_to_buffer(
-                wgpu::TexelCopyTextureInfo {
-                    texture: target,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d {
-                        x: 0,
-                        y: 0,
-                        z: layer,
-                    },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &buffer,
-                    layout: wgpu::TexelCopyBufferLayout {
-                        offset: layer_bytes * u64::from(layer),
-                        bytes_per_row: Some(bytes_per_row),
-                        rows_per_image: Some(h),
-                    },
-                },
-                wgpu::Extent3d {
-                    width: w,
-                    height: h,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
-        gpu.queue.submit([encoder.finish()]);
-        let slice = buffer.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        let _ = gpu.device.poll(wgpu::PollType::wait_indefinitely());
-        if !matches!(rx.recv(), Ok(Ok(()))) {
-            log(true, "capture: the read back failed");
-            return;
-        }
-        let data = match slice.get_mapped_range() {
-            Ok(view) => view.to_vec(),
-            Err(e) => {
-                log(true, &format!("capture: the read back failed: {e:?}"));
-                return;
+        let len = w as usize * h as usize * 4;
+        let mut layers = Vec::with_capacity(2);
+        for layer in 0..2 {
+            match module.read_stereo(layer, len) {
+                Ok(rgba) => layers.push(rgba),
+                Err(e) => {
+                    log(true, &format!("capture: the read back failed: {e}"));
+                    return;
+                }
             }
-        };
-        buffer.unmap();
+        }
         self.taken += 1;
         let n = self.taken;
         let what = what.to_owned();
         std::thread::spawn(move || {
             let mut written = Vec::new();
-            for (layer, eye) in ["left", "right"].into_iter().enumerate() {
-                let start = layer * layer_bytes as usize;
-                let rows = &data[start..start + layer_bytes as usize];
-                let rgb = xr_capture::rgb_rows(
-                    rows,
-                    bytes_per_row as usize,
-                    w as usize,
-                    h as usize,
-                    bgra,
-                );
+            for (rgba, eye) in layers.iter().zip(["left", "right"]) {
                 let path = dir.join(format!("eye-{n}-{eye}.png"));
-                match std::fs::write(&path, xr_capture::png_rgb(w, h, &rgb)) {
+                match std::fs::write(&path, pose::png_rgb(w, h, &pose::rgb(rgba))) {
                     Ok(()) => written.push(path.display().to_string()),
                     Err(e) => log(true, &format!("capture: {}: {e}", path.display())),
                 }
@@ -226,8 +154,8 @@ pub(super) struct Perf {
     encode_ms: f64,
     wait_ms: f64,
     worst_ms: f64,
-    /// How the last frame drew (`Module::xr_stereo_mode`).
-    mode: &'static str,
+    /// How the last frame drew (the module's `gpu_xr_stereo_mode`).
+    mode: String,
 }
 
 impl Perf {
@@ -237,7 +165,7 @@ impl Perf {
         cpu_ms: f64,
         encode_ms: f64,
         rendered: bool,
-        mode: Option<&'static str>,
+        mode: Option<String>,
     ) {
         if let Some(mode) = mode {
             if mode != self.mode {
@@ -264,7 +192,7 @@ impl Perf {
                 false,
                 &format!(
                     "perf mode={} fps={:.1} cpu_ms={:.2} encode_ms={:.2} worst_ms={:.2} wait_ms={:.2} skipped={}",
-                    if self.mode.is_empty() { "none" } else { self.mode },
+                    if self.mode.is_empty() { "none" } else { &self.mode },
                     f64::from(self.frames) / elapsed,
                     self.cpu_ms / n,
                     self.encode_ms / n,
@@ -275,7 +203,7 @@ impl Perf {
             );
             *self = Perf {
                 since: Some(now),
-                mode: self.mode,
+                mode: std::mem::take(&mut self.mode),
                 ..Default::default()
             };
         }

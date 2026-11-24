@@ -37,7 +37,7 @@ import { createConnection } from 'node:net';
 import { homedir, tmpdir, userInfo } from 'node:os';
 import { basename, dirname, resolve } from 'node:path';
 import { within } from './paths.mjs';
-import { keptLibrary, loadAlignment, stageOpenxrLoader, zipEntry } from './android-libraries.mjs';
+import { keptLibrary, loadAlignment, stageOpenxrArtifact, stageOpenxrLoader, zipEntry } from './android-libraries.mjs';
 export { keptLibrary, loadAlignment, loadedImage, OPENXR_LOADER, stageOpenxrLoader, zipEntry } from './android-libraries.mjs';
 import { parseColour, schemeColours } from './scheme-colours.mjs';
 import { missingDependencies } from './package-libraries.mjs';
@@ -1069,11 +1069,15 @@ function assembleApk(app, env, profile, writeLocks, bundle, abis, dirs) {
             if (existsSync(path)) copyFileSync(path, resolve(out, file));
           }
         }
-        // A headset app opens the OpenXR loader from beside its GPU module (docs/quest.md).
-        if (app.manifest.host?.android?.xr === 'quest') stageOpenxrLoader(jniLibs, abi, env);
+        // A headset app's OpenXR artifact, and the OpenXR loader it opens from beside it (docs/quest.md).
+        const headset = [];
+        if (app.manifest.host?.android?.xr === 'quest') {
+          headset.push(stageOpenxrArtifact(jniLibs, { target: triple, profile, env: toolchain, targetDir: resolve(app.target, 'openxr') }));
+          stageOpenxrLoader(jniLibs, abi, env);
+        }
         const sound = stageSoundLibrary(jniLibs, toolchain, triple);
         const payload = receipt.linkedPlan ? [stageAndroidBake(receipt.linkedPlan, jniLibs, toolchain, triple, androidWidgets, image)] : [];
-        for (const library of [canvas, ...modules.map(path => resolve(jniLibs, basename(path))), sound, ...payload]) {
+        for (const library of [canvas, ...modules.map(path => resolve(jniLibs, basename(path))), ...headset, sound, ...payload]) {
           if (loadAlignment(library) < 16384) throw new Error(`${abi}/${basename(library)} is not 16 KB aligned; add "${ANDROID_PAGE_SIZE}" to [target.${triple}] rustflags in the app's Cargo configuration`);
           libraries.push({ abi, library });
         }

@@ -4,11 +4,11 @@
 //! Touch controllers and for the Khronos simple controller, so any runtime
 //! with one or the other answers.
 //!
-//! The debug script file (`xr-input`, [`crate::xr_input::Injector`]) stands
+//! The debug script file (`xr-input`, [`crate::script::Injector`]) stands
 //! in for hands nobody has.
 
-use crate::openxr::log;
-use crate::xr_input::{button, Injector, XrInput, XrPose, INJECT_FILE};
+use crate::java::log;
+use crate::script::{button, Injector, XrInput, XrPose, INJECT_FILE};
 use openxr as xr;
 use std::path::PathBuf;
 use std::time::SystemTime;

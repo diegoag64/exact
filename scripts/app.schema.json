@@ -1273,7 +1273,7 @@
             },
             "xr": {
               "enum": ["quest"],
-              "description": "The Android build is a headset app (docs/quest.md): `quest` makes the APK a Meta Quest 3/3S/Pro app that the headset starts immersive. Its GPU module opens an OpenXR session (Khronos loader, Meta's runtime) whose Vulkan device it renders with, and the game's canvas draws into the headset each frame, placed by Game::xr_stage; the HUD and menus are not drawn there. The APK then requires head tracking, so a phone cannot install it; without a runtime the app draws to its window as usual."
+              "description": "The Android build is a headset app (docs/quest.md): `quest` makes the APK a Meta Quest 3/3S/Pro app that the headset starts immersive. The APK packages the OpenXR artifact (gpu/openxr), which opens an OpenXR session (Khronos loader, Meta's runtime) whose Vulkan device the GPU module renders with, and the game's canvas draws into the headset each frame, placed by Game::xr_stage; the HUD and menus are not drawn there. The APK then requires head tracking, so a phone cannot install it; without a runtime the app draws to its window as usual."
             },
             "painter": {
               "enum": ["ink"],

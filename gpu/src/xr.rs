@@ -93,66 +93,6 @@ impl XrStereo {
     }
 }
 
-/// Eye → clip (column-major, 0–1 depth, right-handed, looking down −Z)
-/// from a field of view's angles in radians, `[left, right, up, down]`
-/// (left and down negative, as OpenXR's `XrFovf`), and the near and far
-/// planes.
-pub fn fov_projection(angles: [f32; 4], near: f32, far: f32) -> [f32; 16] {
-    let [l, r, u, d] = angles.map(f32::tan);
-    let (w, h) = (r - l, u - d);
-    [
-        2.0 / w,
-        0.0,
-        0.0,
-        0.0,
-        0.0,
-        2.0 / h,
-        0.0,
-        0.0,
-        (r + l) / w,
-        (u + d) / h,
-        far / (near - far),
-        -1.0,
-        0.0,
-        0.0,
-        near * far / (near - far),
-        0.0,
-    ]
-}
-
-/// Reference space → eye (column-major): the inverse of an eye's pose, its
-/// orientation a unit quaternion `[x, y, z, w]` and its position in metres.
-pub fn pose_view(orientation: [f32; 4], position: [f32; 3]) -> [f32; 16] {
-    let [x, y, z, w] = orientation;
-    // Rows of the pose's rotation.
-    let r = [
-        [
-            1.0 - 2.0 * (y * y + z * z),
-            2.0 * (x * y - z * w),
-            2.0 * (x * z + y * w),
-        ],
-        [
-            2.0 * (x * y + z * w),
-            1.0 - 2.0 * (x * x + z * z),
-            2.0 * (y * z - x * w),
-        ],
-        [
-            2.0 * (x * z - y * w),
-            2.0 * (y * z + x * w),
-            1.0 - 2.0 * (x * x + y * y),
-        ],
-    ];
-    let p = position;
-    // The inverse is Rᵀ with −Rᵀp; column j of Rᵀ is row j of R.
-    let t = [0, 1, 2].map(|i| -(r[0][i] * p[0] + r[1][i] * p[1] + r[2][i] * p[2]));
-    [
-        r[0][0], r[0][1], r[0][2], 0.0, //
-        r[1][0], r[1][1], r[1][2], 0.0, //
-        r[2][0], r[2][1], r[2][2], 0.0, //
-        t[0], t[1], t[2], 1.0,
-    ]
-}
-
 /// An eye's own texture when it owns only part of the session's, kept
 /// across frames while its size and format hold.
 #[derive(Default)]
@@ -399,47 +339,5 @@ impl Module {
         // The page's canvas shows its last frame until the session ends.
         inst.dirty = true;
         Some(wants)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `m` (column-major) applied to a point, divided through.
-    fn project(m: &[f32; 16], p: [f32; 3]) -> [f32; 3] {
-        let v = [p[0], p[1], p[2], 1.0];
-        let out: Vec<f32> = (0..4)
-            .map(|row| (0..4).map(|col| m[col * 4 + row] * v[col]).sum())
-            .collect();
-        [out[0] / out[3], out[1] / out[3], out[2] / out[3]]
-    }
-
-    #[test]
-    fn a_fov_projection_maps_the_frustum_edges_and_depth() {
-        let (l, r, u, d) = (-0.9f32, 0.7f32, 0.8f32, -0.85f32);
-        let m = fov_projection([l, r, u, d], 0.1, 50.0);
-        let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
-        assert!(close(project(&m, [r.tan() * 2.0, 0.0, -2.0])[0], 1.0));
-        assert!(close(project(&m, [l.tan() * 2.0, 0.0, -2.0])[0], -1.0));
-        assert!(close(project(&m, [0.0, u.tan() * 3.0, -3.0])[1], 1.0));
-        assert!(close(project(&m, [0.0, d.tan() * 3.0, -3.0])[1], -1.0));
-        assert!(close(project(&m, [0.0, 0.0, -0.1])[2], 0.0));
-        assert!(close(project(&m, [0.0, 0.0, -50.0])[2], 1.0));
-    }
-
-    #[test]
-    fn a_pose_view_takes_the_eye_to_the_origin_looking_down_minus_z() {
-        // Turned 90° left about +Y (looking down −X), standing at (1, 1.6, 2).
-        let half = std::f32::consts::FRAC_PI_4;
-        let m = pose_view([0.0, half.sin(), 0.0, half.cos()], [1.0, 1.6, 2.0]);
-        let eye = project(&m, [1.0, 1.6, 2.0]);
-        assert!(eye.iter().all(|c| c.abs() < 1e-5), "{eye:?}");
-        // A point a metre down −X from the eye is a metre ahead (−Z).
-        let ahead = project(&m, [0.0, 1.6, 2.0]);
-        assert!(
-            (ahead[2] + 1.0).abs() < 1e-5 && ahead[0].abs() < 1e-5,
-            "{ahead:?}"
-        );
     }
 }

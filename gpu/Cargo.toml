@@ -45,19 +45,8 @@ wgpu-hal = { version = "30", default-features = false }
 
 [target.'cfg(target_os = "android")'.dependencies]
 wgpu-hal = { version = "30", default-features = false }
-# A native headset session (feature `openxr`, docs/quest.md): the OpenXR
-# bindings (the Khronos loader is opened at run time, packaged by the APK),
-# ash at wgpu-hal's version for the runtime's Vulkan handles, and JNI to
-# hand the runtime the activity.
-openxr = { version = "0.22", optional = true, default-features = false, features = ["loaded"] }
-ash = { version = "0.38", optional = true, default-features = false, features = ["loaded", "std"] }
-jni-sys = { version = "0.3", optional = true }
-
-[features]
-# OpenXR on Android (a Meta Quest app): the device is the headset runtime's
-# and the first canvas the host renders draws into the headset. Off Android
-# it changes nothing.
-openxr = ["dep:openxr", "dep:ash", "dep:jni-sys"]
+# ash at wgpu-hal's version, for Vulkan objects a provider makes (`vulkan.rs`).
+ash = { version = "0.38", default-features = false, features = ["loaded", "std"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # 30.0.2 advertises premultiplied alpha for a WebGPU canvas.
