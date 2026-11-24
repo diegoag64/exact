@@ -135,6 +135,7 @@ export function compileFixtures(root, run, env, dir, prefix, appId) {
   contract([resolve(root, 'host/apple/tests/fixtures/more-tabs.contract'), '-o', env[`${prefix}_MORE_TABS_PLAN`] = resolve(dir, 'more-tabs.plan')]);
   // NotificationActionTests': a post's declared actions and the root's handler.
   contract([resolve(root, 'host/apple/tests/fixtures/notification-actions.contract'), '-o', env[`${prefix}_NOTIFICATION_ACTIONS_PLAN`] = resolve(dir, 'notification-actions.plan')]);
+  if (prefix === 'EXACT') contract([resolve(root, 'host/apple/tests/fixtures/refused-picture.contract'), '-o', env.EXACT_REFUSED_PICTURE_PLAN = resolve(dir, 'refused-picture.plan')]);
   // Written in this checkout, not beside the plan: its `use … from "@exact/notifications"` resolves from a
   // node_modules above it, which a CARGO_TARGET_DIR outside the checkout lacks. Renamed into place whole: runs with
   // other target directories share the name, and a compile must never read it half written.
@@ -162,6 +163,7 @@ export function compileFixtures(root, run, env, dir, prefix, appId) {
   contract([resolve(root, 'host/apple/tests/fixtures/bar-share.contract'), '-o', env[`${prefix}_BAR_SHARE_PLAN`] = resolve(dir, 'bar-share.plan')]);
   // AgentBarPointerIOSTests': a header of more buttons than an iPad's bar places.
   contract([resolve(root, 'host/apple/tests/fixtures/bar-overflow.contract'), '-o', env[`${prefix}_BAR_OVERFLOW_PLAN`] = resolve(dir, 'bar-overflow.plan')]);
+  contract([resolve(root, 'host/apple/tests/fixtures/bar-hosted.contract'), '-o', env[`${prefix}_BAR_HOSTED_PLAN`] = resolve(dir, 'bar-hosted.plan')]);
   // NavigationBarIOSTests': a header's title drawn as a face, in an ink per scheme.
   contract([resolve(root, 'host/apple/tests/fixtures/bar-face-scheme.contract'), '-o', env[`${prefix}_BAR_FACE_SCHEME_PLAN`] = resolve(dir, 'bar-face-scheme.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/dialog-sheet-reads.contract'), '-o', env[`${prefix}_DIALOG_SHEET_READS_PLAN`] = resolve(dir, 'dialog-sheet-reads.plan')]);
@@ -170,6 +172,8 @@ export function compileFixtures(root, run, env, dir, prefix, appId) {
   contract([resolve(root, 'host/apple/tests/fixtures/intersect-route.contract'), '-o', env[`${prefix}_INTERSECT_ROUTE_PLAN`] = resolve(dir, 'intersect-route.plan')]);
   // KeyboardSheetIOSTests': a sheet's field, its keyboard toolbar and the keyboard's overlap as a value.
   contract([resolve(root, 'host/apple/tests/fixtures/keyboard-sheet.contract'), '-o', env[`${prefix}_KEYBOARD_SHEET_PLAN`] = resolve(dir, 'keyboard-sheet.plan')]);
+  // PlatformDefaultsIOSTests': Next fields whose submit moves the focus through the runner.
+  contract([resolve(root, 'host/apple/tests/fixtures/return-focus.contract'), '-o', env[`${prefix}_RETURN_FOCUS_PLAN`] = resolve(dir, 'return-focus.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/view-transition.contract'), '-o', env[`${prefix}_VIEW_TRANSITION_PLAN`] = resolve(dir, 'view-transition.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/route-overflow.contract'), '-o', env[`${prefix}_ROUTE_OVERFLOW_PLAN`] = resolve(dir, 'route-overflow.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/progress-contexts.contract'), '-o', env[`${prefix}_PROGRESS_CONTEXTS_PLAN`] = resolve(dir, 'progress-contexts.plan')]);

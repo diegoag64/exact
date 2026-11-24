@@ -87,11 +87,10 @@ Windows shell with `deploy.store.windows` set to `"0"` omits the downloader when
 all image, media, poster and frame sources in its plan are local literals or
 the plan has none. Computed sources, development shells and signed updates
 keep the downloader.
-A hand-written shell uses the same selection with
-`exact_windows::run_with_services::<AppData, ADMIT_AGENT>(name, window, PLAN, COMPAT, composed, SERVICES)`.
-The TypeScript bake supplies both constants. For Rust, the build reads
-`compat.admits_agent()` and composes `compat.windows_image_services(&baked)`
-with `compat.windows_data_executor()`. The heavy-list app shows the
+A hand-written shell gets the same selection by writing
+`compat.windows_shell(&baked, &manifest)` from its build script and calling
+`exact_windows::run_baked::<AppData, ADMIT_AGENT>(name, window(), PLAN, COMPAT, composed, SERVICES)`.
+The TypeScript bake writes the same constants. The heavy-list app shows the
 [build step](../bench/heavy-list/exact-heavylist/windows/build.rs) and the
 [entry point](../bench/heavy-list/exact-heavylist/windows/src/main.rs).
 A Windows login item started with `--login hidden` paints its offscreen launch
@@ -220,6 +219,32 @@ compiler can check them; their timing may be computed, and an animation may
 be absent. Animations that do not set `box-shadow` remain on the section. On
 iPad, pointer hover over a grouped section does not activate its `:hover` shadow;
 forwarding from UIKit’s visible cells, header and footer is not implemented yet.
+
+## A `portal` element on each host
+
+`portal="<id>"` shows an element written once inside the plain box with that `id`
+(`contract vocab portal`; [the recipe](recipes/keep-a-playing-video.md); LLP 1013.002).
+Every host keeps the element's state, and its press, pointer-button and key events
+bubble through where it is written; hover, focus on the web and the painted hosts'
+pan, swipe and long press still follow where it is shown. What each does with the
+element itself:
+
+| Host | The element as it moves | A video through the move | Shown nowhere |
+|---|---|---|---|
+| Web (the JS build) | the same DOM element, by `moveBefore()`, or `insertBefore` where the browser lacks it (WebKit) | plays on, no reload or seek (Chrome, Firefox; WebKit on a bare page); an `iframe` reloads under `insertBefore` | in a connected, `display: none`, inert holder: Chrome pauses a muted autoplay video and resumes it, Firefox keeps it playing |
+| Web (the wasm host) | the same DOM element, through the same holder; a reorder within one destination is an `insertBefore`, which reloads an `iframe` | plays on (Chrome) | in the same holder: Chrome pauses and resumes it (other browsers not run) |
+| macOS, iOS | the same view, its `AVPlayer` included; a native flight draws it live | plays on | out of the window: the off-screen rule pauses a muted autoplay video and resumes it |
+| Android | the same node and player | plays on; Material's container transform draws it in the arriving screen | kept with its player: paused and resumed as on Apple |
+| Linux, Windows | the same node | no video decoder: its state and `poster` carry, with no decoded frames; no flights | out of the tree |
+| Terminal | laid out where it is shown | no video | out of the tree |
+
+Not yet: a page rendered ahead (`render=build` or `request`) leaves the element out and
+builds the page afresh in the browser. On the native hosts a design-token colour inside
+the element resolves in its declaration's modes, not its destination's (`color-scheme`
+and plain inheritance follow the destination). tvOS and watchOS have not been run;
+watchOS has no video. On Android a mover placed in a
+box under `display: none` loses its player, which loads again when shown. Windows has
+been compiled, not run.
 
 ## Serve RealWorld
 
@@ -694,9 +719,12 @@ override func destroy() {
 
 An app says what it opens with `file_handlers` in `app.json` — the W3C Web App
 Manifest's own key — and the macOS bake derives `CFBundleDocumentTypes` from
-it. A Linux binary carries the same declarations into the desktop portal's
-Open and Save filters; a directory pick remains a directory pick rather than a
-file-type filter. Each MIME type it accepts must be one the Apple hosts map to
+it. Linux and Windows binaries carry the same declarations into their Open and
+Save dialogs; a directory pick remains a directory pick rather than a file-type
+filter. Each handler is one file type in the document pickers, labelled with its
+`name`, so an app that wants a "Documents" choice showing only PDFs declares
+`{ "action": "/", "name": "Documents", "accept": { "application/pdf": [".pdf"] } }`
+(below, "Documents the person chose"). Each MIME type it accepts must be one the Apple hosts map to
 a system type (`DOCUMENT_UTIS` in `scripts/app.mjs`; `application/octet-stream`
 is `public.data`), which the app views (`Viewer`, rank `Alternate`), or the
 app's own format: a vendor or unregistered type (`application/vnd.studio.board+json`,
@@ -721,6 +749,14 @@ The web manifest carries the same entries; browser registration is subject to
 the browser's supported schemes and installation behavior. Linux's CLI URL
 argument retains the ordinary location conversion because it does not
 register OS protocol handlers.
+
+A scheme registered with `host.ios.urlSchemes` or `host.macos.urlSchemes`
+alone delivers its link as a location, cold as the launch location and warm
+as one navigation, with no `/open` route. A non-empty authority is the first
+segment and an empty one is none: `notes://post/42?x=1`,
+`notes:///post/42?x=1` and `notes:/post/42?x=1` are all `/post/42?x=1`, the
+fragment kept (LLP 1038 §3). Expo's `Linking.createURL("/post/42")` writes
+the three-slash form.
 
 For packaged-only Apple registration, add `"distribution_only": true` to an
 entry, for example `{"protocol":"notes","url":"/open?u=%s","distribution_only":true}`.
@@ -1059,6 +1095,57 @@ follow the widget label rule; `push` and `frequent` are Booleans, defaulting to
 false. Kinds are unique across both entry lists, ignoring case. Unknown keys fail
 the bake with an edit. Capability flags and labels require a new binary; state
 shapes, previews and views ride the bundle.
+
+On Android an activity is an ongoing notification that asks to be promoted to a
+[Live Update](https://developer.android.com/develop/ui/views/notifications/live-update):
+at the top of the shade and on the lock screen, with a chip in the status bar.
+Android allows no custom view there, so the placements are not drawn; a row's
+`android` object names the state fields the system's template shows, and only a
+row with one is shown (Android refuses the sends of the others):
+
+```json
+"android":{"channel":"patrol","title":"headline","text":"detail","chip":"short","when":"at","progress":"done"}
+```
+
+`title` (required) names a `string` field. `text` and `chip` name `string` or
+`option<string>` fields; `chip` is the chip's text (`setShortCriticalText`),
+which Android shows whole only under seven characters, and which takes the chip
+from the time. `when` names a `number` (or `option<number>`) field of Unix
+milliseconds, the notification's time: one at least two minutes ahead when it is
+posted, the chip counts down to ("5min"); one already past, the notification
+counts up from as a chronometer, in the chip too. `progress` names a `number` (or
+`option<number>`) field from 0 to 1, as HTML's `progress` without `max`: Android
+16's `ProgressStyle`, a plain progress bar before it. An option that is none
+shows nothing. Each send's state must have the mapped fields with those types,
+or it is refused; the rest of it stays in the app's private storage, not in the
+notification, which other apps with notification access can read. `channel` is a channel
+`host.android.notificationChannels` declares, not of importance `min`, or
+`default` when absent. The bake refuses a field the shape lacks or of another
+type, an undeclared or `min` channel, and a mapping in an app that does not grant
+`device.notifications`. A mapping adds `POST_PROMOTED_NOTIFICATIONS` (a normal
+permission) to the manifest.
+
+Starting one needs the notification permission, which the app asks for first
+(`requestNotificationPermission()`, [Notifications](#notifications)); without it, or on a
+channel the person turned off, `startActivity` is refused. The system promotes
+the notification where it supports Live Updates and the person allows them for
+the app; otherwise it stays an ordinary ongoing notification. Each activity in
+`exactActivities()` says which with `promoted: bool`, the system's
+`FLAG_PROMOTED_ONGOING` (false on iOS); `openURL("app-settings:")` opens the app's
+Settings page, where the person allows them. The activity's id is its notification's
+tag, so a relaunched process lists it again. If the person dismisses it (Android
+14 and later let them swipe away an ongoing notification the system has not
+promoted), it leaves the list when the app is next in front, and a later send to
+it is refused. A send is answered once the system shows its notification.
+Several activities stay separate notifications where Android would bundle an
+app's notifications into one whose collapsed rows show only titles: each is a
+notification group of its own (LLP 1126 D13). Android 16 still bundles six or
+more activities it has not promoted, and those left stay in that bundle; a
+manufacturer's shade may group differently.
+An `updateActivity` with an alert alerts again, with its text as the
+accessibility ticker; a stale date is listed as `stale` once past.
+`endActivity` with `"immediate"` removes the notification; `"default"` leaves an
+ordinary, dismissable one for four hours, and Unix milliseconds until then.
 
 Declare the placements in that one component's view with `view slot="lockScreen"`,
 `view slot="compactLeading"`, `view slot="compactTrailing"`, `view slot="minimal"`
@@ -1778,6 +1865,13 @@ the JavaScript dependencies and browser. `--check` uses the local cache. Setup c
 from a tools origin when the checkout pins its producer key. Native builds, games, Rust data or
 GPU crates, custom web build scripts and Rust page renderers require Rust.
 
+The tools origin is a public bucket that `bun scripts/tools.mjs publish --watch` keeps from
+the producer's Mac, which holds the signing key. A checkout reads it at the public https URL
+that `scripts/tools.mjs` pins with the producer's public key; `EXACT_TOOLS_ORIGIN` names a
+mirror of it. Until both are pinned, nothing is downloaded, and a machine without Rust uses a
+set `bun scripts/tools.mjs keep` built. The origin keeps each commit's lookup for 90 days; an
+older checkout finds a set only among the newest, and only if its inputs are that set's.
+
 For a source build, the scoped setup installs the pinned stable and nightly Rust, the nightly's `rust-src`,
 `llvm-tools`, clippy and `wasm32-unknown-unknown` target, its standard-library dependencies,
 wasm-bindgen, Binaryen, Exact's `node_modules`, Playwright's Chromium and headless shell,
@@ -2243,16 +2337,149 @@ deploy policy, never the web root or the association files, which list the app a
 `uninstall`, `release` and `appstore`, `share`, and the Windows build take no variant. URL schemes, the
 sign-in callback and the app's own document types are shared by both installs.
 
+A brand that ships as its own store app is another app, not a variant: one directory and manifest per brand,
+sharing its screens and data code through workspace packages ([one app under several brands](recipes/white-label.md)).
+
+## Controls (Control Center, the Lock Screen, the Action button)
+
+A control is a button the system draws outside the app; a press runs one of
+the app's tools or opens one of its locations (LLP 1126.004). iOS and iPadOS
+18 and later draw them: the build puts each offered control in the app's
+WidgetKit extension, where the person adds it to Control Center, the Lock
+Screen or the Action button. Android, the Mac and the watch do not yet.
+
+Declare each in `app.json`:
+
+```json
+"controls": [
+  { "kind": "refresh", "title": "Refresh", "symbol": "arrow.clockwise", "tool": "refresh" },
+  { "kind": "inbox", "title": "Inbox", "symbol": "tray", "url": "/inbox" }
+]
+```
+
+- `kind` matches `[A-Za-z][A-Za-z0-9_-]*` and is unique among the app's
+  controls regardless of case. It is the control's identity: a placed
+  control is found again by it.
+- `title` and `symbol` (an SF Symbol name) are required; `description` is
+  optional.
+- Exactly one of `tool` and `url`. A `tool` names a `tool` line
+  (`control-tool`) and needs no `intents.tools` face. It may not `destroys`
+  (`control-destroys`) or take a required parameter (`control-arguments`);
+  a press passes `none` for each optional one. A `url` is one app path
+  (`/inbox`, not `//inbox`), and needs the navigation root and a declared
+  route that matches it; a `notfound` route does not count (`control-url`).
+- `authentication`, on a tool control only: `required` (the default) runs
+  it only for the authenticated person, `local` only on an unlocked device,
+  `always` on a locked one too (LLP 1133.023 D10).
+
+The compiler walks the tool's action, the actions it calls, both arms of
+every branch, the `then` of every mutation it sends, the resources it
+refreshes, and the actions of the tasks and sequences whose gate or key reads
+a slot it assigns, and records what it can reach: Live Activity starts,
+updates and ends, microphone, camera and screen capture, speech recognition
+on the microphone, a recorder, and a capture restart. A tool that can reach any
+capture may not have an `intents.tools` face (`intents-capture-face`).
+
+Each native binary's bake decides every control's placement, in this order,
+and puts it in `compat.inputs.controls` and the compatibility id, so any
+change to a row, its tool's signature or its effects is a new binary. The
+web has no binary and its id does not move.
+
+1. A host other than iOS and iPadOS (the Mac, Android, the watch, tvOS,
+   visionOS, Linux, Windows): omitted, `control-host`.
+2. A build that packages no control extension: omitted, `control-metadata`.
+   The Apple build on Linux is one, since only Xcode extracts a control's App
+   Intents metadata; so is `--extensions` without `controls`.
+3. A `url`: offered from iOS 18.
+4. A tool that is known to start camera, screen or speech capture: omitted,
+   `control-capture`.
+5. A tool that may record audio (the microphone, or a recorder): its tool
+   must start a Live Activity that `live_activities` declares
+   (`control-recording-activity`) and the app must grant
+   `device.microphone-background` (`grant-needs`), or the bake fails; then
+   omitted, `control-recording-unqualified`, until a locked iPhone has
+   recorded through it.
+6. A tool whose reach starts, updates or ends a Live Activity: offered from
+   iOS 18, as a `LiveActivityIntent`.
+7. Any other tool: omitted, `control-process`.
+
+An offered control is a `ControlWidgetButton` in the widget extension, which
+an app with controls and no widgets or Live Activities also gets, linking no
+Exact runtime. Its WidgetKit kind is `<app id>.control.<kind>`. Its intent is
+compiled into both the app and the extension and is not discoverable, so
+Shortcuts and Siri do not list it. A URL control's intent opens the app and
+navigates there; on a cold launch the location is the launch location. A tool
+control's intent runs in the app's process, which iOS launches in the
+background if it is not running, and presses the control there; the
+extension's copy refuses without running anything.
+
+A press enters only through a host's native entry, `Runner::press_control`,
+with the compiled control's kind and digest; on Apple, the tool door's
+`exact_tool` export takes it as op `press`, and the app's generated intent
+calls `ExactTools.press`. It is for tool controls (a host opens a URL control
+itself). The runner runs the tool as the person's action
+(origin `action`), refused `unavailable` when the installed control's
+digest is not the plan's, and `busy` while the same control's press waits or
+runs. Its authority ends when its caller cancels it, when it ends, or 10
+seconds after it starts running; work it started runs on without it. The
+agent's `call` cannot press: it enters as `tool` whatever `--door` names.
+
+`state.controls` lists each control with its `tool` or `url`, its `digest`
+and this binary's `placement`, as its bake recorded it: `{"offered": [{"from":
+"18.0", "intent": "tool"}]}` or `{"omitted": "control-host", "why": …}`. The
+web, which compiles no control, says `absent`:
+
+```
+bun scripts/agent.mjs ios --app <app> "state controls"
+```
+
+A qualification build (LLP 1126.004 §6d) offers on iOS what items 5 and 7
+omit only for want of a device run, so the device run can be made:
+`EXACT_QUALIFY_CONTROLS=1 bun host/apple/build.mjs <app> --ios --device --run`.
+Such a placement carries the omission it lifts, `{"offered": [{"from":
+"26.0", "intent": "tool"}], "qualifying": "control-process"}`, so its
+compatibility id is never an ordinary build's; a bake with production trust
+(`--release`, `--archive`, a deploy) refuses the variable. A plain tool's
+intent then asks to run in the app (`supportedModes = .background` from 26,
+`allowedExecutionTargets = .main` from 27); a recording tool's
+(`"intent": "recording"`) is an `AudioRecordingIntent` and a
+`LiveActivityIntent`, and while its press runs, the tool and the `then`s of
+its sends may call `getUserMedia` for audio alone and `startMediaRecorder`
+with the app not in front. A press never asks for the microphone: with its
+permission not yet granted, `getUserMedia` fails `NotAllowedError`.
+Recorder's `record` control is the device run's subject.
+
 ## Apple bundle metadata
 
 Exact writes Info.plist keys and entitlements from grants, named manifest fields,
-packages and build inputs. Entitlements remain derived (LLP 1069.008 D4).
-The `host.ios` and `host.macos` dictionaries `infoPlist` and `entitlements` refuse
-all supplied keys together; their values never enter a bundle. Diagnostics give
-specific grant advice only where tests apply those lines, including companion
-grants, through the bake and platform writer. Other derived keys cannot be set
-there. For a key Exact never writes, record a `bun exact.mjs feedback note` from
-the app directory naming the key and what the native module needs.
+packages and build inputs (LLP 1069.008 D4). Every `host.ios.entitlements` and
+`host.macos.entitlements` key is refused.
+
+`host.ios.infoPlist` and `host.macos.infoPlist` take a vendor SDK's configuration
+keys, the ones a library the app links reads from its bundle:
+
+```json
+"host": { "macos": { "infoPlist": {
+  "SUFeedURL": "https://example.com/appcast.xml",
+  "SUPublicEDKey": "<your EdDSA public key>"
+} } }
+```
+
+- A value is written as given: a string, number, boolean, array or dictionary.
+  It is public in the bundle, so it is no place for a secret.
+- The iOS keys go into the iOS and tvOS apps, not an App Clip.
+- A key in Apple's namespaces is refused: `NS`, `UI`, `LS`, `CF`, `UT`, `CA`, `GC`,
+  `GK`, `MK`, `BG`, `WK`, `IN`, `NFC`, `ITS`, `SK`, `CK`, `AV`, `PH`, `QL` and `DT`, each
+  followed by a capital, and `MinimumOSVersion` and `BuildMachineOSBuild`. So are an
+  `Exact` key and any key Exact writes itself. The refusal names the grant line or
+  field that writes the key. For an Apple key Exact never writes, it asks for a
+  `bun exact.mjs feedback note` from the app directory naming the key and what the
+  native module needs.
+- A key a package's Apple implementation writes is refused here.
+- The keys are binary inputs: changing one needs a new binary, and `exact deploy`
+  says so. They do not move the compatibility id, so installed binaries keep taking
+  updates. The deploy table and the install page list each key under what the app
+  can reach.
 
 ### Language and direction on macOS
 
@@ -2461,7 +2688,10 @@ answers and route statuses, and are not shared between requests. Production buil
 ignore these inputs. `--fail-fetch` with `--test` arms every test.
 A Mac agent drive never takes the focus: the app is an accessory, never activated (a `type` makes its window key
 without activating it), so AppKit draws its controls as in an inactive app. On the agent's clock its window, and a picture-in-picture
-panel it opens, sit one level below every other app's windows, so they never show over them; `--timing platform` orders them in front. `EXACT_AGENT_ACTIVATE=1`, which only
+panel it opens, sit one level below every other app's windows, so they never show over them; `--timing platform` and `--live` order them in front,
+since a covered window presents no frames and its page reads as hidden. `--display <name|index>` (`EXACT_AGENT_DISPLAY`, beside `EXACT_AGENT=live`, for a launch by hand) opens
+the window centred on one display, named as `NSScreen.localizedName` or by its index in `NSScreen.screens`; on a Mac someone is working at,
+name a display they are not using. A name no display has, or two have, is refused with the list. `EXACT_AGENT_ACTIVATE=1`, which only
 `scripts/measure-controls.mjs` sets (never a default), activates that one run, and the app that was in front is put
 back when it exits, however it exits (LLP 1121 stage 9 F2).
 A data module's `crypto.getRandomValues()` and `crypto.randomUUID()` draw from the seed too, so every drive with the same seed
@@ -2509,6 +2739,65 @@ mounted host geometry. Each read is labelled passive. The frame ring ends before
 these observations, and their wall-clock bounds, clock mode, scheduling and substitutions
 are recorded. This path never seeks or settles the app.
 
+`bun scripts/agent.mjs macos --app <app> --attach [pid] tree state logs layout "screenshot now.png"`
+reads the development Mac app a person already has open, with its own window, store and wall
+clock (LLP 1012.000). Nothing is built or launched. The person chooses **Develop ▸ Enable Agent
+Attach** in the app, then **Allow** in the sheet the driver's first connection raises; the window
+shows **Agent Attached** while the driver is connected. **Detach Agent** ends the connection and
+closes the listener until it is enabled again; quitting the app or closing the window ends it too.
+Each new connection asks again. One driver attaches at a time, to one window: `--session <label>` names
+the window when several are open, and a PID chooses among several running copies.
+The connection only reads: `tree`, `state` (masked, as the tree shows a password field), `logs`,
+`layout`, `perf` and `screenshot` (the window server's picture of the window, which is not brought
+forward). The app's clock is never taken, seeked, settled or landed: `clock` is refused with
+`live-clock`, except the waits, which watch the app's own wall clock through masked `state` reads
+while its timers go on. `clock until state <path> == <literal> within <ms>` refuses a value a
+password field masks; `clock held [<target>…] [<n>s|<n>ms]` waits for one reply to each held request;
+`clock replies [<n>s|<n>ms]` reports `{clock, settled, pending, waitedMs}` at the first read with no
+data request in flight (held, timer and device entries aside), or after 20 s. A read still out at a
+wait's deadline ends the connection. The driver refuses launch flags such as `--storage`, `--live`
+and `--url`.
+
+Input needs a second grant: **Develop ▸ Allow Agent Input** on the Mac, or the developer menu's
+**Allow Agent Input** in the simulator, which the person chooses while the agent is attached (the
+indicator then reads **Agent Attached · Input Allowed**); choosing it again revokes input and leaves
+the reads. Until then `tap`, `type` and `call` are refused `input-not-granted`, and the driver says
+it is waiting for the grant, for up to 60 s. Granted, `tap <target>` is a plain tap at a test ID or
+`#<id>`, `type <target> <text>` a whole text entry, and `call <tool> <json>` a declared tool's call
+through the app's own agent door (`--door` is refused). On the Mac the app clicks and sets the text
+itself, only in its key window while it is the active app; in the simulator the touch runner plays a
+real touch the app aims and checks, and the text is typed where the tap left the caret. Input is
+refused `background` when the app is not in front, `person-input` while a person's finger, mouse
+button or modifier key is down, and `unsupported` for anything else: a point, a held contact, a key,
+a gesture, `prefer`, `pick`, a toolbar or sidebar item, or a web view's content. A request whose
+reply is lost is reported as of unknown outcome and never sent again.
+
+`bun scripts/agent.mjs ios --app <app> --attach [--sim <udid|name>] tree state logs layout "screenshot now.png"`
+reads the development app open in an iOS simulator the same way. The simulator is the one `--sim`
+or `EXACT_SIM` names, else the one a drive would choose; nothing is booted. The person opens the
+developer menu (four fingers, or ⌘D) and chooses **Enable Agent Attach**, then **Allow** in the
+alert the driver's connection raises; **Agent Attached** shows at the top of the screen while the
+driver is connected. **Detach Agent** in the same menu ends it, and so does sending the app to the
+background. The picture is UIKit's snapshot of the app's window, without the indicator. The
+driver names a simulator that runs the app when the selected one does not.
+
+`bun scripts/agent.mjs web --app <app> --attach tree state logs layout` reads a tab of the app's
+running JS-target dev loop (`bun exact.mjs web`) the same way, in the person's own browser. The
+person presses **⌥⇧A** in the tab, which shows a pairing code that works once, for two minutes; the
+driver asks for it on a terminal, or reads the first line of stdin (`… --attach tree < code.txt`, or
+piped), and presents it on the loop's attach channel; then the tab asks the person to **Allow**. **Agent Attached** shows in the tab's corner
+while the driver is connected; **Detach**, ⌥⇧A again, a reload, loading another page or closing the tab
+ends it, and a code from before a reload is refused. The channel takes only a connection from this
+machine naming the loop by a loopback name, and no browser page. A tab is only read: it cannot take
+its own picture, and nothing a page does is a person's input, so `screenshot`, `tap`, `type` and
+`call` are refused `unsupported`. A tab the driver opened (`?agent`), a game's wasm loop and a
+release build have no attach.
+
+Only a Mac app or an iOS simulator app that `host/apple/build.mjs` builds to run carries the
+listener; a release, archive, embedded, physical-device or Apple TV build has none of it, and the
+driver refuses Android, Windows, Linux, tvOS, watchOS and a physical iPhone before it runs any
+platform tool.
+
 ### Inspect work and native presentation
 
 `perf <target> during "<operation>"`
@@ -2525,6 +2814,7 @@ and dropped records. An ordinary launch on the wall clock is available on macOS 
 (use `ios --live` on a simulator or `ios --device --live` on a phone). The driver launches and closes this process and keeps input
 available. `--live` uses normal scheduling and the wall clock: `performanceNow()` and
 timers advance in real time between operations, and `perf frames` records real frames.
+On macOS the window opens in front without taking the focus; `--display` puts it on a display other than the one being worked at.
 On iOS, `--touch platform` sends the gesture through XCTest so UIKit delivers the scroll callbacks.
 For example, `bun exact.mjs agent ios --device --live --touch platform "tap s drag 0 -300 over 100" "perf frames health scroll"`
 drags the scroll view named `s` on a phone. Unlock the paired phone, enable Developer Mode and UI Automation,
@@ -2584,9 +2874,9 @@ export const answer: TypeScriptAnswer = (source, args, store, storage, native) =
 The app's `build_mixed_with` bake derives these types from its `rust_sources`
 argument; no ownership list goes in `app.json` or TypeScript. Every remaining
 provider is required. Run `bun exact.mjs contract build app.contract` to obtain
-the narrowed declaration beside `app.ts`: its TypeScript check runs the app's
-Cargo bake, which writes the declaration before checking `app.ts`, even if
-the check fails. Native bakes use it too, and a development producer keeps
+the narrowed declaration beside `app.ts`: its TypeScript check builds the app's
+Rust module, which carries `RUST_SOURCES`, and writes the declaration before
+checking `app.ts`, even if the check fails. Native bakes use it too, and a development producer keeps
 the roster from the previous bake's `rustSources` receipt. Rebuild after
 changing Rust ownership. `Sources`, `Source`, `Args` and `Result` still
 describe every app-owned source, including Rust's.
@@ -2915,14 +3205,15 @@ answers; `doc:/` handles do not need that store.
 Generated declarations export Ibex2's `Storage` and related types; Rust sources
 can use the same implementations through `ibex2::host`.
 
-Native hosts, including Apple, bundle the pinned SQLite (3.54.1). Apple's
+Native hosts, including Apple, bundle the pinned SQLite (3.54.1); the web's
+storage worker runs the same release's official WebAssembly build. Apple's
 minimum supported OS versions have older SQLite libraries than rusqlite
 requires (3.45.3), so linking the OS library can prevent the app from launching.
 Rust and TypeScript storage share the bundled provider. Swift code in the same
 process must not open a database the Rust provider owns: Apple's launch-service
 dylibs still link system SQLite (`host/apple/launch-parts.mjs`), and closing a
 file through another copy can release the provider's POSIX locks
-([SQLite's locking rules](https://sqlite.org/howtocorrupt.html#posix_advisory_locks_canceled_by_a_separate_thread_doing_close_)).
+([SQLite's locking rules](https://sqlite.org/howtocorrupt.html#_posix_advisory_locks_canceled_by_a_separate_thread_doing_close_)).
 A native production build links SQLite only when the app grants `sqlite.open`
 or names `"sqlite"` in the manifest's `link` list. Naming it without the grant
 links unused code: adding `sqlite.open` changes the compatibility identity and
@@ -4173,6 +4464,8 @@ OS floor) reaches an install only through its store. `@exact/store-update`
 (LLP 1133.038; [recipe](recipes/store-update.md)) says what the store has and
 opens it. It is not Exact's own signed updates: those are `exactDelivery()`
 and the update store (LLP 1030), which this package never touches.
+A Mac app distributed outside the Mac App Store updates its binary with
+Sparkle, as its own Swift ([recipe](recipes/mac-binary-updates.md)).
 
 `storeUpdateStatus()` is live, announced again on a return to the foreground
 and as a download moves:
@@ -4841,6 +5134,54 @@ is taken or released. Under the agent the picker stays held. Image pixel readbac
 synchronous readback (`getImageData`, `toDataURL`, `toBlob`) remain deferred;
 a canvas's pixels go to a file (below).
 
+### Canvas 2D surfaces (`draw`)
+
+`canvas surface=board(nodes)` is drawn by the data module when no GPU module
+registers `board`: `app.ts` exports `surfaces`, each surface's name and its
+number of arguments, and `draw(surface, args, ctx, frame)`, which draws on `ctx`
+with `CanvasRenderingContext2D`'s names and returns `true` to be asked for
+another frame (LLP 1056).
+
+`args` holds the call's values in order, or an object by the argument names
+when the call names them (`surface=pin(at=spot, label=title)`). On every host
+each value is what `answer` receives for its type: a record is an object by
+field name, a list an array, an `option` `null` or its value, an enum its
+string. Type `draw` as `Draw` from `app.contract.d.ts`, with all four
+parameters, and checking `surface` narrows `args` to that surface's types:
+
+```contract
+shape Node
+  x: number
+  y: number
+
+component Board
+  state nodes = [Node(x=8, y=8)]
+  view
+    canvas surface=board(nodes) width=200 height=120
+```
+
+```ts
+import type { Draw } from './app.contract.d.ts';
+export const surfaces = { board: 1 };
+export const draw: Draw = (surface, args, ctx, frame) => {
+  ctx.clearRect(0, 0, frame.width, frame.height);
+  if (surface === 'board') for (const n of args[0]) ctx.fillRect(n.x, n.y, 8, 8);
+  return false;
+};
+```
+
+Treat `args` as read-only. The web freezes it and keeps it between draws until
+a value changes; elsewhere each draw gets a fresh copy.
+
+The context's space is the content box in CSS px, at the device's scale.
+`bitmap-width` and `bitmap-height` give the canvas a fixed bitmap instead, as
+HTML's `width` and `height` attributes do: `frame.width` × `frame.height`
+pixels, stretched to the box, with 300 or 150 for one left unset. Either may be
+computed, as may `color-space` and `color-type`. On every host a change clears
+the bitmap and draws again with `frame.cause` `"size"`, as assigning
+`canvas.width` does on the web. A size is a whole number of pixels: a negative
+one is 0, and a fraction leaves it unset.
+
 ### A 2D canvas's pixels as an image file (`captureCanvas`)
 
 `captureCanvas(surface, path, type, quality)` writes what the host has drawn and
@@ -5490,6 +5831,26 @@ remains a compound suffix. Their Bun and Rust tests read the same cases from
 `scripts/fixtures/document-suffixes.json`. An invalid suffix or an empty or
 control-bearing handler name makes the build fail.
 
+The open picker, and the save picker where the platform's save dialog lists
+types, offer the declared types and nothing else: each handler's `name` labels
+its type where the platform lists types by name (Windows, Linux and the web),
+and macOS and iOS offer their union, as their panels do. The pickers take their
+types from the manifest, never from the call.
+
+| Host | `showOpenFilePicker`, `showSaveFilePicker` |
+| --- | --- |
+| Web (Chromium) | `types`, one `{ description: name, accept }` per handler, and `excludeAcceptAllOption: true` |
+| Windows | one `SetFileTypes` entry per handler, `Documents (*.pdf)`, the first selected; Save starts on the type with the longest suffix ending `suggestedName` and adds that type's extension to a name typed without one |
+| Linux | one portal filter per handler, the first as `current_filter` |
+| macOS | `NSOpenPanel`'s `allowedContentTypes`, the union, with no type menu; the save panel takes no types |
+| iOS | Open: the document picker's content types, the union; Save exports with no types |
+
+On Windows a handler with MIME types and no extension matches the extension the
+system registers for each MIME type. Where there is none, the dialog cannot
+offer that type and the journal names the MIME type; where it can offer none
+of the declared types, the pick is refused. Give such a handler its
+extensions. With no handlers a picker offers every file.
+
 The web passes those suffixes to its picker and matches a drop by the whole
 filename suffix. Apple registers each without its leading dot; its picker offers
 the handler's content types and the complete extension tokens the system resolves,
@@ -5513,8 +5874,8 @@ the app keeps what the person chose (below).
 
 On Windows, the three document pickers, file inputs and `saveFile` use the
 shell's common item dialogs, owned by the app's window. A headless host refuses
-them; under the agent they remain held pickers. Document pickers offer every
-file until the Windows build carries `file_handlers`. File inputs copy the
+them; under the agent they remain held pickers. Open and Save offer the
+`file_handlers` types, as the table above says. File inputs copy the
 chosen files into `app:/tmp/picked/` and leave the originals in place.
 
 **Where a picker opens** (LLP 1173 D2). The three pickers and `saveFile`
@@ -5565,9 +5926,34 @@ carries nothing: the answer reads again, as LLP 1016.002's `native.watch`.
 Call it inside an answer, on a `doc:` path the app may read (`fs.read
 doc:/`):
 
+```contract
+component Notes
+  state folder = ""
+  resource names = markdownIn(folder) when folder != "" as shape string[] else empty()
+  action pick
+    showDirectoryPicker("folder")
+  action chose(value)
+    folder = value
+  view
+    column
+      input id="folder" display="none" change=chose
+      button press=pick
+        text "Choose a folder"
+      for n in names key=n
+        text n
+```
+
 ```ts
-await storage.fs.watch(folder);                  // its own entries
-return (await storage.fs.readdir(folder)).filter((n) => n.endsWith('.md'));
+import type { Answer, Sources } from './app.contract.d.ts';
+
+export const grants = 'fs.read doc:/';
+const sources: Sources = {
+  markdownIn: async ([folder], _store, storage) => {
+    await storage.fs.watch(folder); // its own entries
+    return (await storage.fs.readdir(folder)).filter((n) => n.endsWith('.md'));
+  },
+};
+export const answer: Answer = (source, args, store, storage, native) => sources[source](args, store, storage, native);
 ```
 
 A Rust source records the same topic:
@@ -5595,12 +5981,43 @@ The kept set is File ▸ Open Recent's: Clear Menu, or an entry falling off
 the end of the list, ends its reopening (a window that has it open keeps it
 until the app quits).
 
+```contract
+shape Kept
+  path: string
+  name: string
+
+shape Done
+  ok: bool
+
+component Recent
+  resource kept = recentDocuments() as shape Kept[] else empty()
+  mutation forgot as shape Done refreshes kept
+  action forget(path: string)
+    send forgot = forgetDocument(path)
+  view
+    column
+      for k in kept key=k.path
+        button press=forget(k.path)
+          text `Forget ${k.name}`
+```
+
 ```ts
+import type { Answer, Sources } from './app.contract.d.ts';
+
 export const grants = ['fs.read doc:/', 'doc.keep'].join('\n');
-storage.fs.watch('doc:/');                       // asked again when the list changes
-const recent = await storage.fs.recentDocuments();
-// [{ path: 'doc:/12/notes', name: 'notes', kind: 'directory', mode: 'readwrite', opened: 1760572800000 }, …]
-await storage.fs.forgetDocument(recent[0].path); // off the list and Open Recent; ENOENT if not kept
+const sources: Sources = {
+  recentDocuments: async (_args, _store, storage) => {
+    storage.fs.watch('doc:/'); // asked again when the list changes
+    const recent = await storage.fs.recentDocuments();
+    // [{ path: 'doc:/12/notes', name: 'notes', kind: 'directory', mode: 'readwrite', opened: 1760572800000 }, …]
+    return recent.map(({ path, name }) => ({ path, name }));
+  },
+  forgetDocument: async ([path], _store, storage) => {
+    await storage.fs.forgetDocument(path); // off the list and Open Recent; ENOENT if not kept
+    return { ok: true };
+  },
+};
+export const answer: Answer = (source, args, store, storage, native) => sources[source](args, store, storage, native);
 ```
 
 A Rust source sends `fs.recentDocuments` and `fs.forgetDocument` storage
@@ -5837,7 +6254,9 @@ A namespace import reads the same constant: `import * as session` and
 The imported bindings follow the same literal grammar. Calls other than the
 array's `.join`, computed arrays, package bindings (including re-exports
 from packages), and dependencies on launch-marked settings are refused with a
-source location. Imports resolve through Rolldown, to the file the bundle runs.
+source location. An `app.ts` that is `export * from` a package exports its
+own `grants`, which the star does not override. Imports resolve through
+Rolldown, to the file the bundle runs.
 Re-exports follow ECMAScript export resolution: a loop through star exports
 keeps searching, ambiguous bindings are refused, and a star never exports
 `default`. A cycle through constant initializers is refused. `app.ts` declares
@@ -6091,6 +6510,29 @@ installed binary must supply the required runtime and admit the module's app
 identity and grants. An app with both TypeScript and Rust modules sets every
 `deploy.store` entry to `"0"`: delivery of both together is not implemented. See LLP 1027 for the design record.
 
+## Package configuration
+
+A package's interface declares the values it takes from the app in its
+`exact.json`, per target (`web`, `android`, `ios`, `macos`, `tvos`):
+`"config": {"<target>": {"<key>": {"type": "string" | "number" | "boolean" | "env",
+"required": true | "release", "missing": "<code>"}}}`. An `android` key may add
+`"metadata": "<name>"` to also fill a vendor SDK's `<meta-data>`, if the name is
+on `CONFIG_METADATA` in `scripts/android-manifest.mjs`.
+
+The app gives them in `app.json` as `"packages": {"<interface>": {"<target>":
+{"<key>": <value>}}}`. An `env` key's value is `{"env": "<VARIABLE>"}`, which
+the build reads from its environment. The package's code reads the values as
+`context.config` in Kotlin and Swift, and as `config` on the web. A build
+refuses a value of another type (`bake-config-type`), an undeclared key
+(`bake-config-unknown`) and a required key with no value (the declared
+`missing` code). It refuses a `"required": "release"` key only in a release
+build.
+
+`env` keeps a value out of the repository, not out of the app: everything in
+`config` ships in the APK, the IPA or the page. A changed native value needs
+a new binary. See
+[A package's configuration](contract-for-agents.md#a-packages-configuration).
+
 ## Access hatches
 
 An access hatch hands the app's native code the platform object Exact built for
@@ -6288,11 +6730,16 @@ An app outside this checkout names its data crate in app.json (LLP 1153.003 D2):
 `source`, optional, is what every host and the web's module run: the type itself, its `::default()` (the
 default) or its `::new(…)` with literal arguments (`"field_log_data::FieldLog::new(true)"`). A source
 built from anything else (a local, a path read at build time) is exported by a crate of the app's own,
-named in app.json's `rust.module.package` (Update Lab's `logic/`), which supplies the module instead.
+named in app.json's `rust.module.package` (Update Lab's `logic/`), which supplies the module instead. Beside
+`app.ts`, that crate also carries the data crate's `RUST_SOURCES`, which the web reads from the module:
+`exact_logic_abi::export_sources!(field_log_data::RUST_SOURCES);` beside its `export!`.
 
 The crate sits beside app.json and joins the workspace exact2 generates: its `Cargo.toml` sets
 `package.workspace = "../.exact/shells"` and takes exact2's crates as workspace dependencies
-(`exact-runner.workspace = true`; `contract.workspace = true` for a build script). The host crates are
+(`exact-runner.workspace = true`; `contract.workspace = true` for a build script). Any other crate of
+exact2's is taken the same way (`exact-canvas.workspace = true`), never by a path through
+`.exact/checkout`: the workspace names exact2 by its real path, and a second path to the same crate is a
+second package to Cargo, so a build refuses one and `bun exact.mjs update` rewrites it. The host crates are
 generated under `.exact/shells/` and link it; without `app.ts` they link no JavaScript engine. With
 `app.ts` beside it the two compose: Rust answers the sources the crate lists in `pub const RUST_SOURCES:
 &[&str]`, TypeScript the rest. `exact new <path> --rust` writes such an app: `data/`, whose type answers

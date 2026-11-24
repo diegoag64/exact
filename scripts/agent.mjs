@@ -11,8 +11,9 @@
 //     hold] [at <x> <y>] [modifiers <Control…>] | wheel 0 0 release | drop <path…> | dragenter <path…> | dragleave |
 //     into <key> [block <v>] [inline <v>] | hover | hold-state active|hover|focus-visible|none | history <n> |
 //     {"history":n} | mouse | dblclick [touch] | contextmenu | auxclick | clicks <1-3> (each [at <x> <y>] [modifiers
-//     <Shift+Meta…>]) | modifiers <Shift+Meta…> | pinch <scale> [at <x> <y>] | mediasession <action> [seconds] |
-//     pictureinpicture minimize|back|close|hover (Exact's picture-in-picture window, macOS) | drag <dx> <dy> [from <x>
+//     <Shift+Meta…>]) | modifiers <Shift+Meta…> | fingers <2-5> [at <x> <y>] |
+//     pinch <scale> [at <x> <y>] | mediasession <action> [seconds] | pictureinpicture minimize|back|close|hover
+//     (Exact's picture-in-picture window, macOS) | drag <dx> <dy> [from <x>
 //     <y>] [mouse] [modifiers <M>] [press <ms>] [over <ms>] [hold <ms>] [into keyboard] [during "<op>" …, inside the hold under --touch
 //     platform] [then <dx> <dy> over <ms> hold <ms> during "<op>" …: another leg, same iOS touch] | drag to <target>
 //     [at <x> <y>] […]] | type <target> <text…> (the navigation root: a path or a deep link) | type <target> key <Name>
@@ -88,6 +89,7 @@ import { driveNotes, runTests, reloadWeb, fetchOrigins, loopbackOrigins, faultRe
 import { phone } from '../host/apple/devices.mjs';
 import { resolveApp, webDist as defaultWebDist } from './app.mjs';
 import { open } from './agent-session.mjs';
+import { attachUnsupported } from './agent-attach.mjs';
 export {
   sourceMapReader,
   identifyInspectedNode,
@@ -146,12 +148,29 @@ export async function main(argv, injected = {}) {
   // the simulator, named as EXACT_SIM names it (devices.mjs `simulator`)
   if (flags.sim) process.env.EXACT_SIM = flags.sim;
   const [host, ...ops] = rest;
+  const attached = flags.attach !== undefined;
+  // An Apple TV or a watch is no host the driver carries, but `--attach` says why it cannot join one.
+  if (attached && ['tvos', 'watchos'].includes(host)) throw new Error(attachUnsupported(host));
   // A host the driver does not carry is refused: `open` falls to the web for any other word, so `iOS` or a typo ran
   // the drive on the web and recorded it as that host's.
   if (host && host !== 'trace' && !DRIVEN_HOSTS.includes(host)) {
     console.error(`agent: no host \`${host}\`; name one of ${DRIVEN_HOSTS.join(', ')}`);
     return 2;
   }
+  // `--attach` (LLP 1012.000 D1) joins a running app before any build, install, launch, server or store: what only a
+  // launch the driver owns takes is refused, and so is a host or a device with no attach, before any platform tool runs.
+  if (attached) {
+    if (host === 'ios' && (flags.device || flags.phone)) throw new Error(attachUnsupported(host, { device: true }));
+    const launchOnly = [...Object.keys(flags).filter((k) => !['json', 'app', 'session', 'attach', ...(host === 'ios' ? ['sim'] : [])].includes(k) && flags[k] !== undefined)
+      .map((k) => (k === 'launchEntries' ? '--notification, --wake, --call and --login' : k === 'reader' ? (flags.reader ? '--reader' : '--headless') : `--${k.replace(/[A-Z]/g, (c) => `-${c.toLowerCase()}`)}`)),
+      ...['EXACT_AGENT_PROCESS', 'EXACT_AGENT_LOGIN_ENV', 'EXACT_AGENT_HOME'].filter((k) => process.env[k]).map((k) => ({ EXACT_AGENT_PROCESS: '--process', EXACT_AGENT_LOGIN_ENV: '--login-env', EXACT_AGENT_HOME: '--home' })[k]),
+      ...(argv.includes('--backend') ? ['--backend'] : [])];
+    if (launchOnly.length) throw new Error(`--attach reads an app that is already running: ${launchOnly.join(', ')} ${launchOnly.length > 1 ? 'are' : 'is'} for a launch the driver owns`);
+    if (host === 'trace') throw new Error('--attach drives a running app; trace reads a saved trace (trace --pid asks a running one)');
+    if (host && attachUnsupported(host)) throw new Error(attachUnsupported(host));
+  }
+  if (flags.display !== undefined && (!['macos', 'mac'].includes(host) || flags.test))
+    throw new Error(flags.test ? '--display places a drive\'s window, not a test run\'s' : `--display places a Mac window; ${host ?? 'this drive'} opens none to place`);
   if (flags.live) {
     if (!['macos', 'mac', 'ios', 'android'].includes(host) || flags.test)
       throw new Error('--live requires a macOS, iOS or Android reader drive without --test');
@@ -260,8 +279,9 @@ export async function main(argv, injected = {}) {
   if (!host || !ops.length) {
     console.error(
       [
-        'usage: bun scripts/agent.mjs <web|macos|ios|linux|android|windows|host|host-ios> [--browser chrome|firefox|webkit] [--app <name>] [--plan <file> | --url <url>] [--world <file>] [--device] [--phone <name|udid>] [--session <label>] [--open <document>] [--storage <name>] [--seed <n>] [--locale <tag>] [--format-locale <tag>] [--time-zone <zone>] [--epoch <ISO|ms>] [--live] [--timing platform] [--touch platform] [--chrome platform] [--size <w>x<h>] [--scale <n>] [--port <n>] [--json] <op> [<op> …]',
+        'usage: bun scripts/agent.mjs <web|macos|ios|linux|android|windows|host|host-ios> [--browser chrome|firefox|webkit] [--app <name>] [--plan <file> | --url <url>] [--world <file>] [--device] [--phone <name|udid>] [--session <label>] [--open <document>] [--storage <name>] [--seed <n>] [--locale <tag>] [--format-locale <tag>] [--time-zone <zone>] [--epoch <ISO|ms>] [--live] [--display <name|index>] [--timing platform] [--touch platform] [--chrome platform] [--size <w>x<h>] [--scale <n>] [--port <n>] [--json] <op> [<op> …]',
         '  desktop carriers open 420x900 unless --size names another viewport; a target is a testId, a view id, or a view\'s exact label or text (`tap "Sky off"`); tap and type scroll a target out of view into it first; web defaults to chrome; EXACT_WEB_BROWSER selects the same option. Install the other engines outside the repo: bunx playwright@1.65.1 install firefox webkit',
+        '  macOS --display opens the window on that display (NSScreen.localizedName, or its index in NSScreen.screens; EXACT_AGENT_DISPLAY for a launch by hand), centred; a --live window opens in front there, never activated, so name a display nobody is working at. A name no display has, or two have, is refused with the list.',
         '  Linux --size is the unrotated panel size; EXACT_ROTATE=90 or 270 swaps it for layout. Screenshots show the rotated output at the panel size.',
         '  ' +
           [
@@ -298,6 +318,7 @@ export async function main(argv, injected = {}) {
             'auxclick (the middle button)',
             'clicks <1-3> (each [at <x> <y>: from its top left] [modifiers <Shift+Meta…>])',
             'modifiers <Shift+Meta…>',
+            'fingers <2-5> [at <x> <y>] (fingers tapped together; iOS --touch platform: four open the dev menu)',
             'pinch <scale> [at <x> <y>]',
             'mediasession <action> [seconds]',
             "pictureinpicture minimize|back|close|hover (Exact's picture-in-picture window, macOS)",
@@ -350,8 +371,10 @@ export async function main(argv, injected = {}) {
     return 2;
   }
   const named = flags.storage !== undefined;
-  flags.storage = defaultStore(host, flags);
-  referenceNote(ops, resolveApp(flags.app).dir);
+  if (!attached) {
+    flags.storage = defaultStore(host, flags);
+    referenceNote(ops, resolveApp(flags.app).dir);
+  }
   // A named store is kept between drives on a native host unless the drive asks it emptied (`--reset-storage`); on the
   // web, Chrome's profile for it starts empty unless the drive keeps it (`--keep-storage`, LLP 1086 EX4). A native host
   // empties the whole scratch tree at its first boot (picker.rs
@@ -383,6 +406,7 @@ export async function main(argv, injected = {}) {
         ax: ops.some(line => /^\s*tree\s+--ax(?:\s|$)/.test(line)),
         env: {
           ...(flags.live ? { EXACT_AGENT: 'live' } : {}),
+          ...(flags.display !== undefined ? { EXACT_AGENT_DISPLAY: flags.display } : {}),
           ...(fresh ? { EXACT_AGENT_STORAGE_FRESH: '1' } : {}),
           ...(flags.login ? { EXACT_LOGIN_LAUNCH: flags.login } : {}),
         },
@@ -428,7 +452,7 @@ export async function main(argv, injected = {}) {
           { host: host === 'mac' ? 'macos' : host, device, appId, storage: flags.storage },
           launch,
         )
-      : await launch(),
+      : await (attached ? (injected.open ?? open)({ host, app: flags.app, session: flags.session, attach: flags.attach }) : launch()),
     locking && !fresh ? { keptStore: flags.storage } : {},
   );
   let at = 0;
@@ -572,11 +596,13 @@ export async function main(argv, injected = {}) {
       // A system's call of a tool (LLP 1133.023 §10): `call <tool> <json> [--door <door>]`, run as the door would.
       case 'call': {
         const door = trimmed.match(/\s--door\s+(\S+)\s*$/);
+        // An attached app chooses the door itself (LLP 1012.000 D3): its agent door, under the person's input grant.
+        if (door && s.carrier.attached) throw new MalformedOperation('call --door: an attached app calls a tool through its own agent door; a drive names none');
         r = await s.op({
           op: 'call',
           tool: args[0],
           args: trimmed.replace(/\s--door\s+\S+\s*$/, '').replace(/^call\s+\S+\s*/, '') || '{}',
-          door: door?.[1] ?? 'agent',
+          ...(s.carrier.attached ? {} : { door: door?.[1] ?? 'agent' }),
         });
         break;
       }
@@ -612,7 +638,7 @@ export async function main(argv, injected = {}) {
   };
   // The drive, against the build it used (LLP 1146 D2: `bun scripts/evidence.mjs`).
   const recordDrive = async result =>
-    (await import('./evidence.mjs')).recordRun(flags.app, {
+    !attached && (await import('./evidence.mjs')).recordRun(flags.app, {
       host,
       what: `drive ${ops.join(' · ').slice(0, 300)}`,
       result,
@@ -626,7 +652,7 @@ export async function main(argv, injected = {}) {
   const notes = driveNotes(s, {
     host,
     storage: flags.storage,
-    origins: flags.url ? [] : loopbackOrigins(resolve(flags.webDist ?? defaultWebDist(resolveApp(flags.app)))),
+    origins: flags.url || attached ? [] : loopbackOrigins(resolve(flags.webDist ?? defaultWebDist(resolveApp(flags.app)))),
   });
   try {
     if (flags.permission) await s.prefer(flags.permission); // `--permission name=state` (agent-launch.mjs)

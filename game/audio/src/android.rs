@@ -1,11 +1,7 @@
-//! AAudio output for Android (a Meta Quest's immersive game, a phone's canvas).
+//! AAudio output for an Android game canvas.
 //! The same 32-voice, bounded-PCM native mixer as the Apple and Windows
 //! outputs, rendered from AAudio's realtime data callback.
-//!
-//! Before this output a game canvas on Android had no audio executor at all:
-//! `SurfacePlayer` compiled to a no-op there, so every `world.play` was
-//! journaled and never heard (the Contract's own sounds are a separate path,
-//! `host/android/soundarm`).
+//! The Contract's own sounds are a separate path, `host/android/soundarm`.
 use super::{Mixer, Pending};
 use crate::Output;
 use std::{
@@ -28,6 +24,10 @@ const USAGE_GAME: i32 = 14;
 const CONTENT_TYPE_SONIFICATION: i32 = 4;
 const CALLBACK_RESULT_CONTINUE: i32 = 0;
 const OK: i32 = 0;
+const STATE_PAUSING: i32 = 5;
+const STATE_FLUSHING: i32 = 7;
+/// How long a suspend waits for the stream to finish pausing, then flushing.
+const SETTLE_NS: i64 = 200_000_000;
 
 #[link(name = "aaudio")]
 // SAFETY: these declarations match the NDK's aaudio/AAudio.h C ABI.
@@ -55,6 +55,13 @@ unsafe extern "C" {
     fn AAudioStreamBuilder_delete(builder: *mut Builder) -> i32;
     fn AAudioStream_requestStart(stream: *mut Stream) -> i32;
     fn AAudioStream_requestPause(stream: *mut Stream) -> i32;
+    fn AAudioStream_requestFlush(stream: *mut Stream) -> i32;
+    fn AAudioStream_waitForStateChange(
+        stream: *mut Stream,
+        input: i32,
+        next: *mut i32,
+        timeout_ns: i64,
+    ) -> i32;
     fn AAudioStream_requestStop(stream: *mut Stream) -> i32;
     fn AAudioStream_close(stream: *mut Stream) -> i32;
     fn AAudioStream_getSampleRate(stream: *mut Stream) -> i32;
@@ -122,13 +129,15 @@ unsafe extern "C" fn render(
         return CALLBACK_RESULT_CONTINUE;
     }
     // SAFETY: AAudio serializes data callbacks for one stream, and the boxed
-    // Arm outlives the stream (closed in Drop before the box is freed).
-    let arm = unsafe { &mut *context.cast::<Arm>() };
-    arm.mixer.commands();
+    // Arm outlives the stream (closed in Drop before the box is freed). Only
+    // the mixer is borrowed: the error callback and the owner read `error`
+    // from other threads meanwhile.
+    let mixer = unsafe { &mut (*context.cast::<Arm>()).mixer };
+    mixer.commands();
     // SAFETY: the stream was opened stereo float: `frames` interleaved pairs.
     let output = unsafe { std::slice::from_raw_parts_mut(data.cast::<f32>(), frames as usize * 2) };
     for frame in output.as_chunks_mut::<2>().0 {
-        let (l, r) = arm.mixer.frame();
+        let (l, r) = mixer.frame();
         frame[0] = l;
         frame[1] = r;
     }
@@ -141,10 +150,10 @@ unsafe extern "C" fn failed(_stream: *mut Stream, context: *mut c_void, error: i
     }
     // Closing from an AAudio callback is forbidden: the owner reads this
     // (`Output::failure`), drops the output and opens a new one later.
-    // SAFETY: the boxed Arm outlives the stream; the error is atomic.
-    let arm = unsafe { &*context.cast::<Arm>() };
-    arm.error
-        .store(if error == OK { -1 } else { error }, Ordering::Release);
+    // SAFETY: the boxed Arm outlives the stream; only its atomic is borrowed,
+    // apart from the mixer the data callback holds.
+    let failed = unsafe { &(*context.cast::<Arm>()).error };
+    failed.store(if error == OK { -1 } else { error }, Ordering::Release);
 }
 
 /// The default output device, opened only by a live presentation owner.
@@ -211,10 +220,16 @@ impl AndroidOutput {
         Ok(output)
     }
 
-    /// The app went to the background, or the headset was taken off.
+    /// The activity stopped: the app went to the background.
     pub fn suspend(&mut self) -> Result<(), String> {
+        // A pause keeps the samples the stream already holds, which the return
+        // would play. A flush discards them, once the pause has finished.
         // SAFETY: this is the owned open stream.
         unsafe { check("requestPause", AAudioStream_requestPause(self.stream))? };
+        self.settle(STATE_PAUSING)?;
+        // SAFETY: as above; the stream is now paused.
+        unsafe { check("requestFlush", AAudioStream_requestFlush(self.stream))? };
+        self.settle(STATE_FLUSHING)?;
         self.suspended = true;
         let ids: Vec<_> = self.pending.live.keys().copied().collect();
         for id in ids {
@@ -222,6 +237,16 @@ impl AndroidOutput {
         }
         self.pending.flush();
         Ok(())
+    }
+
+    /// Wait until the stream has left `passing`, an asynchronous request's
+    /// transitional state.
+    fn settle(&self, passing: i32) -> Result<(), String> {
+        let mut next = passing;
+        // SAFETY: the owned open stream and a valid out-pointer.
+        let waited =
+            unsafe { AAudioStream_waitForStateChange(self.stream, passing, &mut next, SETTLE_NS) };
+        check("waitForStateChange", waited)
     }
 
     /// Back in the foreground. Increment the transport generation before sync.

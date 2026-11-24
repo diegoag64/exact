@@ -1,8 +1,9 @@
 import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { sections } from '../constants/navigation.ts';
-import { redirects } from '../constants/redirects.ts';
+import { nonPageRules, redirects } from '../constants/redirects.ts';
 import { site } from '../constants/site.ts';
+import { bySection } from './page-lists.ts';
 
 const SITE = resolve(import.meta.dir, '..');
 const DIST = resolve(SITE, process.argv[2] ?? 'dist');
@@ -37,6 +38,8 @@ const rules = [
   ...Object.entries(redirects).flatMap(([from, to]) => [`${from} ${to} 301`, `${withSlash(from)} ${to} 301`]),
   '# A page reached with a trailing slash goes to its path: the router matches no route that ends in "/".',
   ...pages.filter(p => p.path !== '/').map(p => `${withSlash(p.path)} ${p.path} 301`),
+  '# The paths that are not pages.',
+  ...nonPageRules.map(({ from, to, status }) => `${from} ${to} ${status}`),
 ];
 writeFileSync(join(DIST, '_redirects'), `${rules.join('\n')}\n`);
 
@@ -116,7 +119,7 @@ function structuredData(p: Page): object {
   return { '@context': 'https://schema.org', '@graph': [article, breadcrumb] };
 }
 const headFor = (p: Page | undefined) =>
-  p ? `${ORIGIN ? `<link rel="canonical" href="${esc(ORIGIN + p.path)}">` : ''}<link rel="alternate" type="text/markdown" href="${esc(ORIGIN + (p.path === '/' ? '/index' : p.path))}.md"><meta property="og:locale" content="${site.locale}"><script type="application/ld+json">${json(structuredData(p))}</script>` : '';
+  p ? `${ORIGIN ? `<link rel="canonical" href="${esc(ORIGIN + p.path)}">` : ''}<link rel="alternate" type="text/markdown" href="${esc(ORIGIN + (p.path === '/' ? '/index' : p.path))}.md"><link rel="llms-txt" href="/llms.txt"><meta property="og:locale" content="${site.locale}"><script type="application/ld+json">${json(structuredData(p))}</script>` : '';
 
 const byFile = new Map(pages.map(p => [htmlOf(p.path), p]));
 let prepainted = 0;
@@ -147,32 +150,23 @@ writeFileSync(
   ].join('\n'),
 );
 
-writeFileSync(
-  join(DIST, 'llms.txt'),
-  `# ${site.name}\n\n> ${site.description}\n\n[sitemap.md](${ORIGIN}/sitemap.md) lists the same pages with each one's type, last change and prerequisites.\n\n## Pages\n\n${pages.map(p => `- [${p.title}](${ORIGIN}${p.path === '/' ? '/index' : p.path}.md): ${p.description}`).join('\n')}\n`
-);
-
 const TYPES: Record<string, string> = { Home: 'Overview', 'Get started': 'Tutorial', Learn: 'Guide', Recipes: 'How-to', Reference: 'Reference', 'For AI agents': 'Reference' };
 const mdUrl = (p: Page) => `${ORIGIN}${p.path === '/' ? '/index' : p.path}.md`;
 const parentOf = (p: Page) => pages.filter(q => q.path !== '/' && p.path.startsWith(`${q.path}/`)).sort((a, b) => b.path.length - a.path.length)[0];
 const start = pages.find(p => p.path === '/start');
+const startSite = pages.find(p => p.path === '/start-site');
 function prerequisites(p: Page): string {
   const parent = parentOf(p);
   if (parent) return `[${parent.title}](${mdUrl(parent)})`;
-  if (p.path === '/recipes/website') return 'start-here-site.md in the Exact checkout (a website reads it in place of Start here)';
+  if (startSite && (p.path === '/recipes/website' || p.path === '/recipes/website-hosting')) return `[${startSite.title}](${mdUrl(startSite)})`;
   if (!start || ['Home', 'Get started', 'For AI agents'].includes(p.section)) return 'None';
   return `[${start.title}](${mdUrl(start)})`;
 }
-const depth = (p: Page): number => (parentOf(p) ? depth(parentOf(p)) + 1 : 0);
-const sitemapSections = [...new Set(pages.map(p => p.section))].map(section => [
-  `## ${section}`,
-  '',
-  ...pages.filter(p => p.section === section).map(p =>
-    `${'    '.repeat(depth(p))}- [${p.title}](${mdUrl(p)}) | Type: ${TYPES[section] ?? 'Reference'} | Lastmod: ${p.updated || 'unknown'} | Summary: ${p.description} | Prerequisites: ${prerequisites(p)}`),
-].join('\n'));
+const llms = `# ${site.name}\n\n> ${site.description}\n\n[sitemap.md](${ORIGIN}/sitemap.md) lists the same pages with each one's type, last change and prerequisites.\n\n${bySection(pages, mdUrl, p => `: ${p.description}`)}\n`;
+for (const file of ['llms.txt', 'assets/llms.txt']) writeFileSync(join(DIST, file), llms);
 writeFileSync(
   join(DIST, 'sitemap.md'),
-  `# ${site.name} sitemap\n\nA page index for agents: each page's Markdown URL, its type, the date it last changed, a summary, and what to read before it. [llms.txt](${ORIGIN}/llms.txt) lists the same pages without the extra fields.\n\n${sitemapSections.join('\n\n')}\n`
+  `# ${site.name} sitemap\n\nA page index for agents: each page's Markdown URL, its type, the date it last changed, a summary, and what to read before it. [llms.txt](${ORIGIN}/llms.txt) lists the same pages without the extra fields.\n\n${bySection(pages, mdUrl, p => ` | Type: ${TYPES[p.section] ?? 'Reference'} | Lastmod: ${p.updated || 'unknown'} | Summary: ${p.description} | Prerequisites: ${prerequisites(p)}`)}\n`
 );
 
 writeFileSync(
@@ -184,9 +178,9 @@ writeFileSync(
   join(DIST, '_headers'),
   [
     '# Generated by tools/postbuild.ts. Do not edit.',
-    '# Every page names the Markdown index, for an agent that fetches the HTML.',
+    '# Every page names the Markdown index, and the sitemap when the build wrote one, for an agent that fetches the HTML.',
     '/*',
-    '  Link: </llms.txt>; rel="llms-txt"',
+    `  Link: </llms.txt>; rel="llms-txt"${ORIGIN ? ', </sitemap.xml>; rel="sitemap"' : ''}`,
     '  X-Llms-Txt: /llms.txt',
     '/*.md',
     '  Content-Type: text/markdown; charset=utf-8',
@@ -202,5 +196,5 @@ if (ORIGIN) {
   );
 }
 
-console.log(`${DIST}: head (favicon, stored choices, Markdown link, JSON-LD${ORIGIN ? ', canonical' : ''}) on ${prepainted} pages, _redirects (${rules.length - 2} rules), _headers, ${pages.length} .md pages and 404.md, ${Object.keys(redirects).length} moved-page fallbacks, robots.txt, llms.txt, sitemap.md${ORIGIN ? ', sitemap.xml' : ''}`);
+console.log(`${DIST}: head (favicon, stored choices, Markdown link, JSON-LD${ORIGIN ? ', canonical' : ''}) on ${prepainted} pages, _redirects (${rules.filter(rule => !rule.startsWith('#')).length} rules), _headers, ${pages.length} .md pages and 404.md, ${Object.keys(redirects).length} moved-page fallbacks, robots.txt, llms.txt, sitemap.md${ORIGIN ? ', sitemap.xml' : ''}`);
 if (!ORIGIN) console.log('  no origin: set it in constants/site.ts (or SITE_ORIGIN) for sitemap.xml, canonical links and JSON-LD URLs');

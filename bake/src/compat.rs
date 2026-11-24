@@ -493,6 +493,7 @@ pub fn compatibility_id_pinned(
     }
     if let Some(plan) = &plan {
         faces(&mut compat, plan, platform, target);
+        crate::controls::derive(&mut compat, plan, manifest, platform, target)?;
     }
     if let Some(out) = std::env::var_os("OUT_DIR") {
         // A native artifact's composition is part of its cohort (LLP
@@ -652,7 +653,7 @@ fn commands_digest() -> String {
         .collect()
 }
 
-fn compatibility_with_trust(
+pub(crate) fn compatibility_with_trust(
     app_dir: &Path,
     platform: &str,
     target: &str,
@@ -901,10 +902,10 @@ fn compatibility_with_trust(
     if let Some(links) = crate::links::claims(&manifest.json, platform) {
         inputs["links"] = links;
     }
-    // Linux has no bundle beside the executable. Its portal picker reads the
-    // same declared file types from the compatibility metadata the binary
-    // already carries (LLP 1030 D2; LLP 1069.010 D2).
-    if platform == "linux" && !target.contains("android") {
+    // Linux and Windows have no bundle beside the executable. Their pickers
+    // read the declared file types from the compatibility metadata the binary
+    // already carries (LLP 1030 D2; LLP 1069.010 D2; LLP 1173 D1).
+    if matches!(platform, "linux" | "windows") && !target.contains("android") {
         if let Some(handlers) = manifest.json.get("file_handlers") {
             if !handlers.as_array().is_some_and(Vec::is_empty) {
                 inputs["fileHandlers"] = handlers.clone();

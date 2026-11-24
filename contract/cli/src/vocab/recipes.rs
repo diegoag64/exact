@@ -29,6 +29,7 @@ macro_rules! pattern {
 pub const RECIPES: &[(&str, &str)] = &[
     recipe!("after-a-write"),
     recipe!("alternate-app-icons"),
+    recipe!("announce"),
     recipe!("app-json"),
     recipe!("background-transfers"),
     recipe!("background-work"),
@@ -59,12 +60,14 @@ pub const RECIPES: &[(&str, &str)] = &[
     recipe!("grouped-form"),
     recipe!("in-app-browser"),
     recipe!("ios-driving"),
+    recipe!("keep-a-playing-video"),
     recipe!("keyboard-and-focus"),
     recipe!("large-live-list"),
     recipe!("list-rows"),
     recipe!("local-network"),
     recipe!("long-lists"),
     recipe!("long-text"),
+    recipe!("mini-player"),
     recipe!("mobile-build"),
     recipe!("model-viewer"),
     recipe!("money"),
@@ -103,6 +106,7 @@ pub const RECIPES: &[(&str, &str)] = &[
     recipe!("snapback-tests"),
     recipe!("socket-ticket"),
     recipe!("store-update"),
+    recipe!("supabase"),
     recipe!("suspending-feed"),
     recipe!("symbols"),
     recipe!("tabs"),
@@ -120,6 +124,7 @@ pub const RECIPES: &[(&str, &str)] = &[
     recipe!("web-sessions"),
     recipe!("website"),
     recipe!("website-hosting"),
+    recipe!("white-label"),
 ];
 
 pub const PATTERNS: &[(&str, &str)] = &[

@@ -144,6 +144,11 @@ final class NavigationHost: NSObject, UINavigationControllerDelegate, UIGestureR
     var besideInsets = UIEdgeInsets.zero
     /// The nodes nested beside the tab panels that paint over the container (LLP 1083.000 D4).
     lazy var siblings = PanelSiblings(navigation: self)
+    #if os(iOS)
+    /// The bars' hosted items (LLP 1141.004 D3).
+    lazy var barHosted = BarHosted(navigation: self)
+    lazy var liftedNodes: any LiftedNodes = LiftedPair(siblings, barHosted)
+    #endif
     weak var besideOwner: UIViewController?
     /// A context menu's commit pushes without the stack's animation: UIKit
     /// animates it (`.pop`, LLP 1021 §5.1). The selected route's key tells
@@ -163,6 +168,10 @@ final class NavigationHost: NSObject, UINavigationControllerDelegate, UIGestureR
     var stacks: [ObjectIdentifier: NavigationStack] = [:]
     var stackCount = 0
     var covers: [UInt32: HostCover] = [:]
+    #if os(iOS)
+    /// The bars of the dialogs' sheets, by dialog (DialogBarIOS.swift).
+    var dialogBars: [UInt32: DialogBar] = [:]
+    #endif
     /// The covers the kernel was last told (`deliverCovers`), each route's local insets (LLP 1123 D9), and
     /// the clearance its scrollers' insets hold (D3, ClearanceIOS.swift).
     var delivered: [UInt32: HostCover] = [:], localInsets = LocalInsetsReport(), clearance: [ObjectIdentifier: ClearanceInset] = [:]
@@ -668,7 +677,9 @@ final class NavigationHost: NSObject, UINavigationControllerDelegate, UIGestureR
         }
         let after = Set(region.map { ids[($0 + 1)...] } ?? [])
         guard let next = mount.subviews.first(where: { ($0 as? NodeView).map { after.contains($0.id) } == true }) else {
-            let placed = mount.subviews.last === owner || (mount.subviews.last === siblings.layer && mount.subviews.dropLast().last === owner)
+            // Among what the mount holds, its extension view left out (`heldSubviews`)
+            let held = mount.heldSubviews
+            let placed = held.last === owner || (held.last === siblings.layer && held.dropLast().last === owner)
             if !placed {
                 mount.bringSubviewToFront(owner)
                 PaintOrder.changed(mount)
@@ -689,6 +700,9 @@ final class NavigationHost: NSObject, UINavigationControllerDelegate, UIGestureR
     /// A route's controller leaves for good: its header paints again and the
     /// route hatch hears `routeEnded` (LLP 1075.003 §3.2).
     private func end(_ c: RouteController) {
+        #if os(iOS)
+        barHosted.show([], in: c)
+        #endif
         if let header = c.lifted { header.isHidden = false; c.lifted = nil }
         c.scoped?.isHidden = false
         c.scoped = nil
@@ -722,7 +736,9 @@ final class NavigationHost: NSObject, UINavigationControllerDelegate, UIGestureR
     /// UIKit changed a route's safe area: lay out its content in this call.
     func coversChanged() {
         // sync reports the final containment below; intermediate safe areas
-        // belong to the controller the route is leaving.
+        // belong to the controller the route is leaving. An arrangement's pass
+        // loses nothing in a press: a pane it hides or shows changes its block,
+        // whose batch syncs.
         guard !syncing, tapping == nil, !coversPending else { return }
         coversPending = true
         presenter.afterBatch { [weak self] in
@@ -1047,9 +1063,10 @@ final class NavigationHost: NSObject, UINavigationControllerDelegate, UIGestureR
         // @ref LLP 1038 D6/D11; LLP 1035.001 D2 — a cancelled swipe calls
         // willShow again for its source, in the transition already begun.
         guard let transition = pushOrPop(on: navigationController), transition.viewController(forKey: .to) === viewController else { return }
-        // UIKit's own (its Back button, its menu, a swipe): Observe's render
-        // mark is this transition's first frame, unless it is cancelled.
-        if !syncing {
+        // A swipe, UIKit's own: the router follows at its end, so Observe's
+        // render mark is this transition's first frame, unless it is
+        // cancelled. A pop UIKit commits at once was followed above.
+        if !syncing, navigationController.transitionCoordinator?.initiallyInteractive == true {
             NavigationMarks.shared.platformBeganShowing()
             transition.animate(alongsideTransition: nil) { context in
                 if context.isCancelled { NavigationMarks.shared.platformCancelled() }
@@ -1205,16 +1222,26 @@ final class NavigationHost: NSObject, UINavigationControllerDelegate, UIGestureR
         presenter.modalHost.reset()
         for nav in presentedNavigations { retireNavigation(nav, preserving: false) }
         for c in controllers.values { end(c) }
+        #if os(iOS)
+        barHosted.reset()
+        #endif
         retireTabs()
         #if os(iOS)
         tabAccessoryNoted = []
         #endif
         retireSplit()
         if let primaryNavigation { retireStack(primaryNavigation) }
-        if !covers.isEmpty || !delivered.isEmpty || !localInsets.wanted.isEmpty {
+        // An open dialog's header its sheet's bar stands for stays covered (DialogBarIOS.swift), and a pane a native
+        // arrangement hides.
+        #if os(iOS)
+        let kept = dialogBarCovers.merging(arrangedCovers) { _, whole in whole }
+        #else
+        let kept: [UInt32: HostCover] = [:]
+        #endif
+        if covers != kept || delivered != kept || !localInsets.wanted.isEmpty {
             // Clearing the covers or local insets changes them as a report does, and is answered as one
-            if !covers.isEmpty || !localInsets.wanted.isEmpty { countReport() }
-            covers = [:]; localInsets.wanted = [:]
+            if covers != kept || !localInsets.wanted.isEmpty { countReport() }
+            covers = kept; localInsets.wanted = [:]
             presenter.afterBatch { [weak self] in self?.deliverCovers() }
         }
         primaryNavigation?.willMove(toParent: nil)

@@ -169,6 +169,8 @@ struct Em<'a> {
     zoom: bool,
     /// Whether a `video` or `audio` is in the plan (`media.js` is installed).
     media: bool,
+    /// Whether the plan says `portal`: its boxes carry `data-exact-view` for portal.js's D3 checks.
+    portals: bool,
     /// Whether a route declares its own entrance or exit (shared.js plays it).
     route_parts: bool,
     /// Whether an image draws a symbol (`symbols.js`), and whether a
@@ -217,6 +219,7 @@ pub fn emit(plan: &Plan, site_attrs: bool, dev_reload: bool) -> Result<Output, S
     // Emitting parses the plan's CSS, and a plan decoded from a file has
     // not passed the compiler, which links every grammar.
     exact_kernel::style::link_all();
+    // @ref LLP 1013.002 §8 — placement comes to the JS target as its own piece.
     // A development build makes every token a property (LLP 1121 stage 4).
     let _every = crate::modes::every_for(plan, dev_reload);
     // And every overridden role its sheet's property (stage 5).
@@ -286,6 +289,7 @@ pub fn emit(plan: &Plan, site_attrs: bool, dev_reload: bool) -> Result<Output, S
         follow: false,
         zoom: false,
         media: false,
+        portals: exact_runner::uses::portals(plan),
         route_parts: false,
         symbols: (false, false),
         heights: Default::default(),
@@ -465,7 +469,7 @@ pub fn emit(plan: &Plan, site_attrs: bool, dev_reload: bool) -> Result<Output, S
     }
     em.out.clear();
     em.template_scope(true, |em| em.mount_node(sites.root, "$R", &top))?;
-    let view = std::mem::take(&mut em.out);
+    let view = crate::hoist::lift(&std::mem::take(&mut em.out), crate::hoist::MIN)?;
     if let Some(m) = &modes {
         body.push_str(&m.js(plan, &em.classes));
     }
@@ -742,6 +746,7 @@ pub fn emit(plan: &Plan, site_attrs: bool, dev_reload: bool) -> Result<Output, S
             (em.follow, "import\"./follow.js\";"),
             (em.zoom, "import{zoom as $zoom}from\"./zoom.js\";"),
             (em.media, "import{mediaUse as $media}from\"./media.js\";"),
+            (em.portals, "import{portal as $portal}from\"./portal.js\";"),
             (links, "import{linkUse as $links}from\"./links.js\";"),
             (iframes, "import\"./iframes.js\";"),
             (lists, "import\"./list-items.js\";"),
@@ -915,6 +920,10 @@ impl Em<'_> {
             self.symbols.1 |= bound;
         }
         let (mut attrs, content, extra) = rows::attributes(element, &parts.props);
+        attrs.retain(|(k, _)| k != "data-portal");
+        if self.portals && matches!(node_type, NodeType::View | NodeType::SvgForeignObject) {
+            attrs.push(("data-exact-view".into(), String::new()));
+        }
         crate::symbols::path_in_source(&mut attrs);
         if element == "img" && exact_runner::rows::repeated(plan, exact_plan::NodesId(i)) {
             attrs.push(("loading".into(), "lazy".into()));
@@ -959,11 +968,7 @@ impl Em<'_> {
             let _ = write!(self.out, "{press}();");
         }
         self.clocks_in(&presence);
-        // A fitted text (LLP 1116.001 D1.4): the runtime scales it after each tree update.
-        if presence.contains("--exact-fit:") {
-            let fit = self.uses.rt("fitTexts");
-            let _ = write!(self.out, "{fit}();");
-        }
+        self.after_updates_in(&presence);
         if element == "a" {
             attrs.push(("data-view".into(), String::new()));
         }
@@ -1162,6 +1167,12 @@ impl Em<'_> {
             if self.named_record(i, &b, &e, scope)? {
                 continue;
             }
+            // @ref LLP 1013.002 D6 — placement is portal.js's, after each flush.
+            if b.kind == BindingKind::Prop && b.id == PropId::Portal as u16 {
+                let f = self.bound(i, &e, &b, scope)?;
+                let _ = write!(self.out, "$portal({e},{f});");
+                continue;
+            }
             // tvOS's focus guide has no DOM property, whether literal or bound.
             if b.kind == BindingKind::Prop && b.id == PropId::FocusGuide as u16 {
                 continue;
@@ -1231,6 +1242,7 @@ impl Em<'_> {
                     self.markdown(i, &e, &f, plan.code(b.expr))
                 }
                 BindingKind::Prop if b.id == PropId::Dataset as u16 => self.dataset(&e, &f),
+                BindingKind::Prop if self.canvas_setting(&b, &e, &f) => {}
                 BindingKind::Prop => {
                     let prop = PropId::from_wire(b.id).ok_or("unknown prop")?;
                     let name = style::prop_name(node_type, prop)?;

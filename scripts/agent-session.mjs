@@ -31,9 +31,10 @@ import {
 } from './agent-test.mjs';
 import { MalformedOperation, operationReply } from './agent-keys.mjs';
 import { AWAY } from './agent-wire.mjs';
+import { openAttached } from './agent-attach.mjs';
 import { openStdio } from './agent-stdio.mjs';
 import { appShareTarget, driverShare, webShareLocation } from './share-target.mjs';
-import { heldClock, inFlightNote, untilClock } from './agent-held.mjs';
+import { attachedClock, heldClock, inFlightNote, untilClock } from './agent-held.mjs';
 import { film } from './agent-film.mjs';
 import { developmentLaunchEnvironment } from '../host/apple/devices.mjs';
 import { bakeOutput, executableName, linuxBinary, resolveApp, webDist as defaultWebDist } from './app.mjs';
@@ -87,6 +88,7 @@ export async function open({
   scale,
   port,
   ax = false,
+  attach,
 } = {}, { openDevice = openStdio } = {}) {
   browser ??= 'chrome';
   if (!['chrome', 'firefox', 'webkit'].includes(browser))
@@ -182,7 +184,9 @@ export async function open({
       env = developmentLaunchEnvironment(['--run', '--url', url], env ?? {});
     } else env = { ...(env ?? {}), EXACT_LAUNCH_URL: url };
   }
-  const carrier = device
+  const carrier = attach !== undefined
+    ? await openAttached({ host, app, pid: attach === true ? null : attach, session, device: Boolean(device || pick) })
+    : device
     ? await openDevice({ host: 'ios', plan, world, size, env, app, device, phone: pick, touch, onProcess })
     : // `documents` are the Mac's command line, a terminal's route in (LLP
       // 1033 D3); each window's session then routes by its label (LLP 1069.010).
@@ -818,7 +822,7 @@ export async function open({
         if (shrunk) writeFileSync(r.screenshot, encodePng(image));
         r = { ...r, scale };
       }
-      if (r.captureSpace === 'screen' && r.front !== true) return r;
+      if ((r.captureSpace === 'screen' && r.front !== true) || carrier.attached) return carrier.attached ? s.tagged(r) : r;
       return worldTells(s, await s.tagged(r)); // a drawing world's tells (LLP 1127.000 D1)
     },
     scaled(r) {
@@ -884,6 +888,16 @@ export async function open({
     springboard: carrier.springboard,
   };
   Object.assign(s, sessionInput(s, { carrier, host, timing, touch, app }));
+  // An attached session reads, on the app's own wall clock (LLP 1012.000 D3): the driver refuses input and the clock
+  // before it sends anything, as the app would.
+  if (attach !== undefined) {
+    const refuse = (op, why) => async () => { throw new Error(`${op}: ${why}`); };
+    const withheld = (op) => refuse(op, carrier.host === 'web' ? 'unsupported: an attached tab is read, not driven' : 'unsupported: an attached session\'s input is a plain tap, a text entry and a declared tool\'s call, once the person allows it');
+    for (const [method, op] of [['pointer', 'tap'], ['prefer', 'prefer'], ['resize', 'resize'], ['closeWindow', 'close'], ['back', 'back'], ['background', 'background']]) s[method] = withheld(op);
+    Object.assign(s, carrier.input);
+    s.clock = (spec = 'settle') => attachedClock(s, spec);
+    s.film = refuse('screenshot', 'film of an attached app is not built yet: it would sample the wall clock (LLP 1012.000 D3)');
+  }
   // Platform timing and Android's reader start on a live host clock; seed the driver's relative seeks where the host
   // handed time over (LLP 1080.000 §12; LLP 1107 D1). Headless Android starts at zero, so the same read keeps its seek
   // clock unchanged.

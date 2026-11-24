@@ -92,23 +92,58 @@ export const checkoutLine = (exact2) => {
   return `Exact checkout: ${exact2}${commit ? ` at ${commit}` : ''}`;
 };
 
+/** `lines` with each failed build script Cargo reports said as one entry, which `said` holds: Cargo's line (`error:
+ * failed to run custom build command for …`), then what the script wrote to stdout, less its directives to Cargo, and
+ * to stderr, which is its reason (a bake's refusal, a panic) whatever it says. Cargo indents the script's output two
+ * spaces under `Caused by:`, stdout under `--- stdout` and then stderr under `--- stderr`, to the next line it does not
+ * indent. For a script that wrote no stderr, Cargo's causes (how it ended, or why it never ran) come first. */
+function buildScriptFailures(lines) {
+  // As a terminal shows the line: a progress bar Cargo drew before `\r` is gone, and so are colours.
+  const plain = (l) => l.slice(l.lastIndexOf('\r') + 1).replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '');
+  const out = [], said = new Set();
+  for (let i = 0; i < lines.length; i++) {
+    if (!/^error: failed to run custom build command for /.test(plain(lines[i]))) { out.push(lines[i]); continue; }
+    // Cargo may add a `note:` of its own before the causes.
+    let end = i + 1, caused = false;
+    for (; end < lines.length; end++) {
+      const l = plain(lines[end]);
+      if (/^Caused by:\s*$/.test(l)) caused = true;
+      else if (!/^(?:\s|$)/.test(l) && (caused || !/^note: /.test(l))) break;
+    }
+    // Stderr is last, so a line of the script's own that reads `--- stderr` stays in it.
+    const block = lines.slice(i + 1, end), mark = (name, from = 0) => block.findIndex((l, k) => k >= from && plain(l).trimEnd() === `  --- ${name}`);
+    const atOut = mark('stdout'), atErr = mark('stderr', atOut + 1), first = [atOut, atErr].filter((k) => k >= 0)[0] ?? block.length;
+    const trimmed = (ls) => { const k = ls.findIndex((l) => l.trim()), j = ls.findLastIndex((l) => l.trim()); return k < 0 ? [] : ls.slice(k, j + 1); };
+    const stdout = atOut < 0 ? [] : trimmed(block.slice(atOut + 1, atErr < 0 ? block.length : atErr).filter((l) => !/^ {2}cargo::?[\w-]+=/.test(plain(l))));
+    const stderr = atErr < 0 ? [] : trimmed(block.slice(atErr + 1));
+    const causes = block.slice(0, first).filter((l) => /^ {2}\S/.test(l));
+    const reason = [...(stderr.length ? [] : causes), ...stdout, ...stderr];
+    const entry = [plain(lines[i]), ...reason.map((l) => l.replace(/^ {2}/, ''))].join('\n');
+    said.add(entry); out.push(entry);
+    i = end - 1;
+  }
+  return Object.assign(out, { said });
+}
+
 /** What a failed JS-target web build (`host/web-js/build.mjs`) said that is the app's to act on, from its stderr: the
  * types app.ts imports when rewritten, warnings, the diagnostics, then the compiler's warnings. Every compiler error is
  * kept with its quoted line and caret, as `contract build` prints them. Cargo's progress, a rustc warning's excerpt and
  * Bun's trace are omitted. Without a recognized diagnostic, keep the last three lines of raw stderr. */
 export function webBuildFailure(stderr) {
   const ambientDiagnostic = (l) => /^.+:\d+:\d+: .+ is unavailable in data sources[;:]/.test(l);
-  const all = (stderr ?? '').trim().split('\n').filter((l) => ambientDiagnostic(l) || !/^\s*(Compiling|Finished|Running)/.test(l) && !compilerWarnings(l).length);
-  const warnings = all.filter((l) => !ambientDiagnostic(l) && /^warning: /.test(l)), lines = all.filter((l) => ambientDiagnostic(l) || !/^\s*warning/.test(l));
+  const failed = buildScriptFailures((stderr ?? '').trim().split(/\r?\n/));
+  const all = failed.filter((l) => failed.said.has(l) || ambientDiagnostic(l) || !/^\s*(Compiling|Finished|Running)/.test(l) && !compilerWarnings(l).length);
+  const warnings = all.filter((l) => !ambientDiagnostic(l) && /^warning: /.test(l)), lines = all.filter((l) => failed.said.has(l) || ambientDiagnostic(l) || !/^\s*warning/.test(l));
   // Keep TypeScript's lines (`app.ts(2,8): error TS…`), the shared ambient
   // check's file:line:col diagnostics, including paths with spaces, and its
   // refusals of package code (js/bake/src/typescript.mjs `capturedSources`).
   const packageRefusal = (l) => / (?:requires peer|imports Node's built-in|uses the DOM's|uses Node's|loads a module by a computed name|loads code from a string|uses the page's)|, (?:which is not installed|a native addon|which the checked capture did not resolve)|: not an npm package name and version| must be a constant the build reads without running|^(?:Error: )?(?:package declarations: )?two copies of |^(?:Error: )?package (?:declarations exceed|code exceeds) 64 MiB/.test(l);
   const marker = /^(error|[A-Z]\w*Error|E[A-Z]+)\b:?/;
-  const kept = (l) => marker.test(l.trim()) || /\): error TS\d+:|^(?:Error: )?(?:tsconfig: |module outside captured app: |source links are not captured: )|^note: /.test(l) || ambientDiagnostic(l) || compilerError(l) || packageRefusal(l) || /\bunoptimized$|\bnot on PATH\b|import\.meta\.env/.test(l);
+  const kept = (l) => failed.said.has(l) || marker.test(l.trim()) || /\): error TS\d+:|^(?:Error: )?(?:tsconfig: |module outside captured app: |source links are not captured: )|^note: /.test(l) || ambientDiagnostic(l) || compilerError(l) || packageRefusal(l) || /\bunoptimized$|\bnot on PATH\b|import\.meta\.env/.test(l);
   const message = [];
   let last = -1; // the last line taken
   for (let i = 0; i < lines.length; i++) {
+    if (failed.said.has(lines[i])) { message.push(lines[i]); last = i; continue; }
     if (!kept(lines[i])) continue;
     // The type check says its error above its closing line (host/web-js/build.mjs), in whatever form the checker or
     // its launch failed in: the lines since the last one taken are that error, so a form no pattern here knows is
@@ -172,14 +207,15 @@ export function warningLines(dir, host, warnings) {
 /** A compiler warning that is information, not a problem: `forma-unreachable` names a control whose host draws the
  *  platform's own look, which the author should know of and cannot change (LLP 1121 D9, amended 2026-10-30). A drive
  *  and verify say it but do not count it. contract's `warning_rank::information` is the same test. */
-export const information = (w) => / warning \[(forma-unreachable|style-undrawn)\] /.test(w);
+export const information = (w) => / warning \[(forma-unreachable|style-undrawn|header-item-left-out)\] /.test(w);
 
 /** The colours that stay one in dark mode (`lower-colour-one-scheme`), past one, as one line: their closing line with
  *  the first three sites' `file:line`, theme tokens included, at the first's place (LLP 1168.000 D7.2: a chat app said
  *  31 in every build). `contract build --json` lists each, with a token's own repair. contract_lower's
  *  `warning_rank::one_scheme_line` is the same. */
 export function oneScheme(warnings) {
-  const said = (w) => /warning \[lower-colour-one-scheme\] /.test(w), closing = (w) => /warning \[lower-colour-one-scheme\] these /.test(w);
+  // A warning is one line: an entry of several (a build script's failure) is not one, whatever it quotes.
+  const said = (w) => /^[^\n]*warning \[lower-colour-one-scheme\] /.test(w), closing = (w) => /^[^\n]*warning \[lower-colour-one-scheme\] these /.test(w);
   const close = warnings.find(closing), sites = warnings.filter((w) => said(w) && !closing(w));
   if (!close || sites.length < 2) return warnings;
   const place = (w) => w.split(' warning [')[0], line = (w) => place(w).replace(/:\d+$/, '');
@@ -378,6 +414,9 @@ async function verbRun({ dir, name, game = false, exact2, args }, reply) {
     for (const line of feedback.nudge(dir, { verb, host, exit, ms: Date.now() - started, args: rest, interrupted })) console.error(line);
   } catch {}
   return exit; };
+  // `agent --attach` reads an app already running (LLP 1012.000 D1): the driver takes it as given, before anything here
+  // builds, prepares or adds a launch default.
+  if (verb === 'agent' && rest.includes('--attach')) return log(spawnSync(process.execPath, [resolve(exact2, verbs.agent[0]), ...verbs.agent.slice(1), ...rest], { stdio: 'inherit' }).status ?? 1);
   // A verb that builds the app bundles app.ts with rolldown from this checkout's node_modules (the web's build and
   // every native bake); without it Bun's auto-install spins silently instead of failing. A web drive of a site
   // already built (`--web-dist`, or a `--url` that is not a path: a path is the app's own, built first, as
@@ -577,13 +616,15 @@ if (verb === 'contract') {
     if (!found.length) { console.error(`no test file matches ${named}`); return log(2); }
     tests.push(...found);
   }
+  let buildCheck;
+  const checksApple = drivesNative && host !== 'windows';
   if (drivesWeb || drivesNative || verb === 'verify' && ['web', 'ios', 'windows'].includes(host)) {
     const { resolveApp } = await import(resolve(exact2, 'scripts/app.mjs'));
     const { privateWebBuild, privateNativeBuild } = await import(resolve(exact2, 'scripts/web-build.mjs'));
     const build = (host === 'web' ? privateWebBuild : privateNativeBuild)(resolveApp(dir), verb);
     Object.assign(process.env, build.env);
-    if (host !== 'web') await build.seed(host);
-    process.once('exit', build.close);
+    if (host !== 'web') await build.seed(host, { checkInDrive: checksApple });
+    process.once('exit', code => build.close(code, buildCheck));
   }
   if (drivesWeb || drivesNative) {
     // A flag the drive does not take is refused before the build, not after it (scripts/help.mjs).
@@ -592,13 +633,20 @@ if (verb === 'contract') {
     if (refused != null) return log(refused);
     const prepared = await prepare();
     if (prepared) return log(prepared);
-    // An `agent` drive's check hashes the build's inputs, and the driver need not again (LLP 1012.001.000 D1: once a drive).
-    const checked = verb === 'agent' && drivesNative ? resolve(tmpdir(), `exact-build-check-${process.pid}`) : null;
-    if (checked) process.env.EXACT_BUILD_CHECK_OUT = checked;
+    // A native test or agent run checks once, including its reloads (LLP 1012.001.000 D1).
+    const checked = checksApple ? resolve(tmpdir(), `exact-build-check-${process.pid}`) : null;
+    if (checked) {
+      rmSync(checked, { force: true });
+      delete process.env.EXACT_BUILD_CHECKED;
+      process.env.EXACT_BUILD_CHECK_OUT = checked;
+    }
     // A web build says every compiler warning each time; the drive says the new ones and a count (`warningLines`).
     const built = drivesWeb ? await webBuildQuiet(spawned, [resolve(exact2, verbs['web-build'][0]), ...verbs['web-build'].slice(1)], dir)
       : await script(['scripts/agent-build.mjs', host, '--app', name], [], [0, 2, 2]);
-    if (checked) { delete process.env.EXACT_BUILD_CHECK_OUT; try { process.env.EXACT_BUILD_CHECKED = readFileSync(checked, 'utf8'); rmSync(checked); } catch {} }
+    if (checked) {
+      delete process.env.EXACT_BUILD_CHECK_OUT;
+      try { process.env.EXACT_BUILD_CHECKED = buildCheck = readFileSync(checked, 'utf8'); rmSync(checked); } catch {}
+    }
     if (built) return log(await withCargoFault(built));
     const refusal = verb === 'test' ? (await import(resolve(exact2, 'scripts/verify.mjs'))).appServer(dir)?.refusal : null;
     if (refusal) { console.error(`test: ${refusal}`); return log(1); }

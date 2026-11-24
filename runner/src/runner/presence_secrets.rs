@@ -17,7 +17,7 @@
 //! before anything is asked, in every state: presence is not delegable
 //! (D12).
 
-use super::provenance::CallOrigin;
+use super::provenance::{CallOrigin, Cause};
 use super::reply::{response, Pending};
 use super::seams::PresenceSecrets;
 use super::{CommitReceipt, DataSource, Runner, RunnerError};
@@ -76,8 +76,8 @@ pub struct PresenceAsk {
     pub policy: String,
     /// The reason's text, translated: what the sheet shows.
     pub reason: String,
-    /// Who made the call.
-    pub origin: CallOrigin,
+    /// Who made the call; the host reads its origin in [`Self::json`].
+    pub(crate) cause: Cause,
     /// Where the host reads the item after the check (Apple: the keychain
     /// service). `None` under the agent, whose own store holds the value:
     /// the host only checks (`--bind`).
@@ -90,7 +90,7 @@ impl PresenceAsk {
     /// words, the reason's text and the origin. Never a value.
     pub fn json(&self) -> String {
         json!({ "call": self.id, "name": self.name, "account": format!("{}#{}", self.name, self.generation),
-            "service": self.keystore, "policy": self.policy, "reason": self.reason, "origin": self.origin.word() })
+            "service": self.keystore, "policy": self.policy, "reason": self.reason, "origin": self.cause.origin().word() })
         .to_string()
     }
 }
@@ -110,7 +110,7 @@ pub enum PresenceAnswer {
 struct Call {
     slot: Arc<Mutex<Pending>>,
     ticket: Option<u64>,
-    origin: CallOrigin,
+    cause: Cause,
     op: &'static str,
     name: String,
     reason: String,
@@ -189,7 +189,8 @@ impl<D: DataSource> Runner<D> {
         let Some(call) = self.presence.calls.get(&id) else {
             return;
         };
-        let (origin, reason) = (call.origin, call.reason.clone());
+        let (cause, reason) = (call.cause, call.reason.clone());
+        let origin = cause.origin();
         if origin != CallOrigin::App {
             let checked = Checked::Failed("PERMISSION_DENIED".into(), "person-required".into());
             return self.presence_checked(id, checked);
@@ -212,7 +213,7 @@ impl<D: DataSource> Runner<D> {
                 generation,
                 policy: presence.line_words(),
                 reason: self.strings_text(&reason),
-                origin,
+                cause,
                 keystore: p.keystore.clone(),
             };
             self.log(format!("store {op} {name}: the platform's check"));
@@ -475,7 +476,8 @@ impl<D: DataSource> PresenceSecrets<D> for LinkedPresence {
                 format!("{name} is not a secret.keep name with a presence policy"),
             ));
         };
-        let origin = r.data_origin();
+        let cause = r.data_cause();
+        let origin = cause.origin();
         let occupancy = r.store.occupancy(&name).unwrap_or(Occupancy::Absent);
         // Presence is not delegable (D12): refused before anything is asked.
         if matches!(op, "unlock" | "unprotect") && occupancy.locked() && origin != CallOrigin::App {
@@ -507,7 +509,7 @@ impl<D: DataSource> PresenceSecrets<D> for LinkedPresence {
             Call {
                 slot: slot.clone(),
                 ticket,
-                origin,
+                cause,
                 op,
                 name,
                 reason,
@@ -707,7 +709,7 @@ mod tests {
             generation: 2,
             policy: "user-presence optional".into(),
             reason: "Unlock Excord".into(),
-            origin: CallOrigin::App,
+            cause: Cause::person(),
             keystore: Some("com.example.presence".into()),
         };
         let json: Json = serde_json::from_str(&ask.json()).unwrap();

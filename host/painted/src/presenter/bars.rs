@@ -94,9 +94,9 @@ pub(super) struct State {
     focused: Option<(i32, usize)>,
     /// Moved on whenever a bar's picture or frame changes.
     revision: u32,
-    /// The revision the shell was last told, and whether the bars were then
-    /// the stage's (`stage.rs`).
-    told: Option<(u32, bool)>,
+    /// The revision the shell was last told, whether the bars were the
+    /// stage's (`stage.rs`), and whether the content had scrolled.
+    told: Option<(u32, bool, bool)>,
 }
 
 impl State {
@@ -264,6 +264,35 @@ impl<D: DataSource> Presenter<D> {
         }
     }
 
+    fn reader_bar_scrolled(&self, staged: bool) -> bool {
+        self.bars.top.is_some() && !staged && self.bar_scrolled()
+    }
+
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn bar_scroll_changed(&self) -> bool {
+        self.bars.painter.is_some()
+            && self.bars.told.map(|(_, _, scrolled)| scrolled)
+                != Some(self.reader_bar_scrolled(self.stage_draws_bars()))
+    }
+
+    /// The nearest node at or above a bar item's node that hears `press`, as
+    /// `handler_target` finds it in the page. The bar shows the node, so the
+    /// page's hit regions and the header the bar lifts out do not decide.
+    fn bar_listener(&self, id: ViewId) -> Option<ViewId> {
+        let kernel = self.host.kernel();
+        let mut at = Some(id);
+        while let Some(n) = at {
+            if kernel.node(n)?.props.bool(PropId::Disabled) == Some(true) {
+                return None;
+            }
+            if (self.host.runner().handlers_of(n)).contains(&EventKind::Press) {
+                return Some(n);
+            }
+            at = self.listener_parent(kernel, n);
+        }
+        None
+    }
+
     /// A header's button as the top bar shows it.
     fn bar_button(&self, id: ViewId, dark: bool) -> Option<Button> {
         let kernel = self.host.kernel();
@@ -279,7 +308,8 @@ impl<D: DataSource> Presenter<D> {
             title: row.title,
             direction: row.direction,
             symbol: row.symbol,
-            enabled: row.enabled,
+            // An inert button is no enabled item, as an inert tab is none.
+            enabled: row.enabled && !self.host.authored_visibility(id).1,
             destructive: row.destructive,
             tint,
         })
@@ -520,10 +550,11 @@ impl<D: DataSource> Presenter<D> {
         self.ripple_bars();
         // While the stage draws them in the page, the shell shows none.
         let staged = self.stage_draws_bars();
-        if self.bars.told == Some((self.bars.revision, staged)) {
+        let told = (self.bars.revision, staged, self.reader_bar_scrolled(staged));
+        if self.bars.told == Some(told) {
             return None;
         }
-        self.bars.told = Some((self.bars.revision, staged));
+        self.bars.told = Some(told);
         if staged {
             return Some(vec![0]);
         }
@@ -629,7 +660,27 @@ impl<D: DataSource> Presenter<D> {
             What::Up => {
                 self.system_back(now_ms);
             }
-            What::Item(node) => self.activate(node, now_ms),
+            What::Item(node) => {
+                if self.top_invoker(node) == Some(node) {
+                    self.invoke(node, now_ms, true);
+                    return;
+                }
+                // A link follows its `href` after its press, and at once where
+                // nothing hears the press, as a tap on it in the page does
+                // (LLP 1038 §7, LLP 1141.004 D1); an inert one follows nothing.
+                let kernel = self.host.kernel();
+                let href = (kernel.node(node))
+                    .and_then(|n| n.props.link().map(str::to_owned))
+                    .filter(|_| !self.host.authored_visibility(node).1);
+                match (href, self.bar_listener(node)) {
+                    (Some(href), None) => self.follow(node, &href, now_ms),
+                    (Some(href), Some(target)) => {
+                        self.press_then_follow(target, now_ms, true);
+                        self.follow(node, &href, now_ms);
+                    }
+                    (None, _) => self.activate(node, now_ms),
+                }
+            }
             What::Tab(node) => {
                 // Read before the tab's press, scrolled after it. The scroll
                 // gives way to a `scrollIntoView` the press asked for in the

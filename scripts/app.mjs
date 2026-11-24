@@ -1,9 +1,9 @@
-import { bindGpuProduct, bakeSelection } from './app-shells.mjs';
+import { bindGpuProduct, bakeSelection, appCrateName, gpuModules, packageGpuInputs, packageGpuManifest, gpuView, joinMetadata, joinsGpu, settleShells } from './app-shells.mjs';
 export { bindGpuProduct, bakeSelection } from './app-shells.mjs';
 import { takeLock } from '../host/web/build-lock.mjs';
 import { refreshCargoRustBindings } from './cargo-dep-info.mjs';
 import { capturePrivacyManifest } from '../host/apple/privacy.mjs';
-import { appleMetadataProblem } from '../host/apple/plist.mjs';
+import { appleMetadataProblem, vendorPlistProblems } from '../host/apple/plist.mjs';
 import { appleImplementations } from '../js/bake/src/typescript.mjs';
 import { webHostFiles, hostModuleSources, MODULE_PRELUDE } from '../host/web-js/glue.mjs';
 export { webHostFiles } from '../host/web-js/glue.mjs';
@@ -36,7 +36,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpath
 import { basename, delimiter, dirname, isAbsolute, relative, resolve, sep, toNamespacedPath } from 'node:path';
 import { pathFrom, preservePaths, samePath, within } from './paths.mjs';
 import { parseColour, schemeColours } from './scheme-colours.mjs';
-export { pathFrom } from './paths.mjs';
+export { INHERITING_KEYS, cargoCheckout, checkoutPathDependencies, checkoutPathRefusal, pathFrom } from './paths.mjs';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { BINARYEN, packageGpuWasm, webGpuTools } from '../host/web/stages.mjs';
@@ -48,11 +48,11 @@ import { bakeOutside, buildAndroidBake, compiledBakeDir, linkable, linkedInputs,
 import { filesystem, installedModules, OFFLINE_MISSING, removePrivateTree, withHostDeployment } from './filesystem.mjs';
 import { installedFileDependencies } from './file-dependencies.mjs';
 import { holdAppOutput, startSweep } from './sweep.mjs';
-import { WEB_TOOLCHAIN, WEB_STD, WEB_SIZE, WEB_RUSTFLAGS, webToolchainEnv, cargoEnvironment,
+import { WEB_TOOLCHAIN, WEB_STD, WEB_SIZE, WEB_RUSTFLAGS, webToolchainEnv, refuseStdLockfile, cargoEnvironment,
   appCrates, authoredWorkspace, buildCommand, cargoOnPath, claimTargetCrates, physicalPath, writtenPath,
   wholeProgram, declaredWorkspace, knownWorkspace, refuseLoose, rememberWorkspace, shellsDir, targetRustflags } from './cargo-check.mjs';
-export { WEB_TOOLCHAIN, WEB_STD, WEB_SIZE, webToolchainEnv, cargoEnvironment, cargoOnPath, wholeProgram } from './cargo-check.mjs';
-import { appCrateName, gpuModules, packageGpuInputs, packageGpuManifest, gpuView, joinMetadata, joinsGpu, settleShells } from './app-shells.mjs';
+export { WEB_TOOLCHAIN, WEB_STD, WEB_SIZE, webToolchainEnv, refuseStdLockfile, cargoEnvironment, cargoOnPath, wholeProgram } from './cargo-check.mjs';
+import { configTarget, nativePackageConfig } from '../js/bake/src/package-config.mjs';
 export { gpuModules } from './app-shells.mjs';
 import { installProblems } from './install-page.mjs';
 import { gameDefaults, lintGame, prepareGame } from '../game/app/shells.mjs';
@@ -583,7 +583,7 @@ export function readManifest(dir, name) {
       // Expo's splash keys and a host's own launch colour: the launch colours are the manifest's on every host.
       : /^((host\.\w+\.)?(splash\w*|windowBackground|backgroundColor|launchColor)): not a known key$/i.test(p) ? `${p.split(':')[0]}: not a known key; what shows before the first frame is background_color in every colour scheme, or color_scheme_light.background_color and color_scheme_dark.background_color in one, on every host (host.ios.launchImage and host.android.launchImage add a picture)`
       : /^host\.ios\.associatedDomains: expected array, got boolean$/.test(p) ? REMOVED_DOMAINS[parsed.host.ios.associatedDomains]
-      : appleMetadataProblem(p)).filter((p) => !/^host\.web\.(head(\[|: )|csp|cspReportOnly)/.test(p)).concat(webHeadProblems(parsed), webCspProblems(parsed));
+      : appleMetadataProblem(p)).filter((p) => !/^host\.web\.(head(\[|: )|csp|cspReportOnly)/.test(p)).concat(webHeadProblems(parsed), webCspProblems(parsed), vendorPlistProblems(parsed));
   if (!problems.length) problems.push(...installProblems(parsed), ...gpuModuleProblems(parsed), ...documentTypeProblems(parsed), ...shareTargetProblems(parsed), ...protocolHandlerProblems(parsed), ...linkProblems(parsed), ...appIconProblems(parsed, dir), ...launchImageProblems(parsed, dir), ...variantProblems(parsed, dir));
   if (problems.length) throw new Error(`${path} does not conform to scripts/app.schema.json:\n  ${problems.join('\n  ')}`);
   nativeResourceMappings(parsed); nativeResourceMappings(parsed, 'ios');
@@ -627,8 +627,8 @@ function protocolHandlerProblems({ protocol_handlers = [], host }) {
 }
 /** The W3C keys of `app.json`, as the web builds write `manifest.json`
  * (LLP 1030 D2/D10; 1030.000 D7). A browser opens files only, so
- * `inode/directory` (the Apple bake's word for a folder) goes, and it
- * registers neither `http` nor `https`, so those handlers go too.
+ * `inode/directory` (the Apple bake's word for a folder) leaves each file handler, and one with nothing
+ * else goes; it registers neither `http` nor `https`, so those protocol handlers go too.
  * The themeable members take the W3C form (`schemeColours`, LLP 1163 D2): the
  * light colour as the base where it holds in a dark scheme too or a dark one is
  * named, the dark one under `color_scheme_dark`; a light colour named alone has
@@ -637,7 +637,7 @@ function protocolHandlerProblems({ protocol_handlers = [], host }) {
 export function webAppManifest(manifest, name, notes = [], dir = null) {
   const keys = ['name', 'short_name', 'description', 'id', 'start_url', 'display', 'display_override', 'theme_color', 'background_color', 'icons', 'lang', 'orientation', 'file_handlers', 'protocol_handlers', 'launch_handler', 'shortcuts', 'categories', 'handle_links', 'scope', 'scope_extensions'];
   let web = Object.fromEntries(keys.filter((k) => manifest[k] !== undefined).map((k) => [k, manifest[k]]));
-  if (web.file_handlers) web.file_handlers = web.file_handlers.filter((h) => !Object.keys(h.accept ?? {}).includes('inode/directory'));
+  if (web.file_handlers) web.file_handlers = web.file_handlers.map((h) => ({ ...h, accept: Object.fromEntries(Object.entries(h.accept ?? {}).filter(([type]) => type !== 'inode/directory')) })).filter((h) => Object.keys(h.accept).length);
   if (web.protocol_handlers) web.protocol_handlers = web.protocol_handlers.filter((h) => !isWebScheme(h.protocol));
   // A shortcut's `apple` and `android` words are the native bakes' (LLP 1133.023 D11).
   if (web.shortcuts) web.shortcuts = web.shortcuts.map(({ apple, android, ...item }) => item);
@@ -658,7 +658,7 @@ export function webAppManifest(manifest, name, notes = [], dir = null) {
   web.lang ??= 'en';
   return web;
 }
-export function nativeManifestMetadata(manifest, platform) { return {app:manifest.app,host:manifest.host?.[platform]??{},icons:manifest.icons??[],...(platform === 'ios' && manifest.color_scheme_dark?.icons ? {dark_icons:manifest.color_scheme_dark.icons} : {}),...(platform === 'ios' && manifest.alternate_icons?.length ? {alternate_icons:manifest.alternate_icons} : {}),...(manifest.frame_health ? {frame_health:manifest.frame_health} : {}),...(['macos','ios','android'].includes(platform) && manifest.protocol_handlers?.length ? {protocol_handlers:manifest.protocol_handlers} : {}),...(['ios','android'].includes(platform) && manifest.orientation ? {orientation:manifest.orientation} : {}),...(['macos','ios'].includes(platform) && ['light','dark'].includes(manifest.userInterfaceStyle) ? {userInterfaceStyle:manifest.userInterfaceStyle} : {}),...(['macos','ios'].includes(platform) && manifest.categories ? {categories:manifest.categories} : {}),...linkMetadata(manifest, platform)}; }
+export function nativeManifestMetadata(manifest, platform, target = '', env = process.env) { return {...(platform !== 'web' ? nativePackageConfig(manifest, configTarget(platform, target), env) : {}),app:manifest.app,host:manifest.host?.[platform]??{},icons:manifest.icons??[],...(platform === 'ios' && manifest.color_scheme_dark?.icons ? {dark_icons:manifest.color_scheme_dark.icons} : {}),...(platform === 'ios' && manifest.alternate_icons?.length ? {alternate_icons:manifest.alternate_icons} : {}),...(manifest.frame_health ? {frame_health:manifest.frame_health} : {}),...(['macos','ios','android'].includes(platform) && manifest.protocol_handlers?.length ? {protocol_handlers:manifest.protocol_handlers} : {}),...(['ios','android'].includes(platform) && manifest.orientation ? {orientation:manifest.orientation} : {}),...(['macos','ios'].includes(platform) && ['light','dark'].includes(manifest.userInterfaceStyle) ? {userInterfaceStyle:manifest.userInterfaceStyle} : {}),...(['macos','ios'].includes(platform) && manifest.categories ? {categories:manifest.categories} : {}),...linkMetadata(manifest, platform)}; }
 /** The link claims a binary bakes in (LLP 1038 D8): Apple's derived `applinks:` as signed, so a changed scope alone
  * changes only the origin's file; each Android filter's host and path, so a changed scope is a new APK. */
 const linkMetadata = (manifest, platform) => {
@@ -1130,7 +1130,7 @@ function completeBuild(app, platform, target, graph, messages, roots, env, prepa
     }
     const swift=JSON.parse(readFileSync(described,'utf8'));
     swiftTargetInputs(swift,packageRoot,platform==='ios'?'ExactIOS':'ExactMac',add);
-    add(resolve(packageRoot,'Package.swift'));add(resolve(packageRoot,'webarm/WebArm.swift'));add(resolve(packageRoot,'webarm/FrameBrowser.swift'));add(resolve(packageRoot,'webarm/FrameWindows.swift'));add(resolve(packageRoot,'webarm/FrameCapture.swift'));add(resolve(packageRoot,'webarm/FramePDF.swift'));add(resolve(packageRoot,'webarm/FrameAutomation.swift'));add(resolve(packageRoot,'webarm/FrameFiles.swift'));add(resolve(packageRoot,'webarm/FrameInspector.swift'));add(resolve(packageRoot,'webarm/FramePrint.swift'));add(resolve(packageRoot,'videoarm/VideoArm.swift'));add(resolve(packageRoot,'videoarm/PictureInPicture.swift'));add(resolve(packageRoot,'build.mjs'));add(resolve(packageRoot,'assets.mjs'));add(resolve(packageRoot,'bundle.mjs'));add(resolve(packageRoot,'extensions.mjs'));add(resolve(packageRoot,'widgets.mjs'));
+    add(resolve(packageRoot,'Package.swift'));add(resolve(packageRoot,'webarm/WebArm.swift'));add(resolve(packageRoot,'webarm/FrameBrowser.swift'));add(resolve(packageRoot,'webarm/FrameWindows.swift'));add(resolve(packageRoot,'webarm/FrameCapture.swift'));add(resolve(packageRoot,'webarm/FramePDF.swift'));add(resolve(packageRoot,'webarm/FrameAutomation.swift'));add(resolve(packageRoot,'webarm/FrameFiles.swift'));add(resolve(packageRoot,'webarm/FrameInspector.swift'));add(resolve(packageRoot,'webarm/FramePrint.swift'));add(resolve(packageRoot,'videoarm/VideoArm.swift'));add(resolve(packageRoot,'videoarm/PictureInPicture.swift'));add(resolve(packageRoot,'build.mjs'));add(resolve(packageRoot,'assets.mjs'));add(resolve(packageRoot,'bundle.mjs'));add(resolve(packageRoot,'extensions.mjs'));add(resolve(packageRoot,'widgets.mjs'));add(resolve(packageRoot,'intents.mjs'));add(resolve(packageRoot,'controls.mjs'));
     const entries=platform==='ios'&&(app.manifest.widgets?.length||app.manifest.live_activities?.length); if(entries)add(resolve(packageRoot,'widget'),true); if(entries||env.EXACT_WIDGET_GALLERY==='1')add(resolve(packageRoot,'Sources/ExactSnapshot'),true);
   }
   if(platform==='web') {
@@ -1159,7 +1159,7 @@ function completeBuild(app, platform, target, graph, messages, roots, env, prepa
   if (launchImage) add(resolve(app.dir, launchImage.src));
   const androidImage = platform === 'android' ? app.manifest.host?.android?.launchImage?.src : null; // a resource of the APK (`androidLaunch`)
   if (androidImage) add(resolve(app.dir, androidImage));
-  const metadata={...(appleAssetCatalogs.length ? {appleAssetCatalogs} : {}),...(launchImage ? {launchImage} : {}),...(nativeResources.length ? {nativeResources} : {}),...(env.EXACT_APPLE_EXTENSIONS!==undefined?{appleExtensions:env.EXACT_APPLE_EXTENSIONS.split(',').filter(Boolean)}:{}),...nativeManifestMetadata(app.manifest, platform),delivery:compat.delivery,store:compat.inputs.store,keys:compat.inputs.keys};
+  const metadata={...(appleAssetCatalogs.length ? {appleAssetCatalogs} : {}),...(launchImage ? {launchImage} : {}),...(nativeResources.length ? {nativeResources} : {}),...(env.EXACT_APPLE_EXTENSIONS!==undefined?{appleExtensions:env.EXACT_APPLE_EXTENSIONS.split(',').filter(Boolean)}:{}),...nativeManifestMetadata(app.manifest, platform, target, env),delivery:compat.delivery,store:compat.inputs.store,keys:compat.inputs.keys};
   const configuration={target,units:orderedBuild([...new Map(units.map(u=>[canonicalBuild(u),u])).values()]),builders:orderedBuild([...new Map(builders.map(u=>[canonicalBuild(u),u])).values()]),rustc:buildCommand('rustc',['-vV'],app,env).stdout,flags:{...Object.fromEntries(['RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','MACOSX_DEPLOYMENT_TARGET','IPHONEOS_DEPLOYMENT_TARGET','TVOS_DEPLOYMENT_TARGET','WATCHOS_DEPLOYMENT_TARGET'].map((k)=>[k,env[k]??null])),...(env.EXACT_WEB_LINK?{EXACT_WEB_LINK:env.EXACT_WEB_LINK}:{}),...(env.EXACT_WEB_SIZE?{EXACT_WEB_SIZE:env.EXACT_WEB_SIZE}:{})}};
   for (const captured of privacyManifests) {
     const name = nameOf(captured.path); inputs.delete(name); absent.delete(name);
@@ -1246,7 +1246,7 @@ export function buildBake(app, platform, target, options = {}) {
   let env=withHostDeployment({...process.env,...options.env});env.CARGO_TARGET_DIR=app.target;env.EXACT_BAKE_OUTPUT=options.output??bakeOutput(app,env);
   env.EXACT_RUST_BINDINGS = '1';
   const privacyManifests = apple ? [capturePrivacyManifest(resolve(app.dir, 'PrivacyInfo.xcprivacy'))] : [], watch = target.includes('apple-watchos');
-  if(platform==='web'||watch)env=webToolchainEnv(env,{linksWasm:target==='wasm32-unknown-unknown'&&!options.check});
+  if(platform==='web'||watch){env=webToolchainEnv(env,{linksWasm:target==='wasm32-unknown-unknown'&&!options.check});refuseStdLockfile(env,app.dir,app.name);}
   if(options.analysis && env.EXACT_UPDATE_TRUST==='production')env.EXACT_BAKE_ANALYSIS='1';else delete env.EXACT_BAKE_ANALYSIS;
   mkdirSync(env.EXACT_BAKE_OUTPUT,{recursive:true});
   if(platform!=='web')prepareLibrary(app.dir,target); // a package's library, fetched and checked before Cargo links it (LLP 1154 D3)

@@ -18,6 +18,7 @@
 //! `{"base64": …}`, as bytes cross the seam. Several sessions sharing one
 //! reader is the native registry's (D6), not this.
 
+use super::super::provenance::Cause;
 use super::super::{DataSource, Runner};
 use super::{CallOrigin, Decision, Json, ModulesRow, Waits};
 use serde_json::json;
@@ -41,7 +42,7 @@ struct Claim {
     hold: u64,
     declared: String,
     args: Json,
-    origin: CallOrigin,
+    cause: Cause,
 }
 
 /// A record's type whose `data` Contract writes as a string (Web NFC's
@@ -85,7 +86,7 @@ impl<D: DataSource> Runner<D> {
                         hold: h.hold,
                         declared: name.to_owned(),
                         args: h.args.clone(),
-                        origin: h.origin,
+                        cause: h.cause,
                     }
                 })
             })
@@ -485,7 +486,7 @@ impl<D: DataSource> Runner<D> {
         entry["scans"] = Json::Array(
             (self.claims(extension, &[&name("scan")]).iter())
                 .map(|c| {
-                    json!({ "ticket": c.hold, "origin": c.origin.word(), "once": c.args["once"] == true,
+                    json!({ "ticket": c.hold, "origin": c.cause.origin().word(), "once": c.args["once"] == true,
                         "suspended": suspended.contains(&c.token) })
                 })
                 .collect(),
@@ -495,7 +496,7 @@ impl<D: DataSource> Runner<D> {
             .last())
         .map_or(
             Json::Null,
-            |c| json!({ "ticket": c.hold, "name": c.declared, "origin": c.origin.word() }),
+            |c| json!({ "ticket": c.hold, "name": c.declared, "origin": c.cause.origin().word() }),
         );
         entry["readings"] = Json::Array(
             (self

@@ -29,6 +29,8 @@ mod memory_tests;
 #[cfg(all(test, not(windows)))]
 mod ordered_tests;
 mod rows;
+#[cfg(all(test, not(windows)))]
+mod stream_tests;
 mod svg;
 #[cfg(test)]
 mod tests;
@@ -418,6 +420,13 @@ impl Backend for Ink {
                 .map_err(|e| e.to_string());
         }
         Ok(None)
+    }
+    #[cfg(windows)]
+    fn keep_hidden_device(&self) -> Option<exact_ink::device::d3d11::Hidden> {
+        match &self.device {
+            Selected::D3d11(device) if !self.device_lost => device.keep_hidden(),
+            _ => None,
+        }
     }
     #[cfg(windows)]
     fn attach_window(

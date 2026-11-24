@@ -47,7 +47,8 @@ import { ANDROID_TARGET, ANDROID_ABIS, androidAbis, androidSdk, androidToolchain
 export { ANDROID_TARGET, androidSdk, androidToolchainEnv, androidHermesDir } from './android-abi.mjs';
 import { ANDROID_PAGE_SIZE, androidCargo } from './cargo-check.mjs';
 import { guardFlags, reportBuilt } from './help.mjs';
-import { androidImplementations, packageConfig } from '../js/bake/src/typescript.mjs';
+import { androidImplementations } from '../js/bake/src/typescript.mjs';
+import { packageConfigs, sourceString } from '../js/bake/src/package-config.mjs';
 import { recordBuiltSettings } from '../js/bake/src/__exact_env.mjs';
 import { androidProtocolHandlers, configMetaData, fragmentPermissions, manifestFragment, withAppLinks, withProtocolHandlers, withMetaData, withAuthCallbacks } from './android-manifest.mjs';
 import { androidLinkFilters, androidLinkNotes } from './links.mjs';
@@ -1087,16 +1088,17 @@ function assembleApk(app, env, profile, writeLocks, bundle, abis, dirs) {
   const bound = androidImplementations(app.dir, extensions);
   const maven = mavenCoordinates(app, bound);
   if (!writeLocks && !mavenLocksPresent(app, maven)) return null;
-  let config;
-  try { config = packageConfig(app.dir, 'android', { extensions, release: profile === 'release' }); } catch (error) { console.error(`${app.name}: ${error.message}`); return null; }
+  // A release profile or production trust is a release (package-config.mjs).
+  let config; const release = profile === 'release' || env.EXACT_UPDATE_TRUST === 'production';
+  try { config = packageConfigs(app.dir, 'android', { extensions, release, env, warn: (m) => console.warn(`${app.name}: ${m}`) }); configMetaData(config); } catch (error) { console.error(`${app.name}: ${error.message}`); return null; }
   // Firebase's options for an app that pushes (LLP 1133.004.000 D6). The file beside app.json needs no configuration
   // line, so the refusal is the push implementation's own rather than a `required` key's.
   let firebase = null;
   if (bound.some((b) => b.extension === 'push')) {
     const id = androidPackageId(app.manifest);
-    firebase = googleServices(app.dir, id, config.get('push')?.googleServices);
+    firebase = googleServices(app.dir, id, config.find((c) => c.extension === 'push')?.values.googleServices);
     const missing = `google-services.json from Firebase with a client whose package_name is ${id}, beside app.json or at the path app.json "packages": {"@exact/push": {"android": {"googleServices": "<path>"}}} names`;
-    if (!firebase && profile === 'release') { console.error(`${app.name}: push-google-services-missing: a release build that pushes needs a ${missing}`); return null; }
+    if (!firebase && release) { console.error(`${app.name}: push-google-services-missing: a release build that pushes needs a ${missing}`); return null; }
     if (!firebase) console.warn(`${app.name}: push is unavailable in this development build, which finds no ${missing} (a release build refuses it)`);
   }
   try { for (const abi of abis.slice(1)) bake(abi); }
@@ -1228,10 +1230,10 @@ export function coldGradleHome(env = process.env) {
 }
 
 /** What the modules the app uses add to the APK (LLP 1133.001 D4, D5; LLP 1133.002 D6): each bound implementation's
- * Kotlin with the roster that names them (`exact.app.ExactExtensions`, written here, never committed), and the
- * permissions the app's grant lines derive (the bake's `reach.android`) with those its names derive, and the
- * components its packages' manifest fragments declare with the meta-data `config` (`packageConfig`'s) carries, as
- * Gradle properties. */
+ * Kotlin with the roster that names them (`exact.app.ExactExtensions`, written here, never committed) and each one's
+ * configuration (`config`, `packageConfigs`', which `ExtensionContext.config` reads), and the permissions the app's
+ * grant lines derive (the bake's `reach.android`) with those its names derive, and the components its packages'
+ * manifest fragments declare with the meta-data the configuration fills, as Gradle properties. */
 function extensionArgs(app, out, config, bound, firebase, development) {
   const generated = resolve(apkDirs(app).app, 'extensions');
   rmSync(generated, { recursive: true, force: true });
@@ -1248,7 +1250,10 @@ function extensionArgs(app, out, config, bound, firebase, development) {
   // And what the module names the app calls derive beside their lines (`android_entry`'s `permissions.txt`, LLP 1133.018 D11).
   try { permissions = [...new Set([...permissions, ...readFileSync(resolve(out, 'permissions.txt'), 'utf8').split('\n').filter(Boolean)])].sort(); } catch { /* none */ }
   // And the normal permissions the packages' manifest fragments declare (LLP 1133.031 D12 item 1).
-  permissions = [...new Set([...permissions, ...fragmentPermissions(bound)])].sort();
+  // A live activity's notification asks to be promoted (Android 16's Live Updates, LLP 1126 D13): a normal
+  // permission, which the person can still turn off in Settings.
+  const promoted = reach?.androidActivities?.length ? ['android.permission.POST_PROMOTED_NOTIFICATIONS'] : [];
+  permissions = [...new Set([...permissions, ...fragmentPermissions(bound), ...promoted])].sort();
   if (bound.length) {
     mkdirSync(resolve(generated, 'exact/app'), { recursive: true });
     writeFileSync(resolve(generated, 'exact/app/ExactExtensions.kt'), ['// Written by scripts/agent-android.mjs (LLP 1133.001 D5); never edited.', 'package exact.app', '',
@@ -1259,19 +1264,17 @@ function extensionArgs(app, out, config, bound, firebase, development) {
       `    override val views: Map<String, String> = mapOf(${bound.flatMap((b) => (b.views ?? []).map((tag) => `${JSON.stringify(tag)} to ${JSON.stringify(b.extension)}`)).join(', ')})`,
       // The extensions made after the reader's first frame, not at their first call (LLP 1133.015 D16 item 1).
       `    override val startAtLoad: List<String> = listOf(${bound.filter((b) => b.start).map((b) => JSON.stringify(b.extension)).join(', ')})`,
+      // Each extension's configuration as JSON (LLP 1133.021 §9 item 7).
+      `    override val config: Map<String, String> = mapOf(${config.filter((c) => bound.some((b) => b.extension === c.extension) && Object.keys(c.values).length).map((c) => `${JSON.stringify(c.extension)} to ${sourceString(JSON.stringify(c.values), 'kotlin')}`).join(', ')})`,
       '}', ''].join('\n'));
   }
   // The queries and components the packages' manifest fragments declare, under the allow-list (LLP 1133.030 D9), with
-  // the app's privacy policy for an activity that shows it (LLP 1133.026 D4).
-  // And the meta-data the packages' configuration carries (LLP 1133.021 §9 item 7): the Maps key, read from the
-  // variable `app.json` names, never from the repo. A development build without it says so and builds.
-  for (const [name, targets] of Object.entries(app.manifest?.packages ?? {})) for (const [key, value] of Object.entries(targets?.android ?? {})) {
-    if (typeof value?.env === 'string' && !process.env[value.env] && config.has(name.split('/').at(-1))) console.warn(`${app.name}: ${value.env} is unset, so ${name}'s ${key} is absent from this development build (a release build refuses it)`);
-  }
+  // the app's privacy policy for an activity that shows it (LLP 1133.026 D4), and the vendor meta-data the packages'
+  // configuration fills (`configMetaData`).
   // The notification channels, strings, sounds and small icon (LLP 1133.004.000 D1, D3), and Firebase's options for
   // an app that pushes (D6), for an app that grants notifications, with the receiver that makes the channels again
   // when the app is updated.
-  const notify = androidNotificationResources(app.manifest, app.dir, resolve(apkDirs(app).app, 'notify/res'), { channels: reach?.androidChannels, locales: reach?.locales, base: reach?.base, firebase });
+  const notify = androidNotificationResources(app.manifest, app.dir, resolve(apkDirs(app).app, 'notify/res'), { channels: reach?.androidChannels, locales: reach?.locales, base: reach?.base, firebase, activities: reach?.androidActivities });
   if (notify && !notify.icon) console.warn(`${app.name}: app.json's icons have no "monochrome" one, so its notifications show the platform's generic glyph in the status bar; add a white glyph on a transparent background with "purpose": "monochrome"`);
   // The share target's and the protocol handlers' filters on the app's activity (LLP 1133.024 D5, LLP 1038 D8), inside
   // the same `<application>`. A production build is Android's distribution: it registers `distribution_only` handlers.

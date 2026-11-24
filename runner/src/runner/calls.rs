@@ -29,8 +29,18 @@
 //!   waiting is dropped, `refused`, `none` (`cancelled`); one dispatched
 //!   runs to its end, since its commit has landed and what it started is the
 //!   app's to finish, and its record says the caller left (`cancelled`).
+//!
+//! A **press** of a control (LLP 1126.004 D2) is the person's act, so it
+//! runs the same way as an invocation of origin `action`. The host names
+//! only the compiled control's kind and digest; the tool and its arguments,
+//! none for each optional parameter, are the plan's row. A digest not the
+//! plan's is refused `unavailable`, and a second press of a control while
+//! one waits or runs is refused `busy`. Its authority ends when its caller
+//! cancels it or it ends: work it started runs on as origin `action`, but
+//! is admitted no further name held to the person (LLP 1133.023 D7a,
+//! [`Runner::invocation_live`]).
 
-use super::provenance::CallOrigin;
+use super::provenance::{CallOrigin, Cause};
 use super::seams::Tools;
 use super::{CommitReceipt, DataSource, Runner, RunnerError};
 use serde_json::json;
@@ -89,6 +99,24 @@ struct Call {
     skipped: Vec<String>,
     /// Its caller cancelled it.
     cancelled: bool,
+    /// The row in the plan's `controls` a press came from.
+    control: Option<usize>,
+}
+
+impl<D: DataSource> Runner<D> {
+    /// Whether invocation `id` is the running call of a control's press.
+    pub(in crate::runner) fn press_running(&self, id: u64) -> bool {
+        (self.calls.current.as_ref()).is_some_and(|c| c.id == id && c.control.is_some())
+    }
+}
+
+impl Call {
+    fn origin(&self) -> CallOrigin {
+        match self.control {
+            Some(_) => CallOrigin::Action,
+            None => CallOrigin::Tool,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -97,9 +125,25 @@ pub(in crate::runner) struct Calls {
     current: Option<Call>,
     /// The calls that ended, for `state.intents` and the door's `called`.
     ended: VecDeque<Json>,
+    /// What the host's build offers of each control, by kind; none: it
+    /// offers none.
+    placements: Option<Json>,
 }
 
 impl<D: DataSource> Runner<D> {
+    /// The call `id` while it runs uncancelled within its bound.
+    fn live_call(&self, id: u64) -> Option<&Call> {
+        let c = self.calls.current.as_ref()?;
+        let live =
+            c.id == id && !c.cancelled && c.dispatched.is_some_and(|at| self.now_ms < at + BOUND);
+        live.then_some(c)
+    }
+
+    /// The control of press `id` while it runs uncancelled within its bound.
+    fn live_press(&self, id: u64) -> Option<usize> {
+        self.live_call(id)?.control
+    }
+
     /// Refuse `busy` each waiting call whose [`WAIT`] has run out, whether
     /// a wake, another call or the data source held it.
     fn expire_waiting_calls(&mut self) {
@@ -122,9 +166,14 @@ impl<D: DataSource> Runner<D> {
         if derive(tool.available) == Some(Some(&exact_plan::Value::Bool(false))) {
             return Ok(self.refuse_call("unavailable", "it is not available now"));
         }
-        if let Some(why) = self.face_refused(row, &door, call.how.digest.as_deref()) {
+        let refused = match call.control {
+            Some(i) => self.control_refused(i, call.how.digest.as_deref()),
+            None => self.face_refused(row, &door, call.how.digest.as_deref()),
+        };
+        if let Some(why) = refused {
             return Ok(self.refuse_call("unavailable", &why));
         }
+        let origin = call.origin();
         let action = self.plan.action(tool.action).clone();
         let mut fields = Vec::new();
         for p in action.params.iter() {
@@ -159,10 +208,13 @@ impl<D: DataSource> Runner<D> {
         let name = self.plan.str(tool.name).to_owned();
         let call = self.calls.current.as_mut().expect("a call");
         call.dispatched = Some(self.now_ms);
-        self.log(format!("tool:system:{door} {name} dispatched"));
-        let result = self.as_invocation(CallOrigin::Tool, id, |r| {
-            r.run_action(tool.action, args, &[])
-        });
+        let by = match call.control {
+            Some(i) => format!("control:{}", self.plan.str(self.plan.controls[i].kind)),
+            None => format!("tool:system:{door}"),
+        };
+        self.log(format!("{by} {name} dispatched"));
+        let cause = Cause::call(origin == CallOrigin::Action, id);
+        let result = self.as_cause(cause, |r| r.run_action(tool.action, args, &[]));
         match result {
             Ok(receipt) => Ok(Some(receipt)),
             Err(e) => {
@@ -199,6 +251,16 @@ impl<D: DataSource> Runner<D> {
             )),
             _ => None,
         }
+    }
+
+    /// Why control row `i` refuses a press whose installed control carries
+    /// `digest`: an entry another plan compiled (LLP 1126.004 D1).
+    fn control_refused(&self, i: usize, digest: Option<&str>) -> Option<String> {
+        let ours = self.plan.str(self.plan.controls[i].digest);
+        let given = digest.unwrap_or_default();
+        (given != ours).then(|| {
+            format!("control: the installed control's digest {given} is not the plan's {ours}")
+        })
     }
 
     /// The current call is refused before dispatch.
@@ -279,7 +341,8 @@ impl<D: DataSource> Runner<D> {
             "id": call.id,
             "tool": name,
             "door": call.how.door,
-            "origin": CallOrigin::Tool.word(),
+            "origin": call.origin().word(),
+            "control": call.control.map(|i| self.plan.str(self.plan.controls[i].kind)),
             "cold": call.how.cold,
             "outcome": outcome,
             "certainty": certainty,
@@ -332,9 +395,113 @@ impl<D: DataSource> Tools<D> for LinkedTools {
             dispatched: None,
             skipped: Vec::new(),
             cancelled: false,
+            control: None,
         });
         r.native_slot().changed("");
         Ok(id)
+    }
+
+    /// A press of control `kind` (module doc): queued with its tool's
+    /// optional parameters each none, or refused `busy` at once while the
+    /// same control's press waits or runs.
+    fn press_control(
+        &self,
+        r: &mut Runner<D>,
+        kind: &str,
+        digest: &str,
+        how: CallHow,
+    ) -> Result<u64, String> {
+        let plan = &r.plan;
+        let Some(i) = (plan.controls.iter()).position(|c| plan.str(c.kind) == kind) else {
+            return Err(format!("no control `{kind}`"));
+        };
+        let Some(tool) = plan.controls[i].tool else {
+            return Err(format!(
+                "control `{kind}` opens a location, which its host opens"
+            ));
+        };
+        // A binary whose bake placed its controls presses only those it offers.
+        if (r.calls.placements.as_ref()).is_some_and(|p| p[kind]["offered"].is_null()) {
+            return Err(format!("control `{kind}` is not offered by this binary"));
+        }
+        let tool = tool.0 as usize;
+        let action = plan.action(plan.tools[tool].action);
+        let args: serde_json::Map<String, Json> = (action.params.iter())
+            .map(|p| (plan.param(p).declared_name(plan).to_owned(), Json::Null))
+            .collect();
+        r.sample();
+        let id = r.next_invocation();
+        let call = Call {
+            id,
+            tool,
+            args: Json::Object(args),
+            how: CallHow {
+                door: "control".into(),
+                digest: Some(digest.into()),
+                ..how
+            },
+            arrived: r.now_ms,
+            dispatched: None,
+            skipped: Vec::new(),
+            cancelled: false,
+            control: Some(i),
+        };
+        let name = r.plan.str(r.plan.tools[tool].name).to_owned();
+        r.log(format!("control:{kind} {name}: pressed"));
+        let calls = &r.calls;
+        if (calls.waiting.iter().chain(&calls.current)).any(|c| c.control == Some(i)) {
+            let message = json!("it is already pressed");
+            r.log(format!(
+                "control:{kind} {name}: refused, busy (already pressed)"
+            ));
+            r.finish_call(call, "refused", "none", "busy", message);
+            return Ok(id);
+        }
+        r.calls.waiting.push_back(call);
+        r.native_slot().changed("");
+        Ok(id)
+    }
+
+    fn place_controls(&self, r: &mut Runner<D>, placements: Json) {
+        r.calls.placements = Some(placements);
+    }
+
+    /// `state.controls`: each control with what a press does and how this
+    /// host offers it, `absent` where its build placed nothing.
+    fn controls_state(&self, r: &Runner<D>) -> Option<Json> {
+        let plan = &r.plan;
+        if plan.controls.is_empty() {
+            return None;
+        }
+        let placed = r.calls.placements.as_ref();
+        let rows: Vec<Json> = (plan.controls.iter())
+            .map(|c| {
+                let kind = plan.str(c.kind);
+                let placement = match placed.map(|p| &p[kind]) {
+                    Some(Json::Null) | None => json!("absent"),
+                    Some(placed) => placed.clone(),
+                };
+                let mut row =
+                    json!({ "kind": kind, "digest": plan.str(c.digest), "placement": placement });
+                match c.tool {
+                    Some(t) => row["tool"] = json!(plan.str(plan.tools[t.0 as usize].name)),
+                    None => row["url"] = json!(plan.str(c.url)),
+                }
+                row
+            })
+            .collect();
+        Some(json!(rows))
+    }
+
+    fn call_live(&self, r: &Runner<D>, id: u64) -> bool {
+        r.live_call(id).is_some()
+    }
+
+    fn press_records(&self, r: &Runner<D>, id: u64) -> bool {
+        let (Some(control), Some(placed)) = (r.live_press(id), &r.calls.placements) else {
+            return false;
+        };
+        placed[r.plan.str(r.plan.controls[control].kind)]["offered"][0]["intent"] == "recording"
     }
 
     /// Whether a call is between dispatch and its end.
@@ -391,10 +558,11 @@ impl<D: DataSource> Tools<D> for LinkedTools {
     }
 
     /// Take off this commit's commands from `first` that a call does not
-    /// run, when the commit is the running call's (LLP 1111 D4a).
+    /// run, when the commit is a call's work (LLP 1111 D4a), after the call
+    /// too (LLP 1133.023 D7a).
     fn skip_in_call(&self, r: &mut Runner<D>, first: usize) {
-        let id = r.invocation_id();
-        if id == 0 || !(r.calls.current.as_ref()).is_some_and(|c| c.id == id) {
+        let cause = r.cause();
+        if !cause.is_call() {
             return;
         }
         let mut i = first;
@@ -406,8 +574,11 @@ impl<D: DataSource> Tools<D> for LinkedTools {
             }
             r.commands.remove(i);
             if SKIPPED.contains(&name.as_str()) {
-                let call = r.calls.current.as_mut().expect("a call");
-                call.skipped.push(name.clone());
+                // The running call's record says what it skipped.
+                let ours = |c: &&mut Call| c.id == cause.invocation() || c.id == cause.owner();
+                if let Some(call) = (r.calls.current.as_mut()).filter(ours) {
+                    call.skipped.push(name.clone());
+                }
                 r.log(format!("{name}: skipped in a tool call"));
             } else {
                 r.log(format!("{name}: refused: in a tool call"));
@@ -511,7 +682,7 @@ impl<D: DataSource> Tools<D> for LinkedTools {
             })
             .collect();
         let calls = &r.calls;
-        let open = |c: &Call, state: &str| json!({ "id": c.id, "tool": r.plan.str(r.plan.tools[c.tool].name), "door": c.how.door, "origin": "tool", "state": state });
+        let open = |c: &Call, state: &str| json!({ "id": c.id, "tool": r.plan.str(r.plan.tools[c.tool].name), "door": c.how.door, "origin": c.origin().word(), "state": state });
         let mut all: Vec<Json> = calls.ended.iter().cloned().collect();
         all.extend(calls.current.iter().map(|c| open(c, "running")));
         all.extend(calls.waiting.iter().map(|c| open(c, "waiting")));

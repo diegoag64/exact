@@ -220,7 +220,7 @@ export function netOptions(environment = process.env) {
 export function resolveDevice(host, flags, appId) {
   if ((host === 'ios' || host === 'host-ios') && flags.device) { const ph = phone(flags.phone); flags.phone = ph.udid; return `phone ${ph.udid}`; }
   if (host === 'ios' || host === 'host-ios') {
-    const sim = chooseSimulator(undefined, { app: host === 'host-ios' ? `${appId}.host` : appId, dir: resolveApp(flags.app).dir, hint: '--sim <udid|name> (or EXACT_SIM)' });
+    const sim = chooseSimulator(undefined, { app: host === 'host-ios' ? `${appId}.host` : appId, dir: resolveApp(flags.app).dir, cached: true, hint: '--sim <udid|name> (or EXACT_SIM)' });
     process.env.EXACT_SIM = sim.udid;
     return `simulator ${sim.udid}`;
   }
@@ -612,15 +612,15 @@ export function parseFlags(argv) {
     else if (argv[i] === '--time-zone') flags.timeZone = value();
     else if (argv[i] === '--epoch') flags.epoch = value();
     else if (argv[i] === '--live') flags.live = true;
+    else if (argv[i] === '--attach') flags.attach = /^\d+$/.test(argv[i + 1] ?? '') ? Number(argv[++i]) : true; // LLP 1012.000 D1: a running app, by PID when several
     else if (argv[i] === '--timing') flags.timing = value();
     else if (argv[i] === '--touch') flags.touch = value();
     else if (argv[i] === '--chrome') flags.chrome = value();
-    else if (argv[i] === '--phone') flags.phone = value();
+    else if (argv[i] === '--phone' || argv[i] === '--display') flags[argv[i].slice(2)] = value(); // --display: a Mac drive's window's display (LLP 1012, "where a driven Mac window opens")
     else if (argv[i] === '--sim') flags.sim = value();
     else if (argv[i] === '--variant') { process.env.EXACT_VARIANT = value(); delete process.env.EXACT_VARIANT_APP; }
     else if (argv[i] === '--storage') flags.storage = value();
-    else if (argv[i] === '--keep-storage') flags.keepStorage = true;
-    else if (argv[i] === '--reset-storage') flags.resetStorage = true;
+    else if (argv[i] === '--keep-storage' || argv[i] === '--reset-storage') flags[argv[i] === '--keep-storage' ? 'keepStorage' : 'resetStorage'] = true;
     else if (argv[i] === '--port') flags.port = value();
     // `trace --pid <pid>` asks a running development app for its trace; `trace --out <file>` writes it with its map joined (LLP 1142 D2, D5).
     else if (argv[i] === '--pid') flags.pid = value();

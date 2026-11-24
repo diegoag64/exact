@@ -7,7 +7,7 @@
 //! the boot uses them for a plan with none, whatever the binary links.
 //! The runner's methods that reach the seam are in `module_seam/forward.rs`.
 
-use super::provenance::CallOrigin;
+use super::provenance::{CallOrigin, Cause};
 use super::reply::response;
 use super::{AppState, CommitReceipt, DataError, DataSource, Runner, RunnerError, Target};
 use crate::request::{Answer, Dispatch, Outcome, Request, Work};
@@ -730,8 +730,8 @@ pub trait Modules<D: DataSource> {
     /// A handler's request came back: its turn resumes.
     fn tool_landed(&self, r: &mut Runner<D>, ticket: u64, outcome: Outcome) {}
 
-    /// The least privileged origin of a handler running now, if one is.
-    fn tool_origin(&self, r: &Runner<D>) -> Option<CallOrigin> {
+    /// The cause of the least privileged handler running now, if one is.
+    fn tool_cause(&self, r: &Runner<D>) -> Option<super::provenance::Cause> {
         None
     }
 
@@ -745,10 +745,10 @@ pub trait Modules<D: DataSource> {
         Vec::new()
     }
 
-    /// The origin the runner reported for view `id`'s displayed state, or for
-    /// its binding `prop`: what an acquisition the view makes is admitted
-    /// with (LLP 1133.008 D3).
-    fn view_origin(&self, r: &Runner<D>, id: ViewId, prop: Option<&str>) -> Option<CallOrigin> {
+    /// The cause of the commit that made view `id`'s displayed state, or
+    /// set its binding `prop`, as the runner reported it: what an
+    /// acquisition the view makes is admitted under (LLP 1133.008 D3).
+    fn view_origin(&self, r: &Runner<D>, id: ViewId, prop: Option<&str>) -> Option<Cause> {
         None
     }
 

@@ -95,6 +95,18 @@ impl<D: DataSource + Default> CanvasHost<D> {
         self.force |= self.p.reader_frame_loaded(id, key, session);
     }
 
+    /// The reader's iframe's `FrameNavigation` record (LLP 1020.002 D2).
+    pub fn frame_event(
+        &mut self,
+        id: u32,
+        key: exact_kernel::NodeKey,
+        session: u64,
+        event: &str,
+        record: &str,
+    ) {
+        self.force |= self.p.reader_frame_event(id, key, session, event, record);
+    }
+
     /// A media element's event or state (LLP 1042.001 D7), only for the
     /// session and allocation whose element the reader still holds.
     #[allow(clippy::too_many_arguments)]
@@ -137,6 +149,15 @@ impl<D: DataSource + Default> CanvasHost<D> {
             .host_mut()
             .runner_mut()
             .presence_reply(answer.as_bytes());
+        self.force = true;
+    }
+
+    /// What the reader reported of the live activities it shows
+    /// (`Activities.kt`, LLP 1126 D13): a send's answer, or the list.
+    pub fn activities(&mut self, json: &str) {
+        if let Some(error) = self.p.activities(json) {
+            self.p.host_mut().log(&error);
+        }
         self.force = true;
     }
 

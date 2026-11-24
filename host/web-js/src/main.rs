@@ -25,6 +25,7 @@ mod emit_tests;
 mod events;
 mod faces;
 mod facts;
+mod hoist;
 #[cfg(test)]
 mod input_tests;
 mod inspect;
@@ -90,7 +91,7 @@ impl std::ops::Deref for TestDir {
     }
 }
 
-const USAGE: &str = "usage: exact-web-js js <app.contract | app.plan> -o <dir> [--dump] [--sites] [--dev-reload] [--sizes] [--app <dir>] [--app-types] [--frame <file>]\n       exact-web-js normalize-grants <file>\n       exact-web-js design <app.contract> <design text file, or - for stdin>\n       exact-web-js design-serve <app.contract>\n       exact-web-js inspect-table <app.plan> <out.json>";
+const USAGE: &str = "usage: exact-web-js js <app.contract | app.plan> -o <dir> [--dump] [--sites] [--dev-reload] [--sizes] [--app <dir>] [--app-types] [--frame <file>]\n       exact-web-js normalize-grants <file>\n       exact-web-js design <app.contract> <design text file, or - for stdin>\n       exact-web-js design-serve <app.contract>\n       exact-web-js inspect-table <app.plan> <out.json>\n       exact-web-js declarations <app.plan> -o <dir> --app <dir> --rust-sources <JSON array> [--app-types]";
 
 /// `inspect-table <app.plan> <out.json>` (LLP 1122 T2b, the JS target): the
 /// plan's inspect table (inspect.rs), made when the dev loop is first asked
@@ -261,12 +262,14 @@ fn patched(plan: &exact_plan::Plan, values: &[(String, Vec<String>)]) -> Option<
 
 /// A selected entry calls the app's data module with its own source signatures.
 /// The module is authored against every source in the app, including widget refreshes.
+/// `rust_sources`: those a Rust module beside app.ts answers, which app.ts does not.
 fn write_declarations(
     dir: &std::path::Path,
     input: &str,
     app: Option<&str>,
     plan: &exact_plan::Plan,
     app_types: bool,
+    rust_sources: &[String],
 ) -> Result<(), String> {
     use std::path::{Path, PathBuf};
     let app = app.map(Path::new);
@@ -301,11 +304,31 @@ fn write_declarations(
         Some(app) => contract::snapshot::source_plan(&contract::snapshot::entries(app)?, data)?,
         None => data.clone(),
     };
-    let declarations = contract::typescript_exporting(&declared, exports.as_deref(), &[])?;
+    let declarations = contract::typescript_exporting(&declared, exports.as_deref(), rust_sources)?;
     std::fs::write(dir.join("app.contract.d.ts"), declarations).map_err(|e| e.to_string())
 }
 
+/// Makes stdout and stderr block again. A Bun parent that has written to a
+/// pipe it shares with this process can leave `O_NONBLOCK` on the pipe's file
+/// description; on Linux a burst of warnings then fails with `EAGAIN`, and
+/// `eprintln!` panics with nowhere left to say so (exit 101, a cut log).
+#[cfg(unix)]
+fn blocking_output() {
+    for fd in [libc::STDOUT_FILENO, libc::STDERR_FILENO] {
+        // SAFETY: F_GETFL and F_SETFL read and set flags of a descriptor this
+        // process owns; a closed one returns -1, which is skipped.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFL);
+            if flags >= 0 && flags & libc::O_NONBLOCK != 0 {
+                libc::fcntl(fd, libc::F_SETFL, flags & !libc::O_NONBLOCK);
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
+    #[cfg(unix)]
+    blocking_output();
     if let Err(e) = contract::root::find_for_executable() {
         eprintln!("exact-web-js: {e}");
         return ExitCode::from(2);
@@ -370,11 +393,16 @@ fn main() -> ExitCode {
         },
         None => None,
     };
+    let rust_sources = all
+        .iter()
+        .position(|a| a == "--rust-sources")
+        .and_then(|i| all.get(i + 1))
+        .map(|list| serde_json::from_str::<Vec<String>>(list));
     let mut skip = false;
     let args: Vec<String> = all
         .into_iter()
         .filter(|a| {
-            let option = matches!(a.as_str(), "--app" | "--frame");
+            let option = matches!(a.as_str(), "--app" | "--frame" | "--rust-sources");
             let dropped = skip || option;
             skip = option;
             !dropped
@@ -384,6 +412,36 @@ fn main() -> ExitCode {
                 && a != "--app-types"
         })
         .collect();
+    // Beside a Rust module, the declarations app.ts is checked against, from the plan this compiler wrote and the
+    // sources the module says it answers (host/web-js/module.mjs `moduleSources`), which app.ts does not.
+    if let ([cmd, plan, o, out], Some(rust_sources)) = (args.as_slice(), &rust_sources) {
+        if cmd == "declarations" && o == "-o" {
+            let written = rust_sources
+                .as_ref()
+                .map_err(|e| format!("--rust-sources: {e}"))
+                .and_then(|rust_sources| {
+                    let bytes = std::fs::read(plan).map_err(|e| format!("{plan}: {e}"))?;
+                    let decoded =
+                        exact_plan::Plan::decode(&bytes).map_err(|e| format!("{plan}: {e:?}"))?;
+                    let app = app.as_deref().ok_or("declarations requires --app <dir>")?;
+                    write_declarations(
+                        std::path::Path::new(out),
+                        plan,
+                        Some(app),
+                        &decoded,
+                        app_types,
+                        rust_sources,
+                    )
+                });
+            return match written {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("app.contract.d.ts: {e}");
+                    ExitCode::from(1)
+                }
+            };
+        }
+    }
     let (input, out, dump) = match args.as_slice() {
         [cmd, input, o, out] if cmd == "js" && o == "-o" => (input, out, false),
         [cmd, input, o, out, d] if cmd == "js" && o == "-o" && d == "--dump" => (input, out, true),
@@ -597,7 +655,7 @@ fn main() -> ExitCode {
                 eprintln!("app.bind.plan: {e}");
                 return ExitCode::from(1);
             }
-            if let Err(e) = write_declarations(dir, input, app.as_deref(), &plan, app_types) {
+            if let Err(e) = write_declarations(dir, input, app.as_deref(), &plan, app_types, &[]) {
                 eprintln!("app.contract.d.ts: {e}");
                 return ExitCode::from(1);
             }
@@ -613,6 +671,16 @@ fn main() -> ExitCode {
                 let map_path = dir.join("app.plan.map.json");
                 let _ = std::fs::remove_file(&map_path);
                 if let Some(map) = &map {
+                    let lookups = dir.join("contract-lookups.json");
+                    let paths: Vec<_> = map
+                        .resolution_paths()
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect();
+                    if let Err(e) = std::fs::write(&lookups, serde_json::json!(paths).to_string()) {
+                        eprintln!("{}: {e}", lookups.display());
+                        return ExitCode::from(1);
+                    }
                     if let Err(e) = std::fs::write(&map_path, map.json(&bytes)) {
                         eprintln!("app.plan.map.json: {e}");
                         return ExitCode::from(1);

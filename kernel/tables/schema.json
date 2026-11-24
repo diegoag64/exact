@@ -1507,7 +1507,7 @@
       "id": 218,
       "name": "symbolEffectValue",
       "kind": "str",
-      "_comment": "@ref LLP 1077 D12: a symbol's discrete effect (bounce, wiggle) plays each time this value changes, as SwiftUI's `.symbolEffect(_:value:)`."
+      "_comment": "@ref LLP 1077 D12: present, a symbol's effect plays in its discrete form, once each time this value changes, as SwiftUI's `.symbolEffect(_:value:)`; scale, which has no discrete form, runs while set."
     },
     {
       "id": 225,
@@ -2044,6 +2044,12 @@
       "name": "tipDone",
       "kind": "bool",
       "_comment": "@ref LLP 1035.006.000 D2: the person has done what the tip teaches. The platform retires the tip for good (TipKit's `invalidate(reason: .actionPerformed)`); it stays retired when this is false again or the app relaunches."
+    },
+    {
+      "id": 319,
+      "name": "portal",
+      "kind": "str",
+      "_comment": "@ref LLP 1013.002 D1, D2: the `id` of the element this one is shown in, appended after that element's own children; empty, it stays where it is declared. The runner places it with `SetChildren`, so the same live node moves and its declaration keeps its state and handlers; one whose destination is missing or cannot hold it is detached, alive and not shown. No host reads it."
     }
   ],
   "_enums": "Wire discriminant is the 0-based index. An unknown discriminant is a typed decode rejection, never a fallback. refused: keywords the wire carries and the compiler refuses an author, because no presenter builds them (LLP 1043.000 §3 D1); `contract vocab` lists the others. No wire reads it, so it is outside the digest.",
@@ -4635,7 +4641,10 @@
       "bit": 165,
       "field": "symbol_effect",
       "codec": "enum:SymbolEffect",
-      "_comment": "@ref LLP 1077 D12: not CSS. An SF Symbol effect: a continuing one (pulse, breathe, rotate, variable-color, scale) plays while set; a discrete one (bounce, wiggle) plays each time `symbolEffectValue` changes; replace plays when the source changes.",
+      "_comment": "@ref LLP 1077 D12: not CSS. An SF Symbol effect. With `symbolEffectValue`, one with a discrete form (all but scale) plays once each time the value changes; without it, one with an indefinite form runs while set (bounce, wiggle, breathe and rotate from iOS 18 and macOS 15); replace plays when the source changes. The web stands in for bounce, pulse and scale.",
+      "hosts": [
+        { "host": "painted", "fidelity": "none", "why": "no symbol effect is drawn; the symbol stays still" }
+      ],
       "cold": true
     },
     {
@@ -8966,11 +8975,11 @@
     ["header-padding-inline", "style length", 16],
     ["header-position", "style", "sticky"],
     ["header-top", "style length", 0],
-    ["grouped-ground", "style", "light-dark(#f2f2f7, #000000)", "-exact-grouped-background", "light-dark(#f2f2f7, #000000)", "-exact-background"],
-    ["grouped-ground-plain", "style", "light-dark(#ffffff, #000000)", "-exact-background", "light-dark(#ffffff, #000000)", "-exact-background"],
-    ["grouped-page-ground", "style", "-exact-grouped-background", "-exact-grouped-background", "-exact-grouped-background", "-exact-background"],
-    ["grouped-card-fill", "style", "light-dark(#ffffff, #1c1c1e)", "-exact-platform-color(macos exactGroupedCardColor, light-dark(#f9f9f9, #272727))", "light-dark(#ffffff, #1c1c1e)", "-exact-background"],
-    ["grouped-separator", "style", "-exact-separator", "light-dark(#efefef, #333333)", "-exact-separator", "-exact-separator"],
+    ["grouped-ground", "style", "light-dark(#f2f2f7, #000000)", "-exact-grouped-background", "light-dark(#f2f2f7, #000000)", "-exact-background", "-exact-background"],
+    ["grouped-ground-plain", "style", "light-dark(#ffffff, #000000)", "-exact-background", "light-dark(#ffffff, #000000)", "-exact-background", "-exact-background"],
+    ["grouped-page-ground", "style", "-exact-grouped-background", "-exact-grouped-background", "-exact-grouped-background", "-exact-background", "-exact-background"],
+    ["grouped-card-fill", "style", "light-dark(#ffffff, #1c1c1e)", "-exact-platform-color(macos exactGroupedCardColor, light-dark(#f9f9f9, #272727))", "light-dark(#ffffff, #1c1c1e)", "-exact-background", "-exact-background"],
+    ["grouped-separator", "style", "-exact-separator", "light-dark(#efefef, #333333)", "-exact-separator", "-exact-separator", "unset"],
     ["grouped-header-color", "style", "-exact-secondary-label", "-exact-label", "-exact-secondary-label", "-exact-label"],
     ["grouped-symbol-tint", "style", "AccentColor", "-exact-label", "AccentColor", "AccentColor"],
     ["grouped-checkmark-tint", "style", "AccentColor", "-exact-label", "AccentColor", "AccentColor"],
@@ -9001,26 +9010,27 @@
     ["grouped-edge-inset", "style length", "unset", 20, "unset", "unset"],
     ["grouped-edge-radius", "style length", "unset", 10, "unset", "unset"],
     ["grouped-card-corner-shape", "style", "unset", "-exact-continuous", "unset", "unset"],
-    ["grouped-edge-width", "style length", 1, 0, 1, 1],
+    ["grouped-edge-width", "style length", 1, 0, 1, 1, 0],
     ["grouped-separator-gap", "style length", "unset", 1, "unset", "unset"],
     ["grouped-separator-end", "style length", 0, 10, 0, 0],
-    ["grouped-row-min-height", "style length", 52, 36, 52, 52],
-    ["grouped-row-padding-block", "style length", "unset", 10, "unset", "unset"],
+    ["grouped-row-min-height", "style length", 52, 36, 52, 52, 56],
+    ["grouped-row-padding-block", "style length", "unset", 10, "unset", "unset", 8],
     ["grouped-row-inset", "style length", 16, 10, 16, 16],
     ["grouped-row-padding-end", "style length", 16, 10, 16, 16],
     ["grouped-swipe-margin", "style length", 0, 10, 0, 0],
     ["grouped-swipe-max-width", "style length", "unset", "calc(100% - 10px)", "unset", "unset"],
     ["grouped-swipe-padding", "style length", 16, 0, 16, 16],
     ["grouped-row-gap", "style length", 8, 8, 8, 8],
+    ["grouped-row-inline-gap", "style length", 8, 8, 8, 8, 16],
     ["grouped-value-gap", "style length", "-exact-accessibility-stack-gap", 8, "-exact-accessibility-stack-gap", "-exact-accessibility-stack-gap"],
-    ["grouped-stack-min-height", "style length", 52, 36, 52, 52],
-    ["grouped-stack-padding-block", "style length", 15, 10, 15, 15],
-    ["grouped-lines-padding-block", "style length", 15, 0, 15, 15],
+    ["grouped-stack-min-height", "style length", 52, 36, 52, 52, 72],
+    ["grouped-stack-padding-block", "style length", 15, 10, 15, 15, 8],
+    ["grouped-lines-padding-block", "style length", 15, 0, 15, 15, 0],
     ["grouped-stack-gap", "style length", 0, 3, 0, 0],
     ["grouped-subtitle-gap", "style length", "unset", 3, "unset", "unset"],
     ["grouped-symbol-width", "style length", "-exact-list-symbol-width", 16, "-exact-list-symbol-width", "-exact-list-symbol-width"],
     ["grouped-symbol-height", "style length", "-exact-list-symbol-height", 16, "-exact-list-symbol-height", "-exact-list-symbol-height"],
-    ["grouped-symbol-gap", "style length", "-exact-list-symbol-gap", 2, "-exact-list-symbol-gap", "-exact-list-symbol-gap"],
+    ["grouped-symbol-gap", "style length", "-exact-list-symbol-gap", 2, "-exact-list-symbol-gap", "-exact-list-symbol-gap", 0],
     ["grouped-symbol-lead", "style length", "-exact-list-symbol-lead", "unset", "-exact-list-symbol-lead", "-exact-list-symbol-lead"],
     ["grouped-chevron-width", "style length", "0.82em", 9, "0.82em", "0.82em"],
     ["grouped-chevron-height", "style length", "0.82em", 11, "0.82em", "0.82em"],
@@ -9031,7 +9041,8 @@
     ["grouped-field-align", "style", "unset", "right", "unset", "unset"],
     ["grouped-value-wrap", "style", "wrap", "nowrap", "wrap", "wrap"],
     ["grouped-button-appearance", "style", "none", "auto", "none", "none"],
-    ["grouped-button-min-height", "style length", 52, 24, 52, 52],
+    ["grouped-button-min-height", "style length", 52, 24, 52, 52, 56],
+    ["grouped-button-stack-min-height", "style length", 52, 24, 52, 52, 72],
     ["grouped-button-max-width", "style length", "calc(100% - 16px)", "calc(100% - 10px)", "calc(100% - 16px)", "calc(100% - 16px)"],
     ["grouped-button-max-width-pushed", "style length", "calc(100% - 16px)", "calc(100% - 12px)", "calc(100% - 16px)", "calc(100% - 16px)"],
     ["grouped-button-box-sizing", "style", "border-box", "content-box", "border-box", "border-box"],
@@ -9296,7 +9307,7 @@
     ["textarea", "FieldText", "exact", "exact", "exact", "exact", "exact", "none: the terminal draws no colour", "exact"],
     ["textarea", "placeholder", "exact", "exact", "exact", "exact", "exact", "none: the terminal draws no colour", "exact"]
   ],
-  "_textStyles": "@ref LLP 1115 D3: the platform's text styles, written `-exact-<name>` (or the WebKit alias) as a `font-size` and lowered from a heading's level. Each row: the name, WebKit's `-apple-system-*` alias or empty, UIFont's and NSFont's TextStyle, its weight in each column of the metric table (web, iOS, the Mac, neutral: the Mac's `headline` is bold, its `caption2` medium), the size at each body size in `textStyleBodies` (the root font size the host sets), and its leading in each column, a line height over the size, or null for `normal`, the face's own (LLP 1115.000 D12.2, measured with NSFont.preferredFont on macOS and UIFont.preferredFont on an iOS 27 simulator, where every style's line height is the face's natural one). The ramp is Apple's: 13 is the Mac's (NSFont.preferredFont, macOS 11), 14 to 53 iOS Dynamic Type's categories xSmall to AX5 (17 is Large, the default; the web's 16 reads Small's row). A root between two bodies interpolates; outside, the nearest row scales.",
+  "_textStyles": "@ref LLP 1115 D3: the platform's text styles, written `-exact-<name>` (or the WebKit alias) as a `font-size` and lowered from a heading's level. Each row: the name, WebKit's `-apple-system-*` alias or empty, UIFont's and NSFont's TextStyle, its weight in each column of the metric table (web, iOS, the Mac, neutral: the Mac's `headline` is bold, its `caption2` medium), the size at each body size in `textStyleBodies` (the root font size the host sets), and its leading in each column, a line height over the size, or null for `normal`, the face's own (LLP 1115.000 D12.2, measured with NSFont.preferredFont on macOS and UIFont.preferredFont on an iOS 27 simulator, where every style's line height is the face's natural one). The ramp is Apple's: 13 is the Mac's (NSFont.preferredFont, macOS 11), 14 to 53 iOS Dynamic Type's categories xSmall to AX5 (17 is Large, the default; the web's 16 reads Small's row). A root between two bodies interpolates; outside, the nearest row scales. Last, Android's Material look's (LLP 1115.001 D4's table): its `TypeScaleTokens` key in Compose Material 3 at the pinned version, its size and line height in sp and its weight, which `host/android/reference/tokens.mjs` checks against that source; the size scales with the root over 16, the font scale the host reports, and the leading is the line height over the size. Material's tracking is not drawn.",
   "textStyleBodies": [
     13,
     14,
@@ -9344,6 +9355,12 @@
         null,
         1.2308,
         null
+      ],
+      [
+        "DisplaySmall",
+        36,
+        44,
+        400
       ]
     ],
     [
@@ -9377,6 +9394,12 @@
         null,
         1.1818,
         null
+      ],
+      [
+        "HeadlineMedium",
+        28,
+        36,
+        400
       ]
     ],
     [
@@ -9410,6 +9433,12 @@
         null,
         1.2941,
         null
+      ],
+      [
+        "HeadlineSmall",
+        24,
+        32,
+        400
       ]
     ],
     [
@@ -9443,6 +9472,12 @@
         null,
         1.3333,
         null
+      ],
+      [
+        "TitleLarge",
+        22,
+        28,
+        400
       ]
     ],
     [
@@ -9476,6 +9511,12 @@
         null,
         1.2308,
         null
+      ],
+      [
+        "TitleMedium",
+        16,
+        24,
+        500
       ]
     ],
     [
@@ -9509,6 +9550,12 @@
         null,
         1.2308,
         null
+      ],
+      [
+        "BodyLarge",
+        16,
+        24,
+        400
       ]
     ],
     [
@@ -9542,6 +9589,12 @@
         null,
         1.25,
         null
+      ],
+      [
+        "BodyLarge",
+        16,
+        24,
+        400
       ]
     ],
     [
@@ -9575,6 +9628,12 @@
         null,
         1.2727,
         null
+      ],
+      [
+        "BodyMedium",
+        14,
+        20,
+        400
       ]
     ],
     [
@@ -9608,6 +9667,12 @@
         null,
         1.3,
         null
+      ],
+      [
+        "BodySmall",
+        12,
+        16,
+        400
       ]
     ],
     [
@@ -9641,6 +9706,12 @@
         null,
         1.3,
         null
+      ],
+      [
+        "LabelMedium",
+        12,
+        16,
+        500
       ]
     ],
     [
@@ -9674,6 +9745,12 @@
         null,
         1.3,
         null
+      ],
+      [
+        "LabelSmall",
+        11,
+        16,
+        500
       ]
     ]
   ]
