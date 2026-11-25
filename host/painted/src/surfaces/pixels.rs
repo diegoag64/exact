@@ -22,7 +22,30 @@ impl Surfaces {
     pub(crate) fn has_rendered_canvas(&self) -> bool {
         self.canvases
             .values()
+            .filter(|c| !Self::in_headset(c))
             .any(|c| self.abis.get(&c.artifact).is_some_and(|a| a.rendered))
+    }
+
+    /// The canvas a headset session draws: the primary module's first.
+    #[cfg(windows)]
+    pub(crate) fn headset_canvas(&self) -> Option<u32> {
+        self.canvases
+            .values()
+            .find(|c| {
+                c.artifact.is_empty() && self.abis.get(&c.artifact).is_some_and(|a| a.rendered)
+            })
+            .map(|c| c.id)
+    }
+
+    /// The headset's session draws this canvas (`headset.rs`): the window
+    /// neither reads it back nor keeps drawing frames for it.
+    #[cfg(windows)]
+    fn in_headset(canvas: &Canvas) -> bool {
+        canvas.artifact.is_empty() && super::headset::drawing()
+    }
+    #[cfg(not(windows))]
+    fn in_headset(_: &Canvas) -> bool {
+        false
     }
     pub(crate) fn pixels<D: DataSource>(
         &mut self,
@@ -34,7 +57,7 @@ impl Surfaces {
         let mut result = BTreeMap::new();
         let mut shown = Vec::new();
         for (&view, canvas) in &self.canvases {
-            if skip == Some(view) {
+            if skip == Some(view) || Self::in_headset(canvas) {
                 continue;
             }
             let Some(abi) = self.abis.get(&canvas.artifact).filter(|a| a.rendered) else {

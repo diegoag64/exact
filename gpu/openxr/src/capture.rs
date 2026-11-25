@@ -1,8 +1,8 @@
 //! The headset's debug eye capture and its per-second log line
 //! (`docs/quest.md`).
 
-use crate::java::{self, log};
 use crate::module::Module;
+use crate::platform::{self, log};
 use crate::pose::{self, Request};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
@@ -48,7 +48,7 @@ impl Capture {
             return;
         }
         self.since_poll = 0;
-        let dir = self.dir.get_or_insert_with(java::files_dir).clone();
+        let dir = self.dir.get_or_insert_with(platform::files_dir).clone();
         let Some(dir) = dir else { return };
         self.poll_hold(&dir);
         let trigger = dir.join(CAPTURE_TRIGGER);

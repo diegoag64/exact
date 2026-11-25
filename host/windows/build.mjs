@@ -16,6 +16,7 @@ import { guardFlags, reportBuilt } from '../../scripts/help.mjs';
 import { unclaimedNote } from '../../scripts/links.mjs';
 import { pickIcon, readPng, WINDOWS_ICON_SIZES, windowsIconRes } from '../../scripts/app-icons.mjs';
 import { syncStaticTree } from '../web/serve.mjs';
+import { stageOpenxrArtifactWindows, stageOpenxrLoaderWindows, wantsPcVr, writePcVrLauncher } from '../../scripts/windows-openxr.mjs';
 
 const quote = (s) => `'${String(s).replaceAll("'", "''")}'`;
 const powershell = (command) => spawnSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', command], { encoding: 'utf8', windowsHide: true });
@@ -156,8 +157,12 @@ if (import.meta.main) {
   const app = resolveApp(args.find((arg, i) => !arg.startsWith('--') && (outAt < 0 || i !== outAt + 1)));
   // Every build packages into one directory, with one set of libraries and one compat.json.
   if (app.manifest.variant) throw new Error(`variant ${app.manifest.variant.name}: Windows takes no variant (LLP 1030.008 §6); build without --variant or EXACT_VARIANT`);
-  prepareShaders(app.manifest);
   const target = bakeTarget('windows');
+  const pcVr = wantsPcVr(app.manifest);
+  if (pcVr && target !== 'x86_64-pc-windows-msvc') {
+    throw new Error('Windows PC VR packages require the x64 Windows target');
+  }
+  prepareShaders(app.manifest);
   const profile = args.includes('--release') ? 'release' : 'gpu-dev';
   const runtime = profile === 'release' ? windowsRuntime(target) : [];
   const trust = process.env.EXACT_UPDATE_TRUST ?? (profile === 'release' ? 'production' : 'development');
@@ -201,6 +206,14 @@ if (import.meta.main) {
     syncStaticTree(resolve(app.dir, name), resolve(output, name));
   }
   copyShaders(app, resolve(output, 'shaders'), {replace:true});
+  // PC VR (docs/quest.md, "PC VR on Windows"): the OpenXR artifact, the Khronos loader and the VR launcher, only
+  // where app.json asks; the game still opens flat unless launched with --vr.
+  if (pcVr) {
+    stageOpenxrArtifactWindows(output, { target, profile, env: process.env, targetDir: resolve(app.target, 'openxr') });
+    stageOpenxrLoaderWindows(output);
+    const launcher = writePcVrLauncher(output, windowsFile(app, exe.path));
+    console.log(`Windows: PC VR launcher ${launcher}`);
+  }
   writeFileSync(resolve(output, 'compat.json'), JSON.stringify(build.compat, null, 2) + '\n');
   writePackagedReceipt(app, build, output, runtime);
   console.log(`Windows: ${executable}`);

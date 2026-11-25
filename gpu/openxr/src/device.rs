@@ -6,9 +6,16 @@
 //! the [`VulkanProvider`] hooks here where the runtime must make or choose
 //! the Vulkan objects (`gpu/src/vulkan.rs`), and [`device_made`] makes the
 //! session on the device it wrapped.
+//!
+//! On a PC (`docs/quest.md`, "PC VR on Windows") [`open`] loads the Khronos
+//! loader beside the executable and asks the system's active runtime
+//! for its headset. The rest is
+//! the same.
 
-use crate::java::{self, log};
+#[cfg(target_os = "android")]
+use crate::java;
 use crate::module::{self, VulkanProvider};
+use crate::platform::{self, log};
 use crate::session::{Foveation, Headset, HEADSET};
 use openxr as xr;
 use std::ffi::{c_int, c_void};
@@ -18,6 +25,12 @@ use std::sync::OnceLock;
 struct Runtime {
     instance: xr::Instance,
     system: xr::SystemId,
+    /// The Touch Plus interaction profile to suggest bindings for, where
+    /// the instance has one (OpenXR 1.1, or `XR_META_touch_controller_plus`).
+    touch_plus: Option<&'static str>,
+    /// The runtime and the headset, as they name themselves.
+    #[cfg(windows)]
+    names: (String, String),
 }
 // SAFETY: OpenXR handles are usable from any thread; the hooks that use
 // them run one at a time, on the thread making the module's device.
@@ -39,6 +52,7 @@ fn vk_version(major: u32, minor: u32) -> u32 {
 /// Make the OpenXR instance and find the headset, and the provider the GPU
 /// module makes its device with. An error where there is no loader or no
 /// runtime (the app then draws to its window) or the runtime refused.
+#[cfg(target_os = "android")]
 pub(crate) fn open() -> Result<&'static VulkanProvider, String> {
     if let Some(provider) = PROVIDER.get() {
         return Ok(provider);
@@ -93,7 +107,7 @@ pub(crate) fn open() -> Result<&'static VulkanProvider, String> {
     let reqs = instance
         .graphics_requirements::<xr::Vulkan>(system)
         .map_err(|e| format!("graphics requirements: {e}"))?;
-    let switches = java::debug_switches();
+    let switches = platform::debug_switches();
     if !switches.trim().is_empty() {
         log(
             true,
@@ -104,19 +118,28 @@ pub(crate) fn open() -> Result<&'static VulkanProvider, String> {
         );
     }
     // Vulkan 1.1: multiview is core there.
-    let api = if java::debug_switch("vk13") {
+    let api = if platform::debug_switch("vk13") {
         vk_version(1, 3)
     } else {
         vk_version(1, 1)
     };
     let min = reqs.min_api_version_supported;
     let api = api.max(vk_version(min.major().into(), min.minor().into()));
-    let _ = RUNTIME.set(Runtime { instance, system });
-    Ok(PROVIDER.get_or_init(|| VulkanProvider {
+    let _ = RUNTIME.set(Runtime {
+        instance,
+        system,
+        touch_plus: None,
+    });
+    Ok(provider(api))
+}
+
+/// The provider, once: its Vulkan version and the hooks.
+fn provider(api: u32) -> &'static VulkanProvider {
+    PROVIDER.get_or_init(|| VulkanProvider {
         context: std::ptr::null_mut(),
         api_version: api,
         // Both eyes in one pass where the GPU can.
-        multiview_views: if java::debug_switch("no-multiview") {
+        multiview_views: if platform::debug_switch("no-multiview") {
             0
         } else {
             2
@@ -125,9 +148,153 @@ pub(crate) fn open() -> Result<&'static VulkanProvider, String> {
         physical_device,
         create_device,
         device_made,
-    }))
+    })
 }
 
+/// The PC's runtime: the Khronos loader beside the executable, the system's
+/// active runtime, its headset. Each refusal says what a person can do.
+#[cfg(windows)]
+pub(crate) fn open() -> Result<&'static VulkanProvider, String> {
+    if let Some(provider) = PROVIDER.get() {
+        return Ok(provider);
+    }
+    let dir = platform::exe_dir().ok_or("the executable's directory is unknown")?;
+    let loader = dir.join("openxr_loader.dll");
+    // SAFETY: the Khronos loader the PC VR package carries beside the
+    // executable; it opens the runtime the system names.
+    let entry = unsafe { xr::Entry::load_from(&loader, &()) }.map_err(|e| {
+        format!(
+            "the Khronos OpenXR loader did not load from {} ({e}); build the PC VR package again",
+            loader.display()
+        )
+    })?;
+    let available = entry.enumerate_extensions().map_err(|e| {
+        format!(
+            "no OpenXR runtime answered ({e}). Select VDXR in Virtual Desktop Streamer, or \
+             configure another Vulkan-capable OpenXR runtime"
+        )
+    })?;
+    if !available.khr_vulkan_enable2 {
+        return Err(
+            "the active OpenXR runtime has no XR_KHR_vulkan_enable2 (Vulkan), which \
+                    this build draws with. Select a Vulkan-capable OpenXR runtime, such as VDXR"
+                .into(),
+        );
+    }
+    let mut wanted = xr::ExtensionSet::default();
+    wanted.khr_vulkan_enable2 = true;
+    wanted.ext_local_floor = available.ext_local_floor;
+    wanted.fb_display_refresh_rate = available.fb_display_refresh_rate;
+    wanted.meta_touch_controller_plus = available.meta_touch_controller_plus;
+    wanted.ext_performance_settings = available.ext_performance_settings;
+    // OpenXR 1.1 where the runtime has it (Touch Plus is core there), else 1.0.
+    let make = |api| {
+        entry.create_instance(
+            &xr::ApplicationInfo {
+                application_name: "exact",
+                application_version: 1,
+                engine_name: "exact",
+                engine_version: 1,
+                api_version: api,
+            },
+            &wanted,
+            &[],
+            &(),
+        )
+    };
+    let (instance, api) = match make(xr::Version::new(1, 1, 0)) {
+        Ok(instance) => (instance, xr::Version::new(1, 1, 0)),
+        Err(xr::sys::Result::ERROR_API_VERSION_UNSUPPORTED) => (
+            make(xr::Version::new(1, 0, 34)).map_err(|e| format!("instance: {e}"))?,
+            xr::Version::new(1, 0, 34),
+        ),
+        Err(e) => return Err(format!("the OpenXR runtime refused an instance: {e}")),
+    };
+    let runtime = instance
+        .properties()
+        .map(|p| format!("{} {}", p.runtime_name, p.runtime_version))
+        .unwrap_or_else(|_| "the OpenXR runtime".into());
+    log(false, &format!("runtime {runtime}, OpenXR {api}"));
+    let system = match instance.system(xr::FormFactor::HEAD_MOUNTED_DISPLAY) {
+        Ok(system) => system,
+        Err(xr::sys::Result::ERROR_FORM_FACTOR_UNAVAILABLE) => {
+            let how = if runtime.contains("VirtualDesktop") {
+                "put on the Quest, open Virtual Desktop there and connect to this PC (Virtual \
+                 Desktop Streamer must be running here), then try again"
+            } else {
+                "connect the headset in the runtime's app and try again"
+            };
+            return Err(format!("{runtime} sees no headset: {how}"));
+        }
+        Err(e) => return Err(format!("{runtime} found no headset: {e}")),
+    };
+    let headset = instance
+        .system_properties(system)
+        .map(|p| p.system_name)
+        .unwrap_or_else(|_| "a headset".into());
+    log(false, &format!("headset {headset}"));
+    let reqs = instance
+        .graphics_requirements::<xr::Vulkan>(system)
+        .map_err(|e| format!("Vulkan graphics requirements: {e}"))?;
+    log(
+        false,
+        &format!(
+            "Vulkan wanted {}..{}",
+            reqs.min_api_version_supported, reqs.max_api_version_supported
+        ),
+    );
+    if let Ok(views) = instance
+        .enumerate_view_configuration_views(system, xr::ViewConfigurationType::PRIMARY_STEREO)
+    {
+        for (eye, v) in ["left", "right"].iter().zip(&views) {
+            log(
+                false,
+                &format!(
+                    "{eye} eye recommended {}x{} ({} samples), max {}x{} ({} samples)",
+                    v.recommended_image_rect_width,
+                    v.recommended_image_rect_height,
+                    v.recommended_swapchain_sample_count,
+                    v.max_image_rect_width,
+                    v.max_image_rect_height,
+                    v.max_swapchain_sample_count
+                ),
+            );
+        }
+    }
+    let switches = platform::debug_switches();
+    if !switches.trim().is_empty() {
+        log(
+            true,
+            &format!(
+                "debug switches: {}",
+                switches.split_whitespace().collect::<Vec<_>>().join(" ")
+            ),
+        );
+    }
+    let vk = if platform::debug_switch("vk13") {
+        vk_version(1, 3)
+    } else {
+        vk_version(1, 1)
+    };
+    let min = reqs.min_api_version_supported;
+    let vk = vk.max(vk_version(min.major().into(), min.minor().into()));
+    let touch_plus = if api.minor() >= 1 {
+        Some("/interaction_profiles/meta/touch_plus_controller")
+    } else if wanted.meta_touch_controller_plus {
+        Some("/interaction_profiles/meta/touch_controller_plus")
+    } else {
+        None
+    };
+    let _ = RUNTIME.set(Runtime {
+        instance,
+        system,
+        touch_plus,
+        names: (runtime, headset),
+    });
+    Ok(provider(vk))
+}
+
+#[cfg(target_os = "android")]
 fn load_entry(platform: &xr::AndroidPlatformInfo) -> Result<xr::Entry, String> {
     // SAFETY: the Khronos loader the APK packages beside this artifact.
     match unsafe { xr::Entry::load_from(std::path::Path::new("libopenxr_loader.so"), platform) } {
@@ -155,14 +322,21 @@ fn vulkan<T>(stage: &str, made: xr::Result<Result<T, i32>>) -> Result<T, c_int> 
     match made {
         Ok(Ok(made)) => Ok(made),
         Ok(Err(code)) => {
-            log(true, &format!("Vulkan {stage}: VkResult {code}"));
+            refused(&format!("Vulkan {stage}: VkResult {code}"));
             Err(code)
         }
         Err(e) => {
-            log(true, &format!("Vulkan {stage}: {e}"));
+            refused(&format!("Vulkan {stage}: {e}"));
             Err(FAILED)
         }
     }
+}
+
+/// A hook refused: logged, and kept as what the host tells the person (the
+/// module then makes its ordinary device, `gpu/src/native.rs`).
+fn refused(why: &str) {
+    log(true, why);
+    crate::session::set_status(why);
 }
 
 unsafe extern "C" fn create_instance(
@@ -210,7 +384,7 @@ unsafe extern "C" fn physical_device(_: *mut c_void, instance: u64, out: *mut u6
             0
         }
         Err(e) => {
-            log(true, &format!("Vulkan physical device: {e}"));
+            refused(&format!("Vulkan physical device: {e}"));
             FAILED
         }
     }
@@ -281,7 +455,7 @@ unsafe extern "C" fn device_made(
     let (session, waiter, stream) = match made {
         Ok(made) => made,
         Err(e) => {
-            log(true, &format!("session: {e}"));
+            refused(&format!("session: {e}"));
             return FAILED;
         }
     };
@@ -298,14 +472,14 @@ unsafe extern "C" fn device_made(
         }),
         _ => None,
     };
-    let controls = match crate::controls::Controls::new(&rt.instance, &session) {
+    let controls = match crate::controls::Controls::new(&rt.instance, &session, rt.touch_plus) {
         Ok(controls) => Some(controls),
         Err(e) => {
             log(true, &format!("controllers: {e}; the canvas hears none"));
             None
         }
     };
-    *HEADSET.lock().unwrap_or_else(|e| e.into_inner()) = Some(Headset::new(
+    let headset = Headset::new(
         rt.instance.clone(),
         rt.system,
         session,
@@ -314,10 +488,18 @@ unsafe extern "C" fn device_made(
         exts.fb_display_refresh_rate,
         foveation,
         controls,
-    ));
+    );
+    #[cfg(windows)]
+    let headset = {
+        let mut headset = headset;
+        headset.names = rt.names.clone();
+        headset
+    };
+    *HEADSET.lock().unwrap_or_else(|e| e.into_inner()) = Some(headset);
     if let Some(module) = module::get() {
         module.set_headset(true);
     }
     log(false, "session made; waiting for READY");
+    crate::session::made();
     0
 }

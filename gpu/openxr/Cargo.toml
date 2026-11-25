@@ -1,23 +1,22 @@
-# The OpenXR host for a Meta Quest app (docs/quest.md), as its own artifact:
-# `libexact_openxr.so`, which only a Quest APK packages and the Android host
-# loads where it is packaged. It reaches the GPU module through the module's
-# C exports alone (gpu/src/vulkan.rs), so it links neither the module nor
-# wgpu, and the module carries no OpenXR.
+# The OpenXR host artifact for Meta Quest and Windows PC VR (docs/quest.md).
+# It reaches the GPU module through the module's C exports (gpu/src/vulkan.rs).
 [package]
 name = "exact-openxr"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "The OpenXR host artifact for Meta Quest: session, controllers and eye capture"
+description = "OpenXR sessions, controllers, and eye capture for Meta Quest and Windows"
 publish = false
 
 [lib]
 name = "exact_openxr"
 crate-type = ["cdylib"]
 
-[target.'cfg(target_os = "android")'.dependencies]
+[target.'cfg(any(target_os = "android", windows))'.dependencies]
 # The OpenXR bindings; the Khronos loader is opened at run time, packaged
-# beside this artifact by the APK.
+# beside this artifact.
 openxr = { version = "0.22", default-features = false, features = ["loaded"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
 # To hand the runtime the activity and find the app's files.
 jni-sys = "0.3"

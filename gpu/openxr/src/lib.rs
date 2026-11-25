@@ -23,30 +23,47 @@
 //!    drawn into the headset (paced by the headset's frame) and any other
 //!    drawn nowhere.
 //!
+//! On Windows (`docs/quest.md`, "PC VR on Windows") the same artifact is
+//! `exact_openxr.dll`, which a PC VR package carries beside the Khronos
+//! loader (`openxr_loader.dll`) and the Windows host loads only when VR is
+//! asked for (`--vr`, `EXACT_XR=1`). The host calls `xr_open` and
+//! `xr_render` as above (no `xr_android_init`), and `xr_state` and
+//! `xr_status` to say what happened: whether a session draws, and why not.
+//!
 //! The pieces that need no headset (each eye's matrices, the capture's
 //! trigger grammar and PNG writer, the controllers' debug script) build and
-//! test on every host; the rest is Android's.
+//! test on every host; the rest is Android's and Windows'.
 #![allow(unsafe_code)]
 
 pub mod pose;
 pub mod script;
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", windows))]
 mod capture;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", windows))]
 mod controls;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", windows))]
 mod device;
 #[cfg(target_os = "android")]
 mod java;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", windows))]
 mod module;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", windows))]
 mod session;
 
+/// Where the debug files are, the switches and the log: the app's Java
+/// side on a Quest, the executable's directory on a PC.
 #[cfg(target_os = "android")]
+use java as platform;
+#[cfg(windows)]
+mod desktop;
+#[cfg(windows)]
+use desktop as platform;
+
+#[cfg(any(target_os = "android", windows))]
 mod exports {
-    use crate::java::log;
+    use crate::platform::log;
+    #[cfg(target_os = "android")]
     use std::ffi::c_void;
     use std::panic::{catch_unwind, AssertUnwindSafe};
 
@@ -55,6 +72,7 @@ mod exports {
     /// # Safety
     /// `env` is the calling thread's live `JNIEnv*`, `vm` the process's
     /// `JavaVM*` and `context` a live reference to the application `Context`.
+    #[cfg(target_os = "android")]
     #[no_mangle]
     pub unsafe extern "C" fn xr_android_init(
         vm: *mut c_void,
@@ -87,7 +105,7 @@ mod exports {
         let opened = catch_unwind(|| {
             let module = crate::module::bind(&path)?;
             let provider = crate::device::open()?;
-            module.set_debug_switches(crate::java::debug_switches());
+            module.set_debug_switches(crate::platform::debug_switches());
             module.set_provider(provider);
             Ok::<_, String>(())
         });
@@ -95,10 +113,12 @@ mod exports {
             Ok(Ok(())) => 0,
             Ok(Err(e)) => {
                 log(true, &format!("{e}: the app draws to its window"));
+                crate::session::set_status(&e);
                 1
             }
             Err(_) => {
                 log(true, "xr_open panicked: the app draws to its window");
+                crate::session::set_status("the OpenXR artifact failed while opening the runtime");
                 1
             }
         }
@@ -122,5 +142,33 @@ mod exports {
                 -1
             }
         }
+    }
+
+    /// Whether a headset session draws: 0 none was made (or `xr_open` was
+    /// not called or refused), 1 one was made and does not run yet (or
+    /// stopped), 2 it runs, 3 it runs with the input focus, 4 it ended or
+    /// was lost (the window draws the canvas again).
+    #[cfg(windows)]
+    #[no_mangle]
+    pub extern "C" fn xr_state() -> u32 {
+        catch_unwind(crate::session::state).unwrap_or(0)
+    }
+
+    /// The last thing the session says a person should know (why no
+    /// session was made, or what it does now), UTF-8, copied into `out` up
+    /// to `cap` bytes; its whole length.
+    ///
+    /// # Safety
+    /// `out` is `cap` writable bytes, or null with `cap` 0.
+    #[cfg(windows)]
+    #[no_mangle]
+    pub unsafe extern "C" fn xr_status(out: *mut u8, cap: usize) -> usize {
+        let text = crate::session::status();
+        let n = text.len().min(cap);
+        if n > 0 && !out.is_null() {
+            // SAFETY: the caller's contract.
+            unsafe { std::ptr::copy_nonoverlapping(text.as_ptr(), out, n) };
+        }
+        text.len()
     }
 }

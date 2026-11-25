@@ -1481,7 +1481,7 @@ pub use headset::{debug_applied, debug_switch, headset, set_debug_switches, set_
 pub mod fixture;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", windows))]
 pub mod vulkan;
 #[cfg(target_arch = "wasm32")]
 pub mod web;

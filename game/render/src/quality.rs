@@ -166,7 +166,7 @@ pub(crate) fn unresolved_scale(game: f32) -> f32 {
 /// before a binding resolved the rung.
 pub(crate) fn samples(rung: Option<Rung>, game: SceneSamples) -> u32 {
     let wanted = rung.map_or(game, |rung| rung.samples(game));
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", windows))]
     if rung.is_some_and(|r| r.xr)
         && exact_gpu::vulkan::stereo_msaa_two()
         && (wanted == SceneSamples::Two || exact_gpu::debug_switch("msaa-2"))

@@ -35,6 +35,7 @@ use frames::{next_frame_deadline, presentation_resumes, FrameSchedule};
 
 struct App<D: DataSource> {
     service_causes: u8,
+    headset_frame_active: bool,
     proxy: EventLoopProxy<crate::accessibility::Event>,
     accessibility: Option<crate::accessibility::Access>,
     name: String,
@@ -325,6 +326,7 @@ pub(super) fn run<D: DataSource + Default + 'static, const DEVELOPMENT: bool>(
     });
     let state = App::<D> {
         service_causes: 0,
+        headset_frame_active: false,
         proxy,
         accessibility: None,
         name: name.to_owned(),
@@ -496,6 +498,10 @@ impl<D: DataSource + Default + 'static> App<D> {
         let frame_started = Instant::now();
         if self.frames == 0 {
             boot_phase("first-draw-entered");
+        }
+        if self.pause_desktop_in_vr() {
+            self.redraw_pending = true;
+            return Ok(());
         }
         // A hidden window takes no present (`lifecycle::unshown_first_pixel`).
         if self.unseen() {

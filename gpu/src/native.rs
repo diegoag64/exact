@@ -133,6 +133,21 @@ fn create_gpu(
     if let Some(made) = crate::vulkan::create_gpu(requirements) {
         return made;
     }
+    // On a PC (docs/quest.md, "PC VR on Windows") a provider that refused
+    // leaves the window its ordinary device: the provider is cleared and
+    // the reason logged, and the host hears that no session was made.
+    #[cfg(windows)]
+    match crate::vulkan::create_gpu(requirements) {
+        Some(Ok(gpu)) => return Ok(gpu),
+        Some(Err(e)) => {
+            crate::vulkan::log(&format!(
+                "the headset's device failed ({e}); the window makes its own"
+            ));
+            // SAFETY: null clears the provider.
+            unsafe { crate::vulkan::set_provider(std::ptr::null()) };
+        }
+        None => {}
+    }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
         flags: crate::device::instance_flags(),
@@ -841,8 +856,8 @@ pub fn error() -> String {
     with(|m| m.take_error()).unwrap_or_default()
 }
 
-/// The external Vulkan seams' exports are Android's alone (`vulkan.rs`).
-#[cfg(not(target_os = "android"))]
+/// The external Vulkan seams' exports are Android's and Windows' (`vulkan.rs`).
+#[cfg(not(any(target_os = "android", windows)))]
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __vulkan_exports {

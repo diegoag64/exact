@@ -1,5 +1,5 @@
 //! A device and a render target from outside the module, on Vulkan
-//! (Android): the seams through which a separately loaded artifact that owns
+//! (Android, and a PC's OpenXR runtime on Windows): the seams through which a separately loaded artifact that owns
 //! the Vulkan objects reaches the module. The OpenXR artifact (`gpu/openxr`,
 //! `docs/quest.md`) uses them: the headset's runtime makes the instance and
 //! the device, and lends each frame's swapchain image.
@@ -22,7 +22,9 @@ pub use msaa::stereo_msaa_two;
 use crate::{native, DeviceFailure, DeviceFailureKind, Gpu, XrStereo};
 use ash::vk::{self, Handle as _};
 use std::cell::RefCell;
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_char, c_int, c_void};
+#[cfg(target_os = "android")]
+use std::ffi::{CStr, CString};
 use std::sync::Mutex;
 
 /// The hooks that make the module's Vulkan objects, in C layout. Each
@@ -164,6 +166,9 @@ fn make(
         )
     }
     .map_err(|e| failure("wgpu instance", e))?;
+    // Exact's Android shaders opt into Adreno's f16 arithmetic
+    // (`device.rs`); a PC's device keeps the window's f32.
+    #[cfg(target_os = "android")]
     hal_instance.enable_f16_arithmetic();
 
     let mut raw_physical = 0u64;
@@ -200,7 +205,13 @@ fn make(
     if features.contains(wgpu::Features::MULTISAMPLE_ARRAY) {
         features |= exposed.features & wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES;
     }
-    let memory_hints = wgpu::MemoryHints::MemoryUsage;
+    // A phone's small first blocks (`device.rs`, `memory_hints`); a PC's
+    // device takes the desktop's.
+    let memory_hints = if cfg!(target_os = "android") {
+        wgpu::MemoryHints::MemoryUsage
+    } else {
+        wgpu::MemoryHints::Performance
+    };
     let device_extensions = exposed.adapter.required_device_extensions(features);
     let mut device_features = exposed
         .adapter
@@ -306,7 +317,22 @@ fn make(
     })
 }
 
+/// The device's Android API level, which wgpu-hal's Vulkan instance takes;
+/// none on a PC.
+#[cfg(not(target_os = "android"))]
+fn sdk_version() -> u32 {
+    0
+}
+
+/// One line to the PC host's standard error, as `exact-xr:` (the OpenXR
+/// artifact keeps its own log file, `docs/quest.md`, "PC VR on Windows").
+#[cfg(not(target_os = "android"))]
+pub(crate) fn log(line: &str) {
+    eprintln!("exact-xr: {line}");
+}
+
 /// The device's Android API level, which wgpu-hal's Vulkan instance takes.
+#[cfg(target_os = "android")]
 fn sdk_version() -> u32 {
     let mut value = [0 as c_char; 92];
     // SAFETY: PROP_VALUE_MAX is 92 bytes, NUL included.
@@ -322,6 +348,7 @@ fn sdk_version() -> u32 {
         .unwrap_or(0)
 }
 
+#[cfg(target_os = "android")]
 #[link(name = "log")]
 extern "C" {
     fn __android_log_write(prio: c_int, tag: *const c_char, text: *const c_char) -> c_int;
@@ -329,6 +356,7 @@ extern "C" {
 }
 
 /// One line to logcat under the headset's tag, `exact-xr` (info).
+#[cfg(target_os = "android")]
 pub(crate) fn log(line: &str) {
     let text = CString::new(line.replace('\0', " ")).unwrap_or_default();
     // SAFETY: two NUL-terminated strings.

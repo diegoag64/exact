@@ -22,11 +22,11 @@ pub fn debug_switch(name: &str) -> bool {
 /// took effect, so a measurement can confirm what the engine applied
 /// (`docs/quest.md`, "Debug switches"); nothing elsewhere.
 pub fn debug_applied(line: &str) {
-    #[cfg(target_os = "android")]
+    #[cfg(any(target_os = "android", windows))]
     if headset() {
         crate::vulkan::log(&format!("applied: {line}"));
     }
-    #[cfg(not(target_os = "android"))]
+    #[cfg(not(any(target_os = "android", windows)))]
     let _ = line;
 }
 /// Set by a headset host while its session draws this module's canvas

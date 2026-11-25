@@ -11,10 +11,12 @@
 //! ticks once per headset frame, on its predicted display time.
 
 use crate::capture::{Capture, Perf};
-use crate::java::{self, log};
 use crate::module::{Module, StereoTarget, USAGE_ALL};
+use crate::platform::{self, log};
 use crate::pose::{fov_projection, pose_view};
 use openxr as xr;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -22,8 +24,54 @@ use std::time::{Duration, Instant};
 /// world units).
 const NEAR: f32 = 0.05;
 const FAR: f32 = 200.0;
-/// The display rate asked for (`XR_FB_display_refresh_rate`).
+/// The display rate asked for (`XR_FB_display_refresh_rate`): a Quest's
+/// own 72 Hz, a PC's ordinary 90 Hz.
+#[cfg(target_os = "android")]
 const REFRESH_HZ: f32 = 72.0;
+#[cfg(not(target_os = "android"))]
+const REFRESH_HZ: f32 = 90.0;
+
+// ---------------------------------------------------------------- what the host hears
+
+/// `xr_state`'s answer (`lib.rs`): 0 no session, 1 made, 2 running, 3
+/// focused, 4 ended.
+#[cfg(windows)]
+static STATE: AtomicU32 = AtomicU32::new(0);
+/// `xr_status`'s text: what a person should know now.
+#[cfg(windows)]
+static STATUS: Mutex<String> = Mutex::new(String::new());
+
+#[cfg(windows)]
+pub(crate) fn state() -> u32 {
+    STATE.load(Ordering::Relaxed)
+}
+
+#[cfg(windows)]
+pub(crate) fn status() -> String {
+    STATUS.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
+pub(crate) fn set_status(text: &str) {
+    #[cfg(windows)]
+    {
+        *STATUS.lock().unwrap_or_else(|e| e.into_inner()) = text.to_owned();
+    }
+    #[cfg(not(windows))]
+    let _ = text;
+}
+
+fn set_state(state: u32) {
+    #[cfg(windows)]
+    STATE.store(state, Ordering::Relaxed);
+    #[cfg(not(windows))]
+    let _ = state;
+}
+
+/// The session was made on the module's device (`device.rs`).
+pub(crate) fn made() {
+    set_state(1);
+    set_status("the headset session was made; waiting for the runtime to show it");
+}
 
 // ---------------------------------------------------------------- the headset
 
@@ -58,6 +106,16 @@ pub(crate) struct Headset {
     last_frame_ms: Option<f64>,
     /// The canvas refused its input once (logged once).
     refused_input: bool,
+    /// The runtime and the headset as they name themselves (a PC's log).
+    #[cfg(windows)]
+    pub(crate) names: (String, String),
+    /// The display rate the runtime last said it shows, Hz.
+    #[cfg(windows)]
+    refresh_hz: Option<f32>,
+    #[cfg(windows)]
+    reported_start: bool,
+    #[cfg(windows)]
+    frame_errors: u8,
 }
 
 struct Swapchain {
@@ -118,6 +176,14 @@ impl Headset {
             controls,
             last_frame_ms: None,
             refused_input: false,
+            #[cfg(windows)]
+            names: Default::default(),
+            #[cfg(windows)]
+            refresh_hz: None,
+            #[cfg(windows)]
+            reported_start: false,
+            #[cfg(windows)]
+            frame_errors: 0,
         }
     }
 
@@ -135,15 +201,20 @@ impl Headset {
                             self.session
                                 .begin(xr::ViewConfigurationType::PRIMARY_STEREO)?;
                             self.running = true;
+                            set_state(2);
+                            set_status("the headset shows the game");
                             self.request_refresh_rate();
                             self.request_fixed_levels();
                         }
                         xr::SessionState::STOPPING => {
                             self.session.end()?;
                             self.running = false;
+                            set_state(1);
+                            set_status("the headset stopped showing the game; it shows it again when the runtime asks");
                         }
                         xr::SessionState::FOCUSED => {
                             self.focused = true;
+                            set_state(3);
                             if let Some(id) = self.canvas {
                                 module.lifecycle(id, 3);
                             }
@@ -155,11 +226,18 @@ impl Headset {
                                 }
                             }
                             self.focused = false;
+                            set_state(2);
                         }
                         xr::SessionState::EXITING | xr::SessionState::LOSS_PENDING => {
                             self.running = false;
                             self.exiting = true;
                             module.set_headset(false);
+                            set_state(4);
+                            set_status(if state == xr::SessionState::EXITING {
+                                "the headset's runtime closed the session: the game continues in the window; launch VR again to return"
+                            } else {
+                                "the headset session was lost (disconnected?): the game continues in the window; launch VR again to return"
+                            });
                         }
                         _ => {}
                     }
@@ -168,6 +246,8 @@ impl Headset {
                     self.running = false;
                     self.exiting = true;
                     module.set_headset(false);
+                    set_state(4);
+                    set_status("the OpenXR runtime is going away: the game continues in the window; launch VR again to return");
                 }
                 Event::InteractionProfileChanged(_) => {
                     if let Some(controls) = &self.controls {
@@ -188,14 +268,20 @@ impl Headset {
                         controls.recentered();
                     }
                 }
-                Event::DisplayRefreshRateChangedFB(change) => log(
-                    false,
-                    &format!(
-                        "display {} Hz → {} Hz",
-                        change.from_display_refresh_rate(),
-                        change.to_display_refresh_rate()
-                    ),
-                ),
+                Event::DisplayRefreshRateChangedFB(change) => {
+                    #[cfg(windows)]
+                    {
+                        self.refresh_hz = Some(change.to_display_refresh_rate());
+                    }
+                    log(
+                        false,
+                        &format!(
+                            "display {} Hz → {} Hz",
+                            change.from_display_refresh_rate(),
+                            change.to_display_refresh_rate()
+                        ),
+                    )
+                }
                 _ => {}
             }
         }
@@ -208,7 +294,7 @@ impl Headset {
     /// clocks of a lighter frame. Never on otherwise: the runtime's dynamic
     /// levels save power.
     fn request_fixed_levels(&self) {
-        if !java::debug_switch("fixed-levels") {
+        if !platform::debug_switch("fixed-levels") {
             return;
         }
         let Some(perf) = self.instance.exts().ext_performance_settings else {
@@ -237,8 +323,15 @@ impl Headset {
         }
     }
 
-    fn request_refresh_rate(&self) {
-        let Some(refresh) = self.refresh else { return };
+    fn request_refresh_rate(&mut self) {
+        let Some(refresh) = self.refresh else {
+            #[cfg(windows)]
+            log(
+                false,
+                "display rate: the runtime offers no XR_FB_display_refresh_rate; it chooses",
+            );
+            return;
+        };
         let mut count = 0u32;
         // SAFETY: the extension's functions on this session.
         unsafe {
@@ -267,6 +360,21 @@ impl Headset {
                 rates.iter().copied().fold(0.0, f32::max)
             };
             let result = (refresh.request_display_refresh_rate)(session, rate);
+            #[cfg(windows)]
+            {
+                let mut now = 0f32;
+                let read = (refresh.get_display_refresh_rate)(session, &mut now);
+                if read.into_raw() >= 0 && now > 0.0 {
+                    self.refresh_hz = Some(now);
+                }
+                log(
+                    false,
+                    &format!(
+                        "display rates {rates:?}: asked for {rate} Hz ({result:?}), shows {now} Hz"
+                    ),
+                );
+            }
+            #[cfg(target_os = "android")]
             log(
                 false,
                 &format!("display rates {rates:?}: asked for {rate} Hz ({result:?})"),
@@ -329,7 +437,7 @@ impl Headset {
         // the recommended size, to price the resolution against the picture.
         static SCALE: OnceLock<Option<f32>> = OnceLock::new();
         let scale = SCALE.get_or_init(|| {
-            java::debug_switches()
+            platform::debug_switches()
                 .split_whitespace()
                 .find_map(|w| w.strip_prefix("eye-scale-")?.parse::<f32>().ok())
                 .filter(|k| (0.25..=1.5).contains(k))
@@ -375,7 +483,7 @@ impl Headset {
         // `swap-color-only` (`xr-debug`): a swapchain only drawn into, as a
         // measurement of what its other usages cost (the eye capture then
         // cannot read it back).
-        let color_only = java::debug_switch("swap-color-only");
+        let color_only = platform::debug_switch("swap-color-only");
         let full = if color_only {
             None
         } else {
@@ -501,12 +609,25 @@ pub(crate) fn render(module: &Module, id: u32, host_now_ms: f64) -> Option<u32> 
     if headset.exiting {
         return None;
     }
+    #[cfg(target_os = "android")]
     if headset.canvas.is_some_and(|c| c != id) {
         // Not drawn while the headset shows another.
         return Some(0);
     }
+    #[cfg(windows)]
+    if headset.canvas.is_some_and(|c| c != id) {
+        headset.canvas = None;
+        headset.last_frame_ms = None;
+        headset.refused_input = false;
+    }
     if let Err(e) = headset.poll(module) {
         log(true, &format!("events: {e}"));
+        #[cfg(windows)]
+        return headset.recover_frame_error(module);
+    }
+    #[cfg(windows)]
+    if headset.exiting {
+        return None;
     }
     if !headset.running {
         // Not shown until the session runs; rest a little so a host that
@@ -515,11 +636,38 @@ pub(crate) fn render(module: &Module, id: u32, host_now_ms: f64) -> Option<u32> 
         return Some(1);
     }
     match frame(headset, module, id, host_now_ms) {
-        Ok(()) => Some(1),
-        Err(e) => {
-            log(true, &format!("frame: {e}"));
+        Ok(()) => {
+            #[cfg(windows)]
+            {
+                headset.frame_errors = 0;
+            }
             Some(1)
         }
+        Err(e) => {
+            log(true, &format!("frame: {e}"));
+            #[cfg(windows)]
+            return headset.recover_frame_error(module);
+            #[cfg(target_os = "android")]
+            Some(1)
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Headset {
+    fn recover_frame_error(&mut self, module: &Module) -> Option<u32> {
+        self.frame_errors += 1;
+        if self.frame_errors < 3 {
+            std::thread::sleep(Duration::from_millis(5));
+            return Some(1);
+        }
+        self.running = false;
+        self.exiting = true;
+        // Keep the swapchain alive while the GPU module still owns its image views.
+        module.set_headset(false);
+        set_status("the OpenXR frame loop failed repeatedly; the game continues in the window");
+        set_state(4);
+        None
     }
 }
 
@@ -662,6 +810,11 @@ fn frame(headset: &mut Headset, module: &Module, id: u32, host_now_ms: f64) -> R
     if headset.canvas.is_none() {
         log(false, &format!("canvas {id} draws in the headset"));
         headset.canvas = Some(id);
+        #[cfg(windows)]
+        {
+            module.lifecycle(id, 1);
+            module.lifecycle(id, if headset.focused { 3 } else { 2 });
+        }
     }
     // The controllers, before the world advances to this frame: stamped at
     // the last frame's time, so the next tick takes them rather than the one
@@ -669,7 +822,7 @@ fn frame(headset: &mut Headset, module: &Module, id: u32, host_now_ms: f64) -> R
     let now_ms = xr_ms + offset;
     if let Some(controls) = headset.controls.as_mut() {
         let at_ms = headset.last_frame_ms.unwrap_or(now_ms).min(now_ms);
-        let (input, messages) = controls.frame(&headset.session, space, time, java::files_dir);
+        let (input, messages) = controls.frame(&headset.session, space, time, platform::files_dir);
         let mut delivered =
             input.map_or(Ok(()), |input| module.input_xr(id, &input.floats(), at_ms));
         for text in messages {
@@ -730,11 +883,27 @@ fn frame(headset: &mut Headset, module: &Module, id: u32, host_now_ms: f64) -> R
         .end(time, xr::EnvironmentBlendMode::OPAQUE, &[&layer])
         .map_err(|e| format!("end: {e}"))?;
     headset.frames += 1;
+    let cpu_ms = started.elapsed().as_secs_f64() * 1e3;
+    let mode = module.xr_stereo_mode(id);
     if headset.frames == 1 {
         log(false, "first frame submitted");
     }
-    let cpu_ms = started.elapsed().as_secs_f64() * 1e3;
-    let mode = module.xr_stereo_mode(id);
+    #[cfg(windows)]
+    if !headset.reported_start && mode != "unknown" {
+        // What a test reads first (`docs/quest.md`, "PC VR on Windows"): the
+        // backend, the runtime and headset, the eye size, the display rate
+        // and how the stereo frame drew (its samples last, `…-4x`).
+        let (runtime, system) = &headset.names;
+        let refresh = headset
+            .refresh_hz
+            .map_or_else(|| "the runtime's".to_owned(), |hz| format!("{hz:.0} Hz"));
+        let line = format!(
+            "PC VR: Vulkan via {runtime}, headset {system}, eyes {w}x{h} (2 layers), display {refresh}, stereo {mode}",
+        );
+        log(false, &line);
+        set_status(&line);
+        headset.reported_start = true;
+    }
     headset
         .perf
         .frame(wait_ms, cpu_ms, encode_ms, true, Some(mode));

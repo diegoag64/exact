@@ -25,8 +25,8 @@ mod android_init;
 pub(crate) use android_init::bind as bind_application;
 #[cfg(any(target_os = "android", test))]
 mod fingers;
-#[cfg(target_os = "android")]
-mod headset;
+#[cfg(any(target_os = "android", windows))]
+pub(crate) mod headset;
 mod performance;
 #[cfg(any(target_os = "android", test))]
 mod retry;
@@ -172,8 +172,9 @@ impl Abi {
                 android_init::run(&abi, path)?;
                 abi.initialized = true;
             }
-            // A headset app's runtime makes the primary module's device.
-            #[cfg(target_os = "android")]
+            // A headset app's runtime makes the primary module's device
+            // (on Windows only when VR was asked for, `headset::requested`).
+            #[cfg(any(target_os = "android", windows))]
             if artifact.is_empty() {
                 headset::attach(path);
             }
@@ -223,6 +224,10 @@ impl Abi {
                         .map_err(|e| format!("GPU ABI {name}: {e}"))?;
                 }
                 abi.load_device()?;
+                #[cfg(windows)]
+                if artifact.is_empty() {
+                    headset::device_made();
+                }
                 abi.symbol::<unsafe extern "C" fn(bool)>(b"gpu_seekable")(
                     std::env::var("EXACT_AGENT").as_deref() == Ok("1"),
                 );
@@ -582,6 +587,12 @@ impl Surfaces {
 
     fn lifecycle(&mut self, hidden: bool, interrupted: bool) {
         for canvas in self.canvases.values() {
+            // The headset's session, not the window, pauses and resumes the
+            // canvas it draws (`gpu/openxr/src/session.rs`).
+            #[cfg(windows)]
+            if canvas.artifact.is_empty() && headset::drawing() {
+                continue;
+            }
             let abi = &self.abis[&canvas.artifact];
             if self.hidden != hidden {
                 abi.lifecycle(canvas.id, u32::from(!hidden));
@@ -593,6 +604,15 @@ impl Surfaces {
         self.hidden = hidden;
         self.interrupted = interrupted;
     }
+    #[cfg(windows)]
+    pub(crate) fn restore_desktop_canvas_lifecycle(&self) {
+        for canvas in self.canvases.values().filter(|c| c.artifact.is_empty()) {
+            let abi = &self.abis[&canvas.artifact];
+            abi.lifecycle(canvas.id, u32::from(!self.hidden));
+            abi.lifecycle(canvas.id, if self.interrupted { 2 } else { 3 });
+        }
+    }
+
     fn initial_lifecycle(&self, abi: &Abi, id: u32) {
         if self.hidden {
             abi.lifecycle(id, 0);

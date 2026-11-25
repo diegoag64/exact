@@ -2,12 +2,15 @@
 //! action set read once a frame into an [`XrInput`], which the frame loop
 //! delivers to the canvas as an input event. Bindings are suggested for the
 //! Touch controllers and for the Khronos simple controller, so any runtime
-//! with one or the other answers.
+//! with one or the other answers. Where the instance has Touch Plus (a PC's
+//! OpenXR 1.1 instance, or `XR_META_touch_controller_plus`), the same
+//! bindings are suggested for it first; the runtime picks the profile of the
+//! controllers it has (Virtual Desktop always reports Touch).
 //!
 //! The debug script file (`xr-input`, [`crate::script::Injector`]) stands
 //! in for hands nobody has.
 
-use crate::java::log;
+use crate::platform::log;
 use crate::script::{button, Injector, XrInput, XrPose, INJECT_FILE};
 use openxr as xr;
 use std::path::PathBuf;
@@ -63,6 +66,7 @@ impl Controls {
     pub(crate) fn new<G>(
         instance: &xr::Instance,
         session: &xr::Session<G>,
+        touch_plus: Option<&'static str>,
     ) -> Result<Self, String> {
         let path = |text: &str| {
             instance
@@ -141,6 +145,13 @@ impl Controls {
                 &menu,
                 path("/user/hand/left/input/menu/click")?,
             ));
+            // Touch Plus takes the same inputs, by the same paths.
+            if let Some(profile) = touch_plus {
+                match instance.suggest_interaction_profile_bindings(path(profile)?, &touch) {
+                    Ok(()) => suggested.push(profile),
+                    Err(e) => log(true, &format!("controllers: {profile} refused: {e}")),
+                }
+            }
             let profile = "/interaction_profiles/oculus/touch_controller";
             match instance.suggest_interaction_profile_bindings(path(profile)?, &touch) {
                 Ok(()) => suggested.push(profile),

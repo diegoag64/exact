@@ -84,9 +84,15 @@ impl<D: DataSource> Presenter<D> {
             return frame;
         }
         let (hwnd, hinstance) = (window.hwnd(), window.hinstance());
-        let candidate = (self.brush.backend() == "cpu" && self.host.content_region().is_none())
-            .then(|| self.surfaces.window_canvas())
-            .flatten();
+        // A headset's runtime made the module's device, which has no window
+        // surface (`gpu/src/vulkan.rs`): the page is painted on the CPU, the
+        // canvas drawn in the headset (`headset.rs`), or read back once its
+        // session ended.
+        let candidate = (self.brush.backend() == "cpu"
+            && self.host.content_region().is_none()
+            && !super::headset::attached())
+        .then(|| self.surfaces.window_canvas())
+        .flatten();
         if let Some(view) = candidate {
             let artifact = &self.surfaces.canvases[&view].artifact;
             if let Some(previous) = self

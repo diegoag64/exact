@@ -130,6 +130,7 @@ fn direct_window_blinks_without_a_softbuffer_surface() {
     let due = caret.deadline().expect("system caret blink enabled");
     let mut state = App {
         service_causes: 0,
+        headset_frame_active: false,
         proxy: events.create_proxy(),
         accessibility: None,
         name: "Ink caret regression".into(),
@@ -595,6 +596,7 @@ fn test_app<D: DataSource>(
     let started = Instant::now();
     App {
         service_causes: 0,
+        headset_frame_active: false,
         proxy,
         accessibility: None,
         name: "Frame scheduling regression".into(),

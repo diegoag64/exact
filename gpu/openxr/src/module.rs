@@ -4,7 +4,9 @@
 //! that renders, as the host's own are, except the provider's hooks, which
 //! the module calls itself.
 
-use std::ffi::{c_char, c_int, c_void, CString};
+#[cfg(target_os = "android")]
+use std::ffi::CString;
+use std::ffi::{c_char, c_int, c_void};
 use std::sync::OnceLock;
 
 /// `exact_gpu::vulkan::VulkanProvider`, in its C layout.
@@ -52,7 +54,7 @@ macro_rules! exports {
                 Ok(Self {
                     $($field: {
                         // SAFETY: a NUL-terminated name in a live image.
-                        let at = unsafe { dlsym(handle, concat!($name, "\0").as_ptr().cast()) };
+                        let at = unsafe { symbol(handle, concat!($name, "\0").as_ptr().cast()) };
                         if at.is_null() {
                             return Err(format!("the GPU module has no {}", $name));
                         }
@@ -81,13 +83,55 @@ exports! {
     out_ptr: "gpu_out_ptr" => unsafe extern "C" fn() -> *const u8,
 }
 
+#[cfg(target_os = "android")]
 extern "C" {
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
 }
 /// Bionic's `RTLD_NOW` and `RTLD_NOLOAD` on a 64-bit ABI.
+#[cfg(target_os = "android")]
 const RTLD_NOW: c_int = 2;
+#[cfg(target_os = "android")]
 const RTLD_NOLOAD: c_int = 4;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetModuleHandleW(name: *const u16) -> *mut c_void;
+    fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
+}
+
+/// `name`'s address in the image `handle`, or null.
+///
+/// # Safety
+/// `handle` is a live image and `name` NUL-terminated.
+unsafe fn symbol(handle: *mut c_void, name: *const c_char) -> *mut c_void {
+    #[cfg(target_os = "android")]
+    // SAFETY: the caller's contract.
+    return unsafe { dlsym(handle, name) };
+    #[cfg(windows)]
+    // SAFETY: the caller's contract.
+    return unsafe { GetProcAddress(handle, name) };
+}
+
+/// The image the host already loaded from `path`, or null.
+fn loaded(path: &str) -> Result<*mut c_void, String> {
+    #[cfg(target_os = "android")]
+    {
+        let name = CString::new(path).map_err(|_| "a GPU module path with a NUL")?;
+        // SAFETY: a NUL-terminated path; NOLOAD only finds an image already open.
+        Ok(unsafe { dlopen(name.as_ptr(), RTLD_NOW | RTLD_NOLOAD) })
+    }
+    #[cfg(windows)]
+    {
+        if path.contains('\0') {
+            return Err("a GPU module path with a NUL".into());
+        }
+        let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+        // SAFETY: a NUL-terminated wide path; this only finds a loaded image.
+        Ok(unsafe { GetModuleHandleW(wide.as_ptr()) })
+    }
+}
 
 static MODULE: OnceLock<Module> = OnceLock::new();
 
@@ -96,9 +140,7 @@ pub(crate) fn bind(path: &str) -> Result<&'static Module, String> {
     if let Some(module) = MODULE.get() {
         return Ok(module);
     }
-    let name = CString::new(path).map_err(|_| "a GPU module path with a NUL")?;
-    // SAFETY: a NUL-terminated path; NOLOAD only finds an image already open.
-    let handle = unsafe { dlopen(name.as_ptr(), RTLD_NOW | RTLD_NOLOAD) };
+    let handle = loaded(path)?;
     if handle.is_null() {
         return Err(format!("the GPU module {path} is not loaded"));
     }

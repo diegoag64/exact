@@ -622,6 +622,7 @@ export const classifications = [
     ["painted:host/painted/src/desktop.rs", "Screen::json"],
     ["painted:host/painted/src/screen_capture.rs", "fixtures sizes"],
     ["painted:host/painted/src/paint_motion.rs", "Host::paint_color Host::paint_over Host::present_paint"],
+    ["painted:host/painted/src/presenter.rs", "Presenter::headset_frame Presenter::headset_focused"],
     ["painted:host/painted/src/presenter/painter.rs", "Presenter::poll_apple_painter Presenter::repeat_apple_frame"],
     ["painted:host/painted/src/press.rs", "Host::look_motion Host::press_feedback Host::retire_presses"],
     ["painted:host/painted/src/surfaces.rs", "Presenter::retier_surfaces Presenter::surface_lifecycle Presenter::sync_surfaces"],

@@ -288,6 +288,60 @@ shell am broadcast -a com.oculus.vrpowermanager.prox_close` keeps it awake
 for a while without wearing it). It is also in the headset's library under
 Unknown Sources.
 
+## PC VR on Windows
+
+PC VR is a very early preview for x64 Windows. The OpenXR artifact uses
+the system's active runtime, which must support `XR_KHR_vulkan_enable2`.
+Testing covers Virtual Desktop's VDXR runtime and a Meta Quest 3.
+
+- Opting in: app.json `"host": {"windows": {"xr": "openxr"}}`. `bun exact.mjs
+  windows` then also packages `exact_openxr.dll` (built in exact2's workspace,
+  `scripts/windows-openxr.mjs`), the Khronos loader `openxr_loader.dll`
+  (`openxr_loader_windows-<version>.zip` from Khronos's GitHub release, the
+  version and sha256 pinned in `OPENXR_LOADER_WINDOWS`, cached under
+  `~/.cache/exact/openxr-loader`) and `<name> VR.cmd`.
+- Launching: `<name>.exe --vr` (what `<name> VR.cmd` runs), or `EXACT_XR=1`.
+  Without either the artifact is never loaded and the game is the ordinary
+  flat one, on its ordinary device.
+- Opening (`host/painted/src/surfaces/headset.rs`, `xr_open`): before the GPU
+  module makes its device, the host loads the artifact from beside the
+  executable; it loads the loader beside it, makes an OpenXR 1.1 instance (1.0
+  where the runtime refuses 1.1) and asks for the head-mounted system. When
+  the OpenXR host cannot open the runtime or find a headset, a dialog shows
+  the reason and offers Retry or Cancel. Cancel opens the flat game.
+  The device is then made through the runtime exactly as on a Quest
+  (`XR_KHR_vulkan_enable2`, Vulkan 1.1, multiview and multisample array where
+  the GPU has them); a runtime that refuses the device leaves the window its
+  ordinary one (`gpu/src/native.rs`).
+- Frames: while a session exists the Windows event loop calls `xr_render`
+  each turn (`Presenter::headset_frame`, under `ControlFlow::Poll`;
+  `xrWaitFrame` paces it), whether or not the window shows, and also during
+  a native modal loop (a drag of the window) on its timer. The headset's
+  canvas ticks there; what it publishes and posts reaches the page there too.
+  The window keeps processing keyboard and mouse input. It pauses painting
+  while the headset has focus so desktop drawing cannot delay headset
+  frames. When the session ends or is lost, the canvas follows the
+  window's visibility and focus again.
+- Known limitation: in a Quest 3 USB disconnect test, VDXR kept the
+  OpenXR session focused after the headset client stopped. In this case,
+  close the game and launch it again without `--vr` to play in the desktop
+  window.
+- Display rate: 90 Hz through `XR_FB_display_refresh_rate` where offered
+  (VDXR offers it), else the runtime's.
+- Controllers: Touch Plus (`/interaction_profiles/meta/touch_plus_controller`
+  on a 1.1 instance, or `XR_META_touch_controller_plus`'s) gets the same
+  bindings as Touch, suggested first; Touch and the simple controller follow.
+  VDXR always reports a Quest's controllers as Touch.
+- Log: `xr\exact-xr.log` beside the executable (`EXACT_XR_DIR` moves the
+  directory; it is also where `xr-debug`, `capture`, `xr-hold` and `xr-input`
+  are read and eye captures written, as the app's files directory is on a
+  Quest), and standard error (`<name> VR.cmd` keeps it in `xr\launch.log`).
+  The lines are a Quest's, plus the runtime, OpenXR version, headset, each
+  eye's recommended size and samples, and at the first frame one summary:
+  `PC VR: Vulkan via <runtime>, headset <name>, eyes <w>x<h> (2 layers),
+  display <rate>, stereo <mode>` (the mode ends in the sample count, as
+  `multiview-direct-4x`). `EXACT_XR_DEBUG` adds debug switches.
+
 ## Debugging
 
 - `adb logcat -s exact-xr` (the artifact's lines): the runtime, the device, the
