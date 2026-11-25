@@ -763,6 +763,7 @@ fn a_local_inset_is_the_browsers_custom_property() {
         (StyleId::SafeAreaExtend, "top"),
         (StyleId::ScrollInsetAdjustment, "never"),
         (StyleId::ScrollIndicatorAdjustment, "none"),
+        (StyleId::SafeAreaTrack, "observed-max"),
         (StyleId::ScrollEdgeEffectSoft, "top"),
         (StyleId::ScrollEdgeEffectHard, "bottom"),
         (StyleId::ScrollEdgeEffectHidden, "left"),
@@ -859,6 +860,7 @@ fn every_attribute_props_of_derives_is_one_data_can_give() {
     let body = &source[source.find("pub fn props_of").unwrap()..];
     let listed: std::collections::BTreeSet<&str> = [
         NodeType::View,
+        NodeType::Pressable,
         NodeType::Control,
         NodeType::TextInput,
         NodeType::Image,

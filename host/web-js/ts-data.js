@@ -264,8 +264,10 @@ globalThis.__exact_module = body => {
   if (body.source && watching) (moduleWatched.get(key) ?? moduleWatched.set(key, new Set()).get(key)).add(watching);
   // A continuation keeps the least privileged pending call until its answer settles.
   const origin = call?.origin ?? 'app';
+  const owner = answering.call ?? answering.promiseCall;
+  const startedByInput = owner?.input === true && !owner.settled;
   answering.call = call;
-  try { return ordinary(() => globalThis.exact?.extensions?.call?.({ ...body, origin }, () => call?.wanted?.() ?? true) ?? Promise.resolve({ error: 'NotSupportedError' })); }
+  try { return ordinary(() => rt.Origin.callData?.({ ...body, origin }, () => call?.wanted?.() ?? true, startedByInput, tsGrantSet) ?? Promise.resolve({ error: 'NotSupportedError' })); }
   finally { answering.call = before; }
 };
 (globalThis.exact ??= {}).announceModule = topic => announce(topic, 'module');
@@ -638,7 +640,7 @@ export function install(data, rustSources = null, modules = null) {
     asking = target ?? name; watching = name;
     for (const sources of moduleWatched.values()) sources.delete(name);
     // The origin of the commit that asked it (LLP 1133.002 D12), which a fetch it makes carries (LLP 1133.036 D6).
-    const call = answering.call = { stream: null, mutation, forced, name: target ?? name, turn: true, origin: rt.Origin.now(), watches: new Set() }, target_ = target ?? name;
+    const call = answering.call = { stream: null, mutation, forced, name: target ?? name, turn: true, input: mutation && rt.Origin.input === true, origin: rt.Origin.now(), watches: new Set() }, target_ = target ?? name;
     if (call.origin !== 'app') answering.untraced.add(call);
     // What the source sent goes once the commit that asked it stands: an answer in flight's (a resource's, or a mutation's that
     // answers with a promise) whatever it then answers, a refused commit saying so (LLP 1016.000 D7, amended 2026-10-18).
@@ -712,6 +714,7 @@ export function install(data, rustSources = null, modules = null) {
   // fresh answer that fills no slot, with the call's origin on it, so a module call it makes is admitted with that
   // origin (`__exact_module`). Its answer, or null for a name `tools` does not export.
   data.tool = (name, args, store, origin) => {
+    if (typeof name !== 'string' || name === 'script.message') return null;
     const handler = source.tools && Object.hasOwn(source.tools, name) ? source.tools[name] : undefined;
     if (typeof handler !== 'function') return null;
     const before = answering.call, call = answering.call = { stream: null, mutation: true, name, turn: true, origin };

@@ -44,6 +44,7 @@ pub use host_kinds::{HistorySwipe, ScrollDrag};
 mod pointer;
 pub use pointer::{AtomEvent, DropEvent, MouseEvent, PointerEvent, WheelEvent};
 mod intersect;
+mod mounted_reorder;
 mod reorder;
 mod reorder_codec;
 mod reorder_group;
@@ -150,7 +151,7 @@ mod apply;
 mod live_time;
 pub mod midi;
 mod modules;
-pub use modules::AppState;
+pub use modules::{check_arrival_field, check_source_substitute, AppState};
 mod calls;
 pub use calls::CallHow;
 mod module_seam;
@@ -180,7 +181,6 @@ mod transport_tests;
 mod uploads;
 mod viewport;
 mod writes;
-
 use crate::instance::{Ids, InstanceError, InstanceStep, SurfaceUpdate, Tree, Update};
 use crate::request::{Answer, Dispatch, Outcome, Request, RequestClass, RequestOut};
 use crate::store::{Store, StoreWrite};
@@ -193,16 +193,7 @@ pub use router::{launch_matches, routing, RouterChange, Routing};
 pub use split::{press_writes_router, RouteInspector, StackSplit};
 pub use uploads::{UploadEnd, UploadMark};
 
-/// A host-facing effect an action asked for; executed after commit, in order.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Command {
-    /// The capability name.
-    pub name: String,
-    /// Its arguments.
-    pub args: Vec<Value>,
-    /// The node whose input ran the action, when a host event did: where a command that shows system UI anchors it (LLP 1069.003 D3). `None` for a timer, an answer, or anything else no input dispatched.
-    pub source: Option<ViewId>,
-}
+pub use crate::commands::Command;
 
 #[derive(Clone)]
 #[cfg_attr(test, derive(Debug))]
@@ -384,7 +375,9 @@ pub struct Runner<D: DataSource> {
     strings: vm::Strings,
     sites: crate::instance::SiteIndex,
     inspection_digest: std::cell::OnceCell<String>,
-    /// The plan's tab panel sites and whether each needs a navigation controller (`Runner::panels_need_navigation`).
+    /// Panel templates with a route that can request a split.
+    split_panel_sites: std::cell::OnceCell<Vec<NodesId>>,
+    /// The plan's tab panel sites and whether each needs a navigation controller.
     panel_navigation: std::cell::OnceCell<(Vec<NodesId>, Vec<bool>)>,
     /// [`Runner::keeps_midi`], made at the first agent read.
     keeps_midi: std::cell::OnceCell<bool>,
@@ -883,6 +876,7 @@ impl<D: DataSource> Runner<D> {
             page: crate::time::launch_page(&plan),
             plan,
             inspection_digest: std::cell::OnceCell::new(),
+            split_panel_sites: std::cell::OnceCell::new(),
             panel_navigation: std::cell::OnceCell::new(),
             keeps_midi: std::cell::OnceCell::new(),
             action_binding_origin: std::rc::Rc::new(()),
@@ -1035,6 +1029,7 @@ impl<D: DataSource> Runner<D> {
             fragment_warned: Default::default(),
             conformed: Default::default(),
         };
+        runner.seams.modules.launch_substitutes(&mut runner)?;
         runner.record_replacement(carried);
         runner.init_slots(carried, launch)?;
         runner.carry_modes(carried.map_or(&[], |c| &c.modes));

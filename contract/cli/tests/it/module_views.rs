@@ -15,7 +15,7 @@ const INTERFACE: &str = r#"{
   "name": "@fixture/swatch",
   "version": "1.0.0",
   "views": {
-    "swatch-box": { "props": { "tint": { "type": "string", "binds": true }, "caption": "option<string>" },
+    "swatch-box": { "props": { "tint": { "type": "option<string>", "binds": true }, "caption": "option<string>" },
       "events": ["message"], "displayed": true }
   },
   "names": []
@@ -31,6 +31,8 @@ const APP: &str = r#"component App
     shown = false
   action hide
     hidden = true
+  action reveal
+    hidden = false
   action recolor
     tint = "blue"
   view
@@ -209,7 +211,7 @@ fn a_package_with_no_module_names_accepts_its_views_agent_words() {
     let interface = r#"{
       "kind": "interface", "name": "@fixture/words", "version": "1.0.0",
       "agent": { "heard": "string", "levels": "number[]", "enabled": "bool" },
-      "views": { "words-panel": {} }, "names": []
+      "views": { "words-panel": {"displayed": true} }, "names": []
     }"#;
     let app = App::new(
         "words-without-sources",
@@ -226,7 +228,7 @@ fn a_package_with_no_module_names_accepts_its_views_agent_words() {
     prefer(&mut r, json!({ "words.heard": "hello" })).unwrap();
     r.bind_extensions(&[], &["words"]);
     assert_eq!(
-        told.lock().unwrap().last().unwrap()["preferred"]["heard"],
+        told.lock().unwrap().first().unwrap()["preferred"]["heard"],
         "hello"
     );
     prefer(
@@ -433,6 +435,96 @@ fn view_id(r: &Runner<Source>) -> u32 {
     state["swatch"]["views"][0]["view"].as_u64().unwrap() as u32
 }
 
+#[test]
+fn device_bindings_follow_the_runner_node_through_both_orders_and_removal() {
+    let app = App::new("device-bindings", APP, &[]);
+    for (shown, bound, expected) in [
+        (CallOrigin::Tool, CallOrigin::App, "tool"),
+        (CallOrigin::App, CallOrigin::Tool, "tool"),
+        (CallOrigin::Action, CallOrigin::App, "action"),
+        (CallOrigin::App, CallOrigin::Wake, "wake"),
+    ] {
+        let (mut runner, _) = boot(&app);
+        runner.bind_extensions(&["swatch"], &[]);
+        let snapshots: Told = Arc::default();
+        let seen = snapshots.clone();
+        runner.observe_view_bindings(
+            &[("swatch-box", "tint")],
+            Some(Arc::new(move |body| {
+                seen.lock()
+                    .unwrap()
+                    .push(serde_json::from_str(body).unwrap());
+            })),
+        );
+        runner.act_from(shown, "show", Vec::new()).unwrap();
+        let id = view_id(&runner).to_string();
+        runner.act_from(bound, "recolor", Vec::new()).unwrap();
+        let last = || snapshots.lock().unwrap().last().unwrap().clone();
+        assert_eq!(
+            last()["swatch-box"][&id]["tint"],
+            json!({"value":"blue","origin":expected})
+        );
+        runner.act("unshow", Vec::new()).unwrap();
+        assert_eq!(last(), serde_json::json!({}));
+        runner.act("show", Vec::new()).unwrap();
+        assert_eq!(
+            last()["swatch-box"][view_id(&runner).to_string()]["tint"]["origin"],
+            "app"
+        );
+        runner.bind_extensions(&[], &[]);
+        assert_eq!(last(), serde_json::json!({}));
+    }
+}
+
+#[test]
+fn another_packages_string_binding_does_not_notify_the_track_observer() {
+    let app = App::new("track-filter", APP, &[]);
+    let (mut runner, _) = boot(&app);
+    runner.bind_extensions(&["swatch"], &[]);
+    let snapshots: Told = Arc::default();
+    let seen = snapshots.clone();
+    runner.observe_view_bindings(
+        &[("audio-waveform", "track")],
+        Some(Arc::new(move |body| {
+            seen.lock()
+                .unwrap()
+                .push(serde_json::from_str(body).unwrap());
+        })),
+    );
+    runner.act("show", Vec::new()).unwrap();
+    runner.act("recolor", Vec::new()).unwrap();
+    assert_eq!(*snapshots.lock().unwrap(), [json!({})]);
+}
+
+#[test]
+fn a_hidden_binding_keeps_its_origin_when_the_node_is_revealed() {
+    let app = App::new("binding-before-show", APP, &[]);
+    let (mut runner, _) = boot(&app);
+    runner.bind_extensions(&["swatch"], &[]);
+    let snapshots: Told = Arc::default();
+    let seen = snapshots.clone();
+    runner.observe_view_bindings(
+        &[("swatch-box", "tint")],
+        Some(Arc::new(move |body| {
+            seen.lock()
+                .unwrap()
+                .push(serde_json::from_str(body).unwrap());
+        })),
+    );
+    runner.act("show", Vec::new()).unwrap();
+    let id = view_id(&runner).to_string();
+    runner.act("hide", Vec::new()).unwrap();
+    runner
+        .act_from(CallOrigin::Tool, "recolor", Vec::new())
+        .unwrap();
+    assert_eq!(snapshots.lock().unwrap().last(), Some(&json!({})));
+    runner.act("reveal", Vec::new()).unwrap();
+    assert_eq!(
+        snapshots.lock().unwrap().last().unwrap()["swatch-box"][&id]["tint"],
+        json!({"value":"blue", "origin":"tool"})
+    );
+}
+
 /// The plan carries the view's row: its tag, the extension that makes it,
 /// that it hears its displayed state, and its one binding prop.
 #[test]
@@ -457,7 +549,7 @@ fn a_view_hears_each_change_with_its_commit_s_origin() {
     assert!(reports(&told).is_empty(), "nothing is placed yet");
 
     r.act("show", Vec::new()).unwrap();
-    assert_eq!(reports(&told), ["displayed true app", "bound tint app"]);
+    assert_eq!(reports(&told), ["bound tint app", "displayed true app"]);
     let id = view_id(&r);
     assert_eq!(r.view_origin(id, None), Some(CallOrigin::App));
 
@@ -481,6 +573,56 @@ fn a_view_hears_each_change_with_its_commit_s_origin() {
     );
 }
 
+#[test]
+fn clearing_and_rebinding_the_same_value_reports_the_new_commits_origin() {
+    let app = App::new(
+        "unbind",
+        r#"component App
+  state tint: option<string> = some("red")
+  state hidden = false
+  action hide
+    hidden = true
+  action clear
+    tint = none
+    hidden = false
+  action restore
+    tint = some("red")
+  view
+    swatch-box tint=tint display=(hidden ? "none" : "block")
+"#,
+        &[],
+    );
+    let (mut r, told) = boot(&app);
+    r.bind_extensions(&["swatch"], &[]);
+    assert_eq!(reports(&told), ["displayed true app", "bound tint app"]);
+    let id = view_id(&r);
+    r.act("hide", Vec::new()).unwrap();
+    assert_eq!(reports(&told), ["displayed false app"]);
+    r.act("clear", Vec::new()).unwrap();
+    let changes: Vec<_> = told
+        .lock()
+        .unwrap()
+        .drain(..)
+        .filter(|r| r.get("view").is_some())
+        .collect();
+    assert_eq!(changes.len(), 2);
+    assert_eq!(changes[0]["bound"], "tint");
+    assert_eq!(changes[0].get("value"), Some(&Json::Null));
+    assert_eq!(changes[1]["displayed"], true);
+    assert_eq!(r.view_origin(id, Some("tint")), None);
+    r.act_from(CallOrigin::Action, "restore", Vec::new())
+        .unwrap();
+    assert_eq!(r.view_origin(id, Some("tint")), Some(CallOrigin::Action));
+    assert!(told
+        .lock()
+        .unwrap()
+        .drain(..)
+        .any(|r| { r["bound"] == "tint" && r["value"] == "red" && r["origin"] == "action" }));
+    r.act("restore", Vec::new()).unwrap();
+    assert!(reports(&told).is_empty());
+    assert_eq!(r.view_origin(id, Some("tint")), Some(CallOrigin::Action));
+}
+
 /// A view a tool's commit shows is reported with the tool's origin, which
 /// the runner keeps: a capture start that follows is admitted with it.
 #[test]
@@ -489,7 +631,7 @@ fn a_view_a_tool_shows_is_reported_with_the_tool_s_origin() {
     let (mut r, told) = boot(&app);
     r.bind_extensions(&[], &["swatch"]);
     r.act_from(CallOrigin::Tool, "show", Vec::new()).unwrap();
-    assert_eq!(reports(&told), ["displayed true tool", "bound tint tool"]);
+    assert_eq!(reports(&told), ["bound tint tool", "displayed true tool"]);
     assert_eq!(r.view_origin(view_id(&r), None), Some(CallOrigin::Tool));
     r.act("unshow", Vec::new()).unwrap();
     assert_eq!(reports(&told), ["displayed false app"]);
@@ -544,4 +686,84 @@ fn the_bake_refuses_a_tag_declared_twice_or_by_no_one() {
     let (id, message) = refused(&app);
     assert_eq!(id, "bake-unknown-module");
     assert!(message.contains("did you mean `swatch-box`"), "{message}");
+}
+
+#[test]
+fn local_view_factories_and_guards_share_one_roster() {
+    let app = App::new("hosts", "", &[]);
+    let manifest = app.0.join("app.json");
+    let write_roster = |items: Json| {
+        std::fs::write(
+            &manifest,
+            json!({"app":{"id":"dev.test.hosts","name":"Hosts"},"modules":items}).to_string(),
+        )
+        .unwrap();
+    };
+    write_roster(
+        json!(["shared-view", {"tag":"other-view"}, {"tag":"apple-view","hosts":["ios","macos"]}, {"tag":"phone-view","hosts":["android"]}]),
+    );
+    let read = contract::Manifest::read(&app.0).unwrap();
+    let roster = contract::native::roster(&read).unwrap();
+    assert_eq!(
+        roster.tags_on("ios"),
+        ["shared-view", "other-view", "apple-view"]
+    );
+    assert_eq!(roster.tags_on("tvos"), ["shared-view", "other-view"]);
+    let path = app.0.join("app.contract");
+    let compile = |body: &str| {
+        std::fs::write(&path, format!("shape Page\n  platform: string\ncomponent App\n  resource page = exactPage() as shape Page\n  state enabled = true\n  view\n    column\n{body}\ncomponent Wrap\n  slot\n  view\n    column\n      children\n")).unwrap();
+        contract::compile_path(&path)
+    };
+    for body in [
+        r#"      if "android" == page.platform || false
+        phone-view"#,
+        "      if page.platform == \"ios\" || page.platform == \"macos\"\n        apple-view",
+        "      if enabled && page.platform == \"android\"\n        Wrap()\n          phone-view",
+        "      if page.platform != \"android\"\n        shared-view\n      else\n        phone-view",
+    ] {
+        compile(body).unwrap_or_else(|e| panic!("{body}: {e:?}"));
+    }
+    compile("      match page.platform\n        case \"android\"\n          phone-view testId=\"phone\"\n        case \"macos\"\n          apple-view testId=\"apple\"").unwrap();
+    use exact_runner::page::Platform;
+    for (platform, phone, apple) in [
+        (Platform::Android, 1, 0),
+        (Platform::Macos, 0, 1),
+        (Platform::Web, 0, 0),
+    ] {
+        let (runner, _) = platform.boot(|| boot(&app));
+        assert_eq!(runner.kernel().find_by_test_id("phone").len(), phone);
+        assert_eq!(runner.kernel().find_by_test_id("apple").len(), apple);
+    }
+    for body in [
+        "      phone-view",
+        "      if page.platform == \"ios\"\n        phone-view",
+        "      if enabled || page.platform == \"android\"\n        phone-view",
+        "      if enabled && page.platform != \"android\"\n        shared-view\n      else\n        phone-view",
+        "      for page in [Page(platform=\"android\")] key=page.platform\n        if page.platform == \"android\"\n          phone-view",
+    ] {
+        let e = compile(body).err().expect(body);
+        assert_eq!(e.id, "bake-module-host", "{e}");
+        let page = if body.contains("for page") { "hostPage" } else { "page" };
+        assert!(e.message.contains("phone-view") && e.message.contains(&format!("if {page}.platform == \"android\"")));
+        assert_eq!(e.span.line as usize, 7 + body.lines().count());
+    }
+    write_roster(
+        json!([{"tag":"wide-view","hosts":["ios","tvos","macos","web","linux","windows"]}]),
+    );
+    compile("      if page.platform == \"android\"\n        text \"phone\"\n      else\n        wide-view").unwrap();
+    write_roster(json!([{"tag":"wide-view","hosts":contract_syntax::MODULE_PLATFORMS}]));
+    compile("      wide-view").unwrap();
+    let terminal = contract::compile_path_terminal(&path).unwrap_err();
+    assert!(terminal.iter().any(|e| e.id == "bake-module-host"));
+    for items in [
+        json!(["phone-view", {"tag":"phone-view"}]),
+        json!([{"tag":"phone-view","hosts":[]}]),
+        json!([{"tag":"phone-view","hosts":["phone"]}]),
+        json!([{"tag":"phone-view","slots":[]}]),
+    ] {
+        write_roster(items);
+        let e = compile("      shared-view").err().unwrap();
+        assert_eq!(e.id, "app-manifest");
+        assert!(e.message.contains("modules[") && e.message.contains("phone-view"));
+    }
 }

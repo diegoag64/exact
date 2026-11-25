@@ -93,6 +93,7 @@ fn step_json(step: &Step, s: &mut String) {
             match form {
                 TapForm::Press => s.push_str("\"press\""),
                 TapForm::Hover => s.push_str("\"hover\""),
+                TapForm::DoubleTap => s.push_str("\"dblclick\",\"touch\":true"),
                 TapForm::Dblclick => s.push_str("\"dblclick\""),
                 TapForm::Contextmenu => s.push_str("\"contextmenu\""),
                 TapForm::History(delta) => s.push_str(&format!("\"history\",\"history\":{delta}")),
@@ -106,8 +107,30 @@ fn step_json(step: &Step, s: &mut String) {
                         s.push_str(&format!(",\"at\":[{x},{y}]"));
                     }
                 }
+                TapForm::Swipe { direction, at } => {
+                    s.push_str(&format!("\"swipe\",\"direction\":\"{direction}\""));
+                    if let Some((x, y)) = at {
+                        s.push_str(&format!(",\"at\":[{x},{y}]"));
+                    }
+                }
                 TapForm::Wheel { dx, dy } => {
                     s.push_str(&format!("\"wheel\",\"wheel\":[{dx},{dy}]"))
+                }
+                TapForm::Drop { files, text, url } => {
+                    s.push_str("\"drop\",\"files\":[");
+                    for (i, file) in files.iter().enumerate() {
+                        if i > 0 {
+                            s.push(',');
+                        }
+                        q(file, s);
+                    }
+                    s.push(']');
+                    for (key, value) in [("text", text), ("url", url)] {
+                        if let Some(value) = value {
+                            s.push_str(&format!(",\"{key}\":"));
+                            q(value, s);
+                        }
+                    }
                 }
                 // @ref LLP 1098 D10 — the platform's action, never a press.
                 TapForm::MediaSession { action, seconds } => {
@@ -210,6 +233,16 @@ fn step_json(step: &Step, s: &mut String) {
         Step::Locale { tag, .. } => {
             s.push_str("{\"op\":\"locale\",\"value\":");
             q(tag, s);
+        }
+        Step::PreferExtension { key, value, .. } => {
+            s.push_str("{\"op\":\"prefer-extension\",\"key\":");
+            q(key, s);
+            if let Some(json) = value {
+                s.push_str(",\"value\":");
+                s.push_str(json);
+            } else {
+                s.push_str(",\"clear\":true");
+            }
         }
         Step::Prefer { name, value, .. } => {
             s.push_str("{\"op\":\"prefer\",\"name\":");
@@ -377,6 +410,13 @@ fn step_json(step: &Step, s: &mut String) {
             q(edit, s);
             s.push_str(",\"text\":");
             q(text, s);
+        }
+        Step::Rotate { orientation, .. } => {
+            s.push_str("{\"op\":\"rotate\",\"orientation\":");
+            q(orientation, s);
+        }
+        Step::Fold { degrees, .. } => {
+            s.push_str(&format!("{{\"op\":\"fold\",\"degrees\":{degrees}"));
         }
         Step::Background { ms, .. } => {
             s.push_str(&format!("{{\"op\":\"background\",\"ms\":{ms}"));
@@ -825,4 +865,29 @@ fn an_ios_background_interval_is_a_real_time_test_step() {
         assert!(crate::tests(&format!("test \"t\"\n  background {ms}\n")).is_err());
     }
     assert!(crate::tests("test \"t\"\n  perf\n    background 100\n").is_err());
+}
+
+#[cfg(test)]
+#[test]
+fn rotate_names_the_interface_orientation() {
+    for orientation in [
+        "portrait",
+        "portraitUpsideDown",
+        "landscapeLeft",
+        "landscapeRight",
+    ] {
+        let parsed =
+            crate::tests(&format!("test \"turn\" on ios\n  rotate {orientation}\n")).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&crate::tests_json(&parsed)).unwrap();
+        assert_eq!(
+            json[0]["steps"][0],
+            serde_json::json!({"op":"rotate", "orientation":orientation, "line":2})
+        );
+    }
+    for invalid in ["", "faceUp", "landscape-left", "portrait extra"] {
+        assert!(
+            crate::tests(&format!("test \"turn\"\n  rotate {invalid}\n")).is_err(),
+            "{invalid}"
+        );
+    }
 }

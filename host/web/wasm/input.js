@@ -330,7 +330,7 @@ export function attach(el, id, handlers) {
         log(`intersect: ${e.message}`);
         landed();
       });
-    } else if ((kind === "pointerdown" || kind === "pointerup" || kind === "pointermove") && !el.exactPointer) {
+    } else if ((kind === "pointerdown" || kind === "pointerup" || kind === "pointercancel" || kind === "pointermove") && !el.exactPointer) {
       let p;
       el.exactPointer = true;
       const own = () => p ??= host.inputHandlers?.pointer(el, on, (k, r, e) => {

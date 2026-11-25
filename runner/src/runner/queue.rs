@@ -165,7 +165,7 @@ impl<D: DataSource> Runner<D> {
         // Only the application data source can opt in, and an unasked
         // tail must belong to the same foreground cause. A queue with
         // `then` owes one action per reply (LLP 1092 D4).
-        let replacement = if cause == Cause::person()
+        let replacement = if cause.ordinary_app()
             && self.mutation_row(m).then.is_none()
             && self.source_ready(source)
             && self.seams.source_answer.is_none()

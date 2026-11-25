@@ -23,6 +23,7 @@ import org.robolectric.annotation.GraphicsMode
 import org.robolectric.annotation.Implementation
 import org.robolectric.annotation.Implements
 import org.robolectric.annotation.LooperMode
+import org.robolectric.shadows.ShadowChoreographer
 import org.robolectric.util.ReflectionHelpers.ClassParameter
 import org.robolectric.util.ReflectionHelpers.callInstanceMethod
 import org.robolectric.util.ReflectionHelpers.getField
@@ -61,6 +62,11 @@ class OwnerBackgroundTest {
             var recordedY = 0f
             var scrollStatement: IntArray? = null
             val samples = ArrayList<Float>()
+            val touches = ArrayList<Triple<Int, Float, Long>>()
+            @JvmStatic @Implementation fun touch(action: Int, x: Float, y: Float, tool: Int, at: Long): IntArray? {
+                touches.add(Triple(action, y, at))
+                return null
+            }
             fun statement() = intArrayOf(
                 scrollScale.toBits(), 1, 2 or 4 or 8, 0,
                 0, logicalY.toBits(), 0, recordedY.toBits(), 0, 500f.toBits(),
@@ -89,7 +95,7 @@ class OwnerBackgroundTest {
             @JvmStatic @Implementation fun chrome(): IntArray? = chromeStatement.also { chromeStatement = null }
             @JvmStatic @Implementation fun timerHeld() = 0
             @JvmStatic @Implementation fun animating(vsyncOnly: Boolean) = frameDemand
-            @JvmStatic @Implementation fun displayFrame() {}
+            @JvmStatic @Implementation fun displayFrame(vsync: Long, arrival: Long, fastest: Long, thermal: Int, period: Long) {}
             var owing = false
             @JvmStatic @Implementation fun owed() = owing
             @JvmStatic @Implementation fun nextDue() = (due - SystemClock.uptimeMillis()).toDouble()
@@ -99,6 +105,11 @@ class OwnerBackgroundTest {
     }
 
     @Test fun aStepThatOnlyMovesMakesNoFrameAndStillDoesWhatFollowsOne() {
+        // The turn the move posts runs only when this test moves the clock. Unpaused, Robolectric delivers a vsync
+        // the moment one is asked for, so the turn could run, and run again while a frame is demanded, before the
+        // counts below are read.
+        val wasPaused = ShadowChoreographer.isPaused()
+        ShadowChoreographer.setPaused(true)
         Host.due = SystemClock.uptimeMillis() + 30000
         val owner = Owner(false, false, 0) { "0" }
         val thread = Owner::class.java.getDeclaredField("thread").apply { isAccessible = true }.get(owner) as HandlerThread
@@ -109,7 +120,7 @@ class OwnerBackgroundTest {
         val chrome = ArrayList<Int>()
         val requests = ArrayList<Int>()
         owner.chrome = { chrome += it[0] }
-        owner.asked = { requests += it[0] }
+        owner.asked = { words, _ -> requests += words[0] }
         try {
             val frames = Host.frames
             owner.ask {
@@ -160,6 +171,7 @@ class OwnerBackgroundTest {
             }
             handler.removeCallbacksAndMessages(null)
             thread.quitSafely(); thread.join(5000)
+            ShadowChoreographer.setPaused(wasPaused)
             assertFalse(thread.isAlive)
         }
     }
@@ -172,6 +184,27 @@ class OwnerBackgroundTest {
             thread.quitSafely(); thread.join(5000)
             assertFalse(thread.isAlive)
         }
+    }
+
+    @Test fun aQueuedLiftKeepsItsHistoryAfterTheReaderRecyclesIt() = withOwner { owner ->
+        owner.ask { Host.touches.clear() }
+        val drain = CountDownLatch(1)
+        owner.tell { check(drain.await(5, TimeUnit.SECONDS)) }
+        val up = MotionEvent.obtain(100, 108, MotionEvent.ACTION_MOVE, 20f, 40f, 0)
+        try {
+            up.addBatch(116, 20f, 50f, 1f, 1f, 0)
+            up.addBatch(118, 20f, 52f, 1f, 1f, 0)
+            up.action = MotionEvent.ACTION_UP
+            owner.touch(1, up.x, up.y, MotionEvent.TOOL_TYPE_FINGER, 0L, 118_000_000L, up)
+            up.offsetLocation(0f, 100f)
+        } finally {
+            up.recycle()
+            drain.countDown()
+        }
+        assertEquals(
+            listOf(Triple(2, 40f, 108_000_000L), Triple(2, 50f, 116_000_000L), Triple(1, 52f, 118_000_000L)),
+            owner.ask { Host.touches.toList() },
+        )
     }
 
     private fun turn(word: Int) {
@@ -261,7 +294,7 @@ class OwnerBackgroundTest {
         val calls = ArrayList<String>()
         val landscape = intArrayOf(Requests.ORIENTATION, 0, 5, 1, 0b1100, 0, 0, 0)
         owner.chrome = { calls += "chrome ${it[0]}" }
-        owner.asked = { assertArrayEquals(landscape, it); calls += "orientation" }
+        owner.asked = { words, _ -> assertArrayEquals(landscape, words); calls += "orientation" }
         withMainSyncBarrier {
             assertTrue(owner.boot(64, 64, 1f, "", "", false, started = {
                 turn(1)
@@ -295,7 +328,7 @@ class OwnerBackgroundTest {
         val alert = intArrayOf(Requests.SURFACE, 0, 10, 1, Surfaces.ALERT, 0, 0, 0, 64, 64, 0, 0, 0)
         owner.published = { calls += "published" }
         owner.chrome = { calls += "chrome ${it[0]}" }
-        owner.asked = { assertArrayEquals(alert, it); calls += "alert" }
+        owner.asked = { words, _ -> assertArrayEquals(alert, words); calls += "alert" }
         assertTrue(owner.boot(64, 64, 1f, "", "", false) {})
         owner.ask { }
         main.idle()

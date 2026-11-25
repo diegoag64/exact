@@ -190,28 +190,27 @@ Ports    --port <n> or EXACT_PORT chooses the page’s port; otherwise web: head
     more: DRIVE.filter(naming(DRIVE_FIRST, false)),
     internal: ['--test <file>', ...DRIVE_INTERNAL],
     body: `Gallery: ios|macos widget|activity <entry> tree|state|screenshot|clock
-  tree [<target>|--ax] · logs · layout|perf [<target>] · resize <w>x<h> · close · back
+  tree [<target>|--ax] · logs · layout|perf [<target>] · resize <w>x<h> · rotate <orientation> (iOS simulator) · close · back
   state [<name>] [--full]  a state, resource or field, dotted: groceries.0.done; >8 KB: sizes
   tap <target> [contextmenu|hover|drag <dx> <dy>|down|…] · tap up (testId, exact text or label)
-  type <target> <text>|key <Name>   (a select, date or checkbox: its value)
-  clock data|settle|held|+<ms> [real]    replies · transitions · push
-  check [dark|both]  what is wrong · screenshot <png> [over <ms> every <ms>] [window]  window: bars · --device captures display
+  type <target> <text>|key <Name>  (a select, date or checkbox: its value)
+  clock data|settle|held|+<ms> [real]  replies · transitions · push
+  check [dark|both] · screenshot <png> [over <ms> every <ms>] [window]  window: bars · --device captures display
   Android reader drives refuse film and play layers only under --live. Record a live or normal run with adb shell screenrecord.
   screenshot <png> compare <ref> · prefer <feature> <value> · fail|pass fetch <prefix>`,
-    bodyAll: `Unnamed, the host is one app.json ships, as test's. Builds if stale, launches, runs each quoted op and closes. A game's world: post [<surface>] <text> is a message its next tick reads (type <surface> message <text>). No --storage, no storage; --reset-storage empties a native store, --keep-storage keeps a web or compare's. A deep link is typed on the navigate= root: "type <root> euxy://p/1" (macOS, iOS: through protocol_handlers, no alert). Held contact: "tap <t> down [at <x> <y>]" "tap hold <ms>" "tap move [by] <x> <y> [over <ms>]" "tap up"; a drag from a point is "tap <t> drag <dx> <dy> from <x> <y>". A drag takes [hold ms during "read"] [then dx dy …], one finger throughout, as a test's does; under the agent's clock it moves the clock by its press, over and hold. Dragging into the keyboard needs --touch platform and the keyboard open. clock held [<target>…] [<n>s] waits for a held reply with the clock frozen, then runs clock data (default bound: 20 s). clock until state <path> == <JSON literal> within <ms> waits, the clock frozen, until state reads it (a stream's state after its first message); a miss names the last value. state media (Apple): each video's player (renderer, paused, currentTime, muted, volume); under the agent a video takes no audio session, and on iOS AVKit's own controls answer only --touch platform.
+    bodyAll: `On an iOS simulator, rotate takes portrait, portraitUpsideDown, landscapeLeft or landscapeRight. Unnamed, the host is one app.json ships, as test's. Builds if stale, launches, runs each quoted op and closes. A game's world: post [<surface>] <text> is a message its next tick reads (type <surface> message <text>). No --storage, no storage; --reset-storage empties a native store, --keep-storage keeps a web or compare's. A deep link is typed on the navigate= root: "type <root> euxy://p/1" (macOS, iOS: through protocol_handlers, no alert). Held contact: "tap <t> down [at <x> <y>]" "tap hold <ms>" "tap move [by] <x> <y> [over <ms>]" "tap up"; a drag from a point is "tap <t> drag <dx> <dy> from <x> <y>". A drag takes [hold ms during "read"] [then dx dy …], one finger throughout, as a test's does; under the agent's clock it moves the clock by its press, over and hold. Dragging into the keyboard needs --touch platform and the keyboard open. clock held [<target>…] [<n>s] waits for a held reply with the clock frozen, then runs clock data (default bound: 20 s). clock until state <path> == <JSON literal> within <ms> waits, the clock frozen, until state reads it (a stream's state after its first message); a miss names the last value. state media (Apple): each video's player (renderer, paused, currentTime, muted, volume); under the agent a video takes no audio session, and on iOS AVKit's own controls answer only --touch platform.
 Ports    web: --port/EXACT_PORT, else a named store’s port (20000-47999), else free. ${NATIVE_PORTS}`,
     example: 'bun exact.mjs agent web --storage s1 tree "tap add" "screenshot .exact/a.png"',
   },
   verify: {
     line: 'build if stale, run *.test.contract, check each screen it reaches light and dark, relaunch once',
-    usage: 'bun exact.mjs verify [web|ios|windows|android] [--sim <udid|name>] [--shots <dir>] [--rescroll] [--strict] [--json]',
+    usage: 'bun exact.mjs verify [web|ios|windows|android] [--sim <udid|name>] [--duo <udid|name>|none] [--shots <dir>] [--rescroll] [--strict] [--json]',
     common: ['verify [ios] [--shots <dir>] [--sim <name>]    done when it says "verify: clean"'],
     flags: [
       DRIVE.find(([flag]) => flag === '--backend <url>'),
-      ['--sim <udid|name> · --variant <name>', 'iOS: which simulator (else EXACT_SIM, a booted iPhone, or the newest Pro) · which app.json variant (or EXACT_VARIANT)'],
+      ['--sim <udid|name> · --duo <udid|name>|none · --variant <name>', 'iOS: which simulator (else EXACT_SIM, a booted iPhone, or the newest Pro) · which iPhone Duo (else the one booted, or the first) · which app.json variant (or EXACT_VARIANT)'],
       ['--shots <dir>', 'also copy every screenshot it captured there, named as in .exact/verify/ (a test\'s own `screenshot` steps too)'],
-      ['--rescroll · --strict', 'ios: measure scrolling again though nothing it depends on changed · exit 1 on any counted problem (for CI)'],
-      ['--json', 'the report as one JSON object (ios: `scrolling`, each finding\'s metric, value, UIKit\'s and remedy)'],
+      ['--rescroll · --strict · --json', 'ios: measure scrolling again though nothing it depends on changed · exit 1 on any counted problem (for CI) · the report as one JSON object (ios: `scrolling`, each finding\'s metric, value, UIKit\'s and remedy)'],
     ],
     internal: ['--app <name>'],
     body: `Host     unnamed: one app.json ships (host, deploy.store, deploy.binaries): web when they name it or nothing, else the
@@ -232,6 +231,7 @@ Large    each of those screens again at the largest text size (ios: the simulato
          projects into its navigation bar and its tab bar. A smaller or fixed font is the tell, as is a line-clamp
          in a list's row or hyphens="auto" on several words (a UILabel hyphenates only a word longer
          than its line; grouped list rows hyphenate as cells do). Counted ("3 at the largest text size"), never failing.
+Duo      ios: the tests again on an iPhone Duo, where there is one; the first screen and each test's end in its poses, and with the keyboard up.
 Native   windows: headless at app.json's window size, then the desktop's window (windows-window.png); android: the APK, light and dark. Neither checks, reads the accessibility tree or the largest text, or scrolls yet.
 Scroll   ios: ~15 s of real touches on a long first-screen list, once per build (host/apple/feel): "like UIKit", or
          a counted finding per metric the app can fix; Exact's own one uncounted line; load > cores: physics only.
@@ -285,7 +285,7 @@ Ports    none. Runs to completion (--run too); --prebuild returns at once, the b
       ['--force', 'publish over the other branch\'s link instead'],
       ['--json', 'one JSON object on stdout: url, revision, branch, action (or code and error)'],
     ],
-    internal: ['--app <name>'],
+    internal: ['--app <name>', '--login <number>'],
     body: `Run it when the app is ready for a person to try on their phone, and send them the link
 (stdout's last line). They open it on their iPhone, and AppDrop installs the app with their
 own Apple ID. The first share makes the link; later ones publish a new version to it, and
@@ -600,11 +600,11 @@ Ports    none; send makes one HTTPS request. Runs to completion.`,
     example: 'bun exact.mjs shells',
   },
   lock: {
-    line: 'refresh Cargo.lock and the app’s Swift Package.resolved',
+    line: 'refresh Cargo and Swift locks and check the Android Maven lock',
     usage: 'bun exact.mjs lock',
     flags: [],
     internal: ['--lock'],
-    body: 'Use after exact update reports app lock drift, after this checkout moves or after adding a dependency.\nApps preserve locked versions where possible, resolve Cargo offline first and fetch missing dependencies when needed; games fetch and recapture their lock. Swift products declared by the app or its packages resolve into Package.resolved. Review and commit changed locks. Builds never change them.\nPorts    none. Runs to completion.',
+    body: 'Use after exact update reports app lock drift, after this checkout moves or after adding a dependency.\nApps preserve locked versions where possible, resolve Cargo offline first and fetch missing dependencies when needed. Games fetch and recapture their lock. Swift products declared by the app or its packages resolve into Package.resolved. If gradle.lockfile exists, the command checks it through Gradle or names the tools needed to check it. Run bun exact.mjs android --write-locks to refresh the Android lock and checksums. Review and commit changed locks. Builds never change them.\nPorts    none. Runs to completion.',
     example: 'bun exact.mjs lock',
   },
   windows: {

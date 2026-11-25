@@ -9,6 +9,8 @@ final class LaunchServiceTests: XCTestCase {
     #if os(iOS)
     func testAnEarlyWorldPresentationIsKeptUntilTheTreePresents() throws {
         let launch = ExactLaunch()
+        var said: [String] = []
+        launch.observeLog = { said.append($0) }
         let session = ExactApp.shared.makeSession(label: "early-world-presentation")
         defer { launch.link?.invalidate(); session.destroy() }
         launch.delegateInit()
@@ -26,10 +28,15 @@ final class LaunchServiceTests: XCTestCase {
         XCTAssertEqual(launch.marks[.world], present)
         launch.worldPresented()
         XCTAssertEqual(launch.marks[.world], present, "later frames keep the first mark")
+        let process = try XCTUnwrap(launch.marks[.process])
+        XCTAssertEqual(said.filter { $0.hasPrefix("world ") }, ["world \(String(format: "%.1f", (present - process) * 1000))"],
+                       "said once, when the tree's first pixel lets the mark land")
     }
 
     func testAWorldPresentationAfterFirstPixelKeepsItsOwnTime() throws {
         let launch = ExactLaunch()
+        var said: [String] = []
+        launch.observeLog = { said.append($0) }
         let session = ExactApp.shared.makeSession(label: "late-world-presentation")
         defer { launch.link?.invalidate(); session.destroy() }
         launch.delegateInit()
@@ -50,6 +57,9 @@ final class LaunchServiceTests: XCTestCase {
         XCTAssertLessThanOrEqual(world, CACurrentMediaTime())
         launch.worldPresented()
         XCTAssertEqual(launch.marks[.world], world, "later frames keep the first mark")
+        // The observer says the canvas's first frame once, on the startup line's clock (ms since `process`).
+        let process = try XCTUnwrap(launch.marks[.process])
+        XCTAssertEqual(said.filter { $0.hasPrefix("world ") }, ["world \(String(format: "%.1f", (world - process) * 1000))"])
     }
 
     func testAnInterruptedCommitKeepsWatchingUntilItsPresentation() {
@@ -126,6 +136,19 @@ final class LaunchServiceTests: XCTestCase {
         launch.frame(Vsync(at: moved, interval: 1.0 / 60))
         waitFor("the owner's answer that confirms it") { launch.ttiOutcome != nil }
         XCTAssertEqual(launch.marks[.interactive], moved)
+    }
+
+    /// LLP 1072 T3: two metric reads on the way at once each answer, with
+    /// nothing outstanding: neither is work that follows the other.
+    func testTwoLedgerReadsAtOnceBothAnswer() throws {
+        let session = ExactApp.shared.makeSession(label: "two-ledger-reads")
+        defer { session.destroy() }
+        XCTAssertNil(session.boot(plan: try fixturePlan("STILL_PAGE"), size: CGSize(width: 400, height: 800)).error)
+        settleViewlessSession(session)
+        var answers: [ExactLaunch.Ledger?] = []
+        for _ in 0..<2 { ExactLaunch.readLedger(session) { answers.append($0) } }
+        waitFor("both reads answer", cap: 10) { answers.count == 2 }
+        XCTAssertEqual(answers.compactMap { $0?.items }, [[], []])
     }
 
     /// The evaluation that ended work asks for: its turn, then the owner's

@@ -6,6 +6,7 @@ import { DRAG_BOUNDS, REACH_MS, reaches } from '../host/apple/touches.mjs';
 import { layoutArgs, perfOp, layoutBox } from './agent-inspect.mjs';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { basename, resolve } from 'node:path';
+import { FIELDS } from '../host/web/drag-in.js';
 
 /** Observed only while CDP holds a finger. Cancellation ends the DOM pointer
  * stream even though the driver still has to lift its injected touch. */
@@ -146,6 +147,11 @@ export function dragArguments(opts) {
 /** The words of a drag's text: a quoted target or read, escapes included, is one word. */
 export const dragWords = text => text.match(/"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|[^\s]+/g) ?? [];
 
+/** The words of a drag in after its kind (`tap <target> drop …`), a quoted one whole and unquoted, in either quote:
+ * `--text "Mount Fuji"`, `'/tmp/a b.txt'`. */
+export const dragInWords = text => dragWords(text).map((w) => w.length < 2 || w[0] !== w.at(-1) || !`"'`.includes(w[0]) ? w
+  : w[0] === '"' ? inputJSON(w) : w.slice(1, -1).replace(/\\'/g, "'"));
+
 /** Parse the drag portion of one CLI operation; quoted reads belong to the preceding leg. */
 export function parseDrag(s, text) {
   // A read is quoted either way: `during 'state liked'` as `during "state liked"`.
@@ -206,17 +212,22 @@ export async function dragTap({ s, carrier, node, target, host, timing, tapRefus
   if (!b) throw new Error(`view ${node.id} has no box on screen`);
   const start = from ? [b.x + from[0], b.y + from[1]] : [b.x + b.w / 2, b.y + b.h / 2], end = [start[0] + dx, start[1] + dy];
   const inside = ([x, y]) => x >= 0 && y >= 0 && x <= vp.w && y <= vp.h;
+  // A swipe's flick (`swipeDrag`, LLP 1057.001 §8.3) is one real stroke from inside its target, never the scroll view's own
+  const after = scrolled ? ' after the view scrolled in' : '';
+  if (opts.flick && !(start[0] >= b.x && start[1] >= b.y && start[0] < b.x + b.w && start[1] < b.y + b.h)) throw new Error(`swipe: its start (${start}) is outside the target's ${b.w} × ${b.h} box at (${b.x}, ${b.y})${after}`);
   // Android's reader owns scrolling; Presenter.pointer_* cannot hold its scroll contact.
   // Use the reader's deterministic scroll samples, and report that delivery explicitly.
-  if (host === 'android' && carrier.reader && ['ScrollView', 'List'].includes(b.type) && !mouse) {
+  let liftAt;
+  if (host === 'android' && carrier.reader && (press || dx || dy || ['ScrollView', 'List'].includes(b.type)) && !mouse) {
     if (!inside(start)) throw new Error(`drag: start (${start}) leaves the viewport (${vp.w} × ${vp.h})`);
-    const req = { op: 'tap', id: node.id, scrollDrag: [dx, dy], ms: over, from: start };
-    const owner = await carrier.ask({ ...req, probe: true });
+    const req = { op: 'tap', id: node.id, scrollDrag: [dx, dy], ms: dx || dy ? over : 0, from: start, ...(hold ? { hold } : {}) };
+    const owner = await carrier.ask({ ...req, probe: true, ...(press ? { press } : {}) });
     if (owner.error) throw new Error(`drag: ${owner.error}`);
+    liftAt = owner.liftAt;
     if (owner.scrollDrag !== 'presenter') {
       if (owner.scrollDrag !== 'reader') throw new Error('drag: Android reader did not identify the scroll owner');
-      if (during.length || press || hold || opts.path || modifiers) throw new Error('drag: Android reader scroll samples do not hold a native touch; press, hold, during, path and modifiers need native input');
-      const r = await carrier.ask(req);
+      if (during.length || (press && !owner.reorderGrip) || opts.path || modifiers) throw new Error('drag: Android reader scroll samples do not hold a native touch; press, during, path and modifiers need native input');
+      const r = await carrier.ask(press ? { ...req, press } : req);
       if (r.error || r.delivery === 'unsupported') throw new Error(`drag: ${r.error ?? r.reason ?? 'unsupported'}`);
       return noted(await s.landed({ ...r, target, ...(scrolled ? { scrolled } : {}), drag: said, carrier: host, mode: timing }), [...still(r, target), ...await reorderNotes(s, mark)]);
     }
@@ -235,6 +246,7 @@ export async function dragTap({ s, carrier, node, target, host, timing, tapRefus
 
   if (into && !endpoint(end)) throw new Error(`drag: end (${end}) leaves the screen above its bottom safe area`);
   if (vp && !(inside(start) && endpoint(end))) {
+    if (opts.flick) throw new Error(`swipe: the flick from (${start}) to (${end}) leaves the viewport (${vp.w} × ${vp.h})${after}; start it farther in with at, where the target leaves room for the stroke`);
     // A scroller dragged further than the viewport reaches scrolls the whole way (euxy FRICTION 14). On iOS it is the
     // scroll view's own drag, which a viewport does not bound, under real touches too: a held real stroke scrolls less
     // than its length (a 300-point one scrolled Reflow 214) and an unheld one flings, so real strokes would not scroll
@@ -313,7 +325,18 @@ export async function dragTap({ s, carrier, node, target, host, timing, tapRefus
     // press and hold seek the virtual clock (platformer R7). `virtual` tells
     // web and macOS to skip the wall sleep; Linux already seeks and reports `clock`.
     const seek = timing !== 'platform' ? { virtual: true } : {};
-    if (press) await phase('hold', { ms: press, ...seek });
+    if (liftAt !== undefined) {
+      const still = Math.min(press, liftAt), travel = liftAt - still;
+      if (still) await phase('hold', { ms: still, ...seek });
+      if (travel) {
+        const leg = legs[0], part = travel / over;
+        await phase('move', { dx: dx * part, dy: dy * part, ms: travel });
+        leg.dx -= dx * part; leg.dy -= dy * part; leg.over -= travel;
+      }
+      const lifted = await carrier.ask({ op: 'tap', phase: 'reorderHold' });
+      if (lifted.error) throw new Error(`drag: ${lifted.error}`);
+      if (press > still) await phase('hold', { ms: press - still, ...seek });
+    } else if (press) await phase('hold', { ms: press, ...seek });
     // Each leg (`then`) moves on from where the one before ended, runs its ops there, and holds.
     for (const leg of legs) {
       if (leg.dx || leg.dy) await phase('move', { dx: leg.dx, dy: leg.dy, ms: leg.over });
@@ -530,24 +553,34 @@ export const folderTree = (dir, prefix = '') => readdirSync(dir, { withFileTypes
 /** The driver's pasted paths: a file's bytes, a folder's tree. */
 export const driverFiles = (paths) => paths.map((p) => statSync(p).isDirectory() ? { name: basename(p), files: folderTree(p) } : { name: basename(p), bytes: readFileSync(p).toString('base64') });
 
-/** `tap <target> drop|dragenter <path…>` and `tap <target> dragleave` on Chrome; returns the drag it leaves held. */
+/** `tap <target> drop|dragenter [<path…>] [--text "…"] [--url "…"]` and `tap <target> dragleave` on Chrome; returns
+ * the drag it leaves held. */
 export async function fileDrag({ kind, opts, id, x, y, dragged, call, evaluate }) {
-  // A drag of files from the desktop as Chrome takes one (`Input.dispatchDragEvent`, the paths themselves, so
-  // its DataTransfer is the browser's own, folders included): it comes over the point, then drops there, or
-  // is cancelled. A drop no element accepts is refused before Chrome would open the files itself.
+  // A drag from outside the page as Chrome takes one (`Input.dispatchDragEvent`, the paths themselves, so its
+  // DataTransfer is the browser's own, folders included, with the text as `text/plain` and the link as
+  // `text/uri-list`): it comes over the point, then drops there, or is cancelled. A drop no element takes is
+  // refused before Chrome would open the files or follow the link itself.
+  // Out of the page first, then cancelled: Chrome sends the page no dragleave for a bare cancel
+  const away = async (held) => {
+    await call('Input.dispatchDragEvent', { type: 'dragOver', x: -1, y: -1, data: held.data });
+    await call('Input.dispatchDragEvent', { type: 'dragCancel', x: -1, y: -1, data: held.data });
+  };
   if (kind === 'dragleave') {
     if (!dragged) throw new Error('no drag is held over the page');
-    // Out of the page first: Chrome sends the page no dragleave for a bare cancel.
-    await call('Input.dispatchDragEvent', { type: 'dragOver', x: -1, y: -1, data: dragged.data });
-    await call('Input.dispatchDragEvent', { type: 'dragCancel', x: -1, y: -1, data: dragged.data });
+    await away(dragged);
     dragged = null;
   } else {
-    const data = { items: [], files: opts[kind], dragOperationsMask: 1 };
-    if (kind === 'drop' && !await evaluate(`(() => { const dt = new DataTransfer(); dt.items.add(new File([], 'probe')); const over = new DragEvent('dragover', { clientX: ${x}, clientY: ${y}, bubbles: true, cancelable: true, dataTransfer: dt }); (document.elementFromPoint(${x}, ${y}) ?? exact.views.get(${id})).dispatchEvent(over); return over.defaultPrevented; })()`)) {
-      if (dragged) { await call('Input.dispatchDragEvent', { type: 'dragCancel', x: dragged.x, y: dragged.y, data: dragged.data }); dragged = null; }
-      throw new Error(`view ${id} took no drop (nothing at its middle accepts a file drag)`);
+    const { text, url } = opts, files = opts[kind];
+    const items = [...(text !== undefined ? [{ mimeType: 'text/plain', data: text }] : []), ...(url !== undefined ? [{ mimeType: 'text/uri-list', data: url }] : [])];
+    const data = { items, files, dragOperationsMask: 1 };
+    // The probe's drag carries the same types; an editable field under the point inserts plain text itself
+    const probe = `const dt = new DataTransfer(); ${files.length ? "dt.items.add(new File([], 'probe'));" : ''} ${items.map((i) => `dt.setData(${JSON.stringify(i.mimeType)}, ${JSON.stringify(i.data)});`).join(' ')}`;
+    if (kind === 'drop' && !await evaluate(`(() => { ${probe} const over = new DragEvent('dragover', { clientX: ${x}, clientY: ${y}, bubbles: true, cancelable: true, dataTransfer: dt }); const at = document.elementFromPoint(${x}, ${y}) ?? exact.views.get(${id}); at.dispatchEvent(over); const field = at.closest(${JSON.stringify(FIELDS)}); return over.defaultPrevented || (!!field && dt.types.includes('text/plain') && !dt.types.includes('Files')); })()`)) {
+      // A drag held over the page leaves it as `dragleave` takes it away, and the caller holds none (`error.dragged`)
+      if (dragged) await away(dragged);
+      throw Object.assign(new Error(`view ${id} took no drop: nothing at its middle takes this drag`), { dragged: null });
     }
-    if (!dragged || dragged.data.files.join('\n') !== data.files.join('\n')) await call('Input.dispatchDragEvent', { type: 'dragEnter', x, y, data });
+    if (!dragged || JSON.stringify([dragged.data.items, dragged.data.files]) !== JSON.stringify([items, files])) await call('Input.dispatchDragEvent', { type: 'dragEnter', x, y, data });
     await call('Input.dispatchDragEvent', { type: 'dragOver', x, y, data });
     if (kind === 'drop') { await call('Input.dispatchDragEvent', { type: 'drop', x, y, data }); dragged = null; } else dragged = { x, y, data };
   }

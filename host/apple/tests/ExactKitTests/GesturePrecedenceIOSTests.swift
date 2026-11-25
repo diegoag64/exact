@@ -61,12 +61,12 @@ final class GesturePrecedenceIOSTests: XCTestCase {
 
     func testAPointerNodeObservesItsTouchWithoutPreventingAnything() throws {
         let p = host([
-            ["op": "create", "id": 1, "kind": "button", "handlers": ["press", "pointerdown", "pointerup"]],
+            ["op": "create", "id": 1, "kind": "button", "handlers": ["press", "pointerdown", "pointerup", "pointercancel"]],
             ["op": "roots", "ids": [1]],
             ["op": "frame", "id": 1, "x": 0.0, "y": 0.0, "w": 200.0, "h": 100.0]
         ])
         var log: [String] = []
-        p.onPointer = { id, kind, _ in log.append("\(kind == .down ? "down" : kind == .up ? "up" : "move") \(id)") }
+        p.onPointer = { id, kind, _ in log.append("\(kind == .down ? "down" : kind == .up ? "up" : kind == .cancel ? "cancel" : "move") \(id)") }
         let node = try XCTUnwrap(p.views[1])
         let g = try XCTUnwrap(node.gestureRecognizers?.compactMap { $0 as? PointerRecognizer }.first)
         XCTAssertFalse(g.cancelsTouchesInView)
@@ -77,7 +77,7 @@ final class GesturePrecedenceIOSTests: XCTestCase {
         XCTAssertEqual(log, ["down 1"])
         g.touchesMoved([touch], with: UIEvent())
         g.touchesCancelled([touch], with: UIEvent())
-        XCTAssertEqual(log, ["down 1", "up 1"], "a cancel is an up")
+        XCTAssertEqual(log, ["down 1", "cancel 1"])
         // Without the handlers the observer goes.
         node.handlers = ["press"]
         node.updateContextGestures()
@@ -92,12 +92,12 @@ final class GesturePrecedenceIOSTests: XCTestCase {
     /// sheet's scroll view never began another pan.
     func testAnObserverWhoseHeldTouchEndedUnseenObservesTheNextTouch() throws {
         let p = host([
-            ["op": "create", "id": 1, "kind": "button", "handlers": ["press", "pointerdown", "pointerup"]],
+            ["op": "create", "id": 1, "kind": "button", "handlers": ["press", "pointerdown", "pointerup", "pointercancel"]],
             ["op": "roots", "ids": [1]],
             ["op": "frame", "id": 1, "x": 0.0, "y": 0.0, "w": 200.0, "h": 100.0]
         ])
         var log: [String] = []
-        p.onPointer = { id, kind, _ in log.append("\(kind == .down ? "down" : kind == .up ? "up" : "move") \(id)") }
+        p.onPointer = { id, kind, _ in log.append("\(kind == .down ? "down" : kind == .up ? "up" : kind == .cancel ? "cancel" : "move") \(id)") }
         let node = try XCTUnwrap(p.views[1])
         let g = try XCTUnwrap(node.gestureRecognizers?.compactMap { $0 as? PointerRecognizer }.first)
         let opened = LiftedTouch()
@@ -117,7 +117,7 @@ final class GesturePrecedenceIOSTests: XCTestCase {
     /// its own dispatch, so the states it is given are recorded as they are set.
     func testAnObserverFailsWhenATouchItNeverTookEnds() throws {
         let p = host([
-            ["op": "create", "id": 1, "kind": "button", "handlers": ["press", "pointerdown", "pointerup"]],
+            ["op": "create", "id": 1, "kind": "button", "handlers": ["press", "pointerdown", "pointerup", "pointercancel"]],
             ["op": "roots", "ids": [1]],
             ["op": "frame", "id": 1, "x": 0.0, "y": 0.0, "w": 200.0, "h": 100.0]
         ])
@@ -181,7 +181,7 @@ final class GesturePrecedenceIOSTests: XCTestCase {
         XCTAssertFalse(inner.nearer(touched))
         XCTAssertFalse(outer.nearer(p.views[1]), "a touch on the outer node itself is its own")
         var log: [String] = []
-        p.onPointer = { id, kind, _ in log.append("\(kind == .down ? "down" : kind == .up ? "up" : "move") \(id)") }
+        p.onPointer = { id, kind, _ in log.append("\(kind == .down ? "down" : kind == .up ? "up" : kind == .cancel ? "cancel" : "move") \(id)") }
         let touch = UITouch()
         inner.touchesBegan([touch], with: UIEvent())
         inner.touchesEnded([touch], with: UIEvent())
@@ -205,7 +205,7 @@ final class GesturePrecedenceIOSTests: XCTestCase {
         var log: [String] = []
         // The inner node's handler calls `stopPropagation()`: the batch it commits sets the flag.
         p.onPointer = { id, kind, _ in
-            log.append("\(kind == .down ? "down" : kind == .up ? "up" : "move") \(id)")
+            log.append("\(kind == .down ? "down" : kind == .up ? "up" : kind == .cancel ? "cancel" : "move") \(id)")
             if id == 2, kind == .down { p.propagationStopped = true }
         }
         let inner = try XCTUnwrap(p.views[2]?.gestureRecognizers?.compactMap { $0 as? PointerRecognizer }.first)

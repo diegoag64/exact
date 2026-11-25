@@ -8,7 +8,8 @@
 //     from camera [over <ms> every <ms>] (a world's look frame, LLP 1127.000) | state <canvas> draws | look · state
 //     <canvas>:<entity> visible
 //   tap <target> [at <x> <y> (a press at a point; plain, it presses what it names) | wheel <dx> <dy> [gesture | fling |
-//     hold] [at <x> <y>] [modifiers <Control…>] | wheel 0 0 release | drop <path…> | dragenter <path…> | dragleave |
+//     hold] [at <x> <y>] [modifiers <Control…>] | wheel 0 0 release | drop [<path…>] [--text "…"] [--url "…"] |
+//     dragenter [<path…>] [--text "…"] [--url "…"] | dragleave |
 //     into <key> [block <v>] [inline <v>] | hover | hold-state active|hover|focus-visible|none | history <n> |
 //     {"history":n} | mouse | dblclick [touch] | contextmenu | auxclick | clicks <1-3> (each [at <x> <y>] [modifiers
 //     <Shift+Meta…>]) | modifiers <Shift+Meta…> | fingers <2-5> [at <x> <y>] |
@@ -28,7 +29,7 @@
 //   tap @<id> <choice> | type @<id> <value> (by the node it answers at, or its capability: files F11)
 //   clock <ms|+ms|+ms real [until <path>]|settle|data|held [<target>…] [<n>s]|until state <path> == <literal> within
 //     <ms>> (+ms real until: a test harness's signal file, ending the real wait early; until state: the wall clock, the
-//     clock frozen, until state reads the JSON literal) | resize <w>x<h> | resize <w> <h> | post [<surface>] <text>
+//     clock frozen, until state reads the JSON literal) | fold <degrees> | rotate <orientation> | resize <w>x<h> | resize <w> <h> | post [<surface>] <text>
 //     (type <surface> message <text>: a world's Input::messages) | close | sample <x> <y> […] (extended linear sRGB on Apple, screenshot sRGB elsewhere
 //     under view points, LLP 1100 D12) | prefer <media feature or page fact> <value> […] | perf [<target>] [during
 //     "<op>" …] | perf frames [late <n>] | perf hatches [during "<op>" …] | perf streams [start]
@@ -84,7 +85,7 @@ import { relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkOp } from './agent-check.mjs';
 import { compareScreenshot, referenceNote, samplePoints } from './agent-compare.mjs';
-import { parseDrag, heldRead } from './agent-drag.mjs';
+import { dragInWords, parseDrag, heldRead } from './agent-drag.mjs';
 import { driveNotes, runTests, reloadWeb, fetchOrigins, loopbackOrigins, faultRequest } from './agent-test.mjs';
 import { phone } from '../host/apple/devices.mjs';
 import { resolveApp, webDist as defaultWebDist } from './app.mjs';
@@ -305,8 +306,8 @@ export async function main(argv, injected = {}) {
             'fling',
             'hold] [at <x> <y>] [modifiers <Control…>]',
             'wheel 0 0 release',
-            'drop <path…> (files and folders)',
-            'dragenter <path…> (a drag of them held over it)',
+            'drop [<path…>] [--text "…"] [--url "…"] (files, folders, text and a link, at least one)',
+            'dragenter [<path…>] [--text "…"] [--url "…"] (that drag held over it)',
             'dragleave (it leaves undropped)',
             'hover',
             'hold-state active|hover|focus-visible|none (held by the host as the real state, until real input on it or none)',
@@ -321,6 +322,7 @@ export async function main(argv, injected = {}) {
             'fingers <2-5> [at <x> <y>] (fingers tapped together; iOS --touch platform: four open the dev menu)',
             'pinch <scale> [at <x> <y>]',
             'mediasession <action> [seconds]',
+            "swipe <left|right|up|down> [at <x> <y>] (the platform's swipe as a real 120-point flick; iOS --touch platform)",
             "pictureinpicture minimize|back|close|hover (Exact's picture-in-picture window, macOS)",
             'drag <dx> <dy> [from <x> <y>] [mouse: the left button, desktop pointers] [modifiers <M>] [press <ms>] [over <ms>] [hold <ms>] [into keyboard: iOS --touch platform, keyboard up; end above the screen bottom safe area] [during "<op>" …: after the move, the finger down; inside the hold under --touch platform] [then <dx> <dy> [over <ms>] [hold <ms>] [during "<op>" …]: another leg, same iOS touch]',
             'drag to <target> [at <x> <y>: from its top left] [same options]]',
@@ -339,6 +341,8 @@ export async function main(argv, injected = {}) {
             "post [<surface>] <text> (one word or one quoted string: a message the world reads from Input::messages next tick, as the page's postMessage(text, surface) sends it; no surface, the page's one world)",
             'tap @N|@<id> <choice>',
             'type @N|@<id> <value>',
+            'rotate portrait|portraitUpsideDown|landscapeLeft|landscapeRight (iOS simulator scene orientation)',
+            'fold <degrees> (0 through 180 on an iOS simulator with a hinge)',
             'background <milliseconds> (iOS: leave the app for real time, then resume the same session)',
             "clock <ms|+ms|+ms real [until <path>]|settle|data|held [<target>…] [<n>s]|until state <path> == <literal> within <ms> (real time, the clock frozen, until state <path> reads the JSON literal; a miss fails naming the last value: a stream's state after its first message)>",
             'sample <x> <y> […]',
@@ -546,18 +550,30 @@ export async function main(argv, injected = {}) {
         // `tap hold`, `tap up`, `tap cancel` only while a contact is down;
         // with none down those words are targets like any other.
         if (holdOf(args[0]))
-          r = await s.tap(args[0], { choice: args[1] }); // `tap @7 cancel` is the hold, even while a contact is down
+          // `tap @7 cancel` is the hold, even while a contact is down; `tap @7 swipe down`, a swipe, is refused
+          r = await s.tap(args[0], args[1] === 'swipe' && args[2] !== undefined ? { swipe: args[2] } : { choice: args[1] });
         else if (args[1] === 'drag' && !(s.contact && ['move', 'hold', 'up', 'cancel'].includes(args[0]))) {
           const tail = named ? named[3] : trimmed.replace(/^\S+\s+\S+\s+/, '');
           const drag = parseDrag(s, tail.replace(/^drag(?:\s+|$)/, ''));
           r = await s.tap(args[0], { drag });
+        } else if (['drop', 'dragenter'].includes(args[1]) && !s.contact) {
+          const tail = (named ? named[3] : trimmed.replace(/^\S+\s+\S+\s+/, '')).replace(/^\S+\s*/, '');
+          const [target, opts] = tapWords([args[0], args[1], ...dragInWords(tail)]);
+          r = await s.tap(target, opts);
         }
-        // Every other form, strictly (#107): the contact's phases (LLP 1035.003 D1) read as `tap move …`, `tap hold`,
+        // Every other form, strictly: the contact's phases (LLP 1035.003 D1) read as `tap move …`, `tap hold`,
         // `tap up`, `tap cancel` only while a contact is down; with none down those words are targets like any other.
         else {
           const [target, { phase, ...opts }] = tapWords(args, !!s.contact);
           r = target === null && !opts.midi ? await s.pointer(phase, opts) : await s.tap(target, opts);
         }
+        break;
+      case 'rotate':
+        r = await s.rotate(args.join(' '));
+        break;
+      case 'fold':
+        if (args.length !== 1 || !/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(args[0])) throw new MalformedOperation('fold <degrees> (0 through 180)');
+        r = await s.fold(Number(args[0]));
         break;
       case 'background':
         if (args.length !== 1 || !/^\d+$/.test(args[0])) throw new MalformedOperation('background <milliseconds>');
@@ -631,7 +647,7 @@ export async function main(argv, injected = {}) {
         );
       default:
         throw new MalformedOperation(
-          `unknown op: ${op} (tree, layout, state, logs, check, screenshot, sample, tap, type, post, pick, reload, clock, background, resize, close, back, prefer, call, perf, fail fetch, pass fetch)`,
+          `unknown op: ${op} (tree, layout, state, logs, check, screenshot, sample, tap, type, post, pick, reload, clock, background, fold, rotate, resize, close, back, prefer, call, perf, fail fetch, pass fetch)`,
         );
     }
     return [op, r, how];

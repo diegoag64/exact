@@ -9,9 +9,9 @@
 //!
 //! - `{"extension", "view", "tag", "displayed": bool, "origin"}` for a view
 //!   declared `"displayed": true`;
-//! - `{"extension", "view", "tag", "bound": prop, "origin"}` for each binding
-//!   prop whose value changed; the value itself reaches the view as its props
-//!   do.
+//! - `{"extension", "view", "tag", "bound": prop, "value", "origin"}` for
+//!   each binding prop whose value changed; the value reaches the view as its
+//!   props do too, and an implementation pairs the two by it.
 //!
 //! `view` is the node's id, which the host also gives the view's factory, so
 //! an implementation keys its views' state by it. A view that leaves the tree
@@ -31,6 +31,8 @@ use std::collections::BTreeMap;
 /// What the runner last saw of each package view.
 #[derive(Default)]
 pub(in crate::runner) struct Views {
+    observer: Option<crate::Announce>,
+    track_props: BTreeMap<String, Vec<String>>,
     /// Each package view node, by id.
     seen: BTreeMap<ViewId, Viewed>,
     /// The cause of the last commit applied: what a change found after it
@@ -107,12 +109,13 @@ impl<D: DataSource> Runner<D> {
                 .and_then(|p| serde_json::from_str(p).ok())
                 .unwrap_or_default();
             let shown = row.displayed && crate::wakelock::displayed(kernel, &self.scrolled, id);
-            let mut was = self
-                .extensions
-                .views
-                .seen
-                .remove(&id)
-                .filter(|v| v.tag == tag);
+            let mut was = self.extensions.views.seen.remove(&id);
+            if was.as_ref().is_some_and(|v| v.tag != tag) {
+                let gone = was.take().unwrap();
+                if gone.shown {
+                    said.push(json!({ "extension": gone.extension, "view": id.to_string(), "tag": gone.tag, "displayed": false, "origin": origin.word() }));
+                }
+            }
             let mut viewed = Viewed {
                 tag: tag.to_owned(),
                 extension,
@@ -125,21 +128,27 @@ impl<D: DataSource> Runner<D> {
                 viewed.shown_by = was.shown_by;
                 viewed.bound = std::mem::take(&mut was.bound);
             }
+            let first_report = said.len();
+            for prop in plan.str(row.binds).split_whitespace() {
+                if props[prop].is_null() {
+                    if viewed.bound.remove(prop).is_none() {
+                        continue;
+                    }
+                } else {
+                    let value = props[prop].to_string();
+                    if viewed.bound.get(prop).is_some_and(|(v, _)| *v == value) {
+                        continue;
+                    }
+                    viewed.bound.insert(prop.to_owned(), (value, cause));
+                }
+                said.push(json!({ "extension": viewed.extension, "view": id.to_string(), "tag": tag, "bound": prop, "value": props[prop], "origin": origin.word() }));
+            }
             if row.displayed && viewed.shown != shown {
                 viewed.shown = shown;
                 viewed.shown_by = cause;
-                said.push(json!({ "extension": viewed.extension, "view": id.to_string(), "tag": tag, "displayed": shown, "origin": origin.word() }));
-            }
-            for prop in plan.str(row.binds).split_whitespace() {
-                let value = match &props[prop] {
-                    Json::Null => continue,
-                    v => v.to_string(),
-                };
-                if viewed.bound.get(prop).is_some_and(|(v, _)| *v == value) {
-                    continue;
-                }
-                viewed.bound.insert(prop.to_owned(), (value, cause));
-                said.push(json!({ "extension": viewed.extension, "view": id.to_string(), "tag": tag, "bound": prop, "origin": origin.word() }));
+                // Hide before rebinding. On reveal the new bindings must already be in place.
+                let at = if shown { said.len() } else { first_report };
+                said.insert(at, json!({ "extension": viewed.extension, "view": id.to_string(), "tag": tag, "displayed": shown, "origin": origin.word() }));
             }
             now.insert(id, viewed);
         }
@@ -149,6 +158,21 @@ impl<D: DataSource> Runner<D> {
             }
         }
         self.extensions.views.seen = now;
+        if self.extensions.views.observer.is_some()
+            && said.iter().any(|body| {
+                let Some(props) = body["tag"]
+                    .as_str()
+                    .and_then(|tag| self.extensions.views.track_props.get(tag))
+                else {
+                    return false;
+                };
+                body["bound"]
+                    .as_str()
+                    .is_none_or(|prop| props.iter().any(|p| p == prop))
+            })
+        {
+            self.publish_view_bindings();
+        }
         for body in said {
             self.tell_view(body);
         }
@@ -165,8 +189,9 @@ impl<D: DataSource> Runner<D> {
             if v.shown {
                 said.push(json!({ "extension": v.extension, "view": id.to_string(), "tag": v.tag, "displayed": true, "origin": v.shown_by.origin().word() }));
             }
-            for (prop, (_, by)) in &v.bound {
-                said.push(json!({ "extension": v.extension, "view": id.to_string(), "tag": v.tag, "bound": prop, "origin": by.origin().word() }));
+            for (prop, (value, by)) in &v.bound {
+                let value: Json = serde_json::from_str(value).unwrap_or_default();
+                said.push(json!({ "extension": v.extension, "view": id.to_string(), "tag": v.tag, "bound": prop, "value": value, "origin": by.origin().word() }));
             }
         }
         for body in said {
@@ -183,6 +208,54 @@ impl<D: DataSource> Runner<D> {
             Some(prop) => v.bound.get(prop).map(|(_, by)| *by),
             None => v.shown.then_some(v.shown_by),
         }
+    }
+
+    pub(super) fn observe_view_bindings_linked(
+        &mut self,
+        props: &[(&str, &str)],
+        observer: Option<crate::Announce>,
+    ) {
+        let views = &mut self.extensions.views;
+        views.track_props.clear();
+        for &(tag, prop) in props {
+            views
+                .track_props
+                .entry(tag.to_owned())
+                .or_default()
+                .push(prop.to_owned());
+        }
+        views.observer = observer;
+        self.publish_view_bindings();
+    }
+
+    /// A whole commit, including revocations, for a host that owns track readers.
+    pub(super) fn publish_view_bindings(&self) {
+        let Some(observer) = &self.extensions.views.observer else {
+            return;
+        };
+        let mut snapshot = json!({});
+        for (id, v) in &self.extensions.views.seen {
+            if !v.shown
+                || !(self.extensions.bound.contains(&v.extension)
+                    || self.extensions.agent.contains(&v.extension))
+            {
+                continue;
+            }
+            let Some(props) = self.extensions.views.track_props.get(&v.tag) else {
+                continue;
+            };
+            for prop in props {
+                let Some((value, cause)) = v.bound.get(prop) else {
+                    continue;
+                };
+                if let Ok(track) = serde_json::from_str::<String>(value) {
+                    let origin = self.join_causes(*cause, v.shown_by);
+                    snapshot[&v.tag][id.to_string()][prop] =
+                        json!({"value": track, "origin": origin.origin().word()});
+                }
+            }
+        }
+        observer(&snapshot.to_string());
     }
 
     /// `state.extensions`' `views` for `extension`: each view, whether it is

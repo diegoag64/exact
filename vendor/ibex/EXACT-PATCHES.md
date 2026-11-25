@@ -1,5 +1,10 @@
 # Vendored Ibex split crates — Exact integration ledger
 
+## Web page fetch grants
+
+The native parser accepts `net.fetch self` alongside named API origins.
+Native hosts have no page origin, so this line grants no access (LLP 1016 D6).
+
 ## Android 10 and Intl
 
 Android selects Intl from the validated bundle receipt. The pinned v7
@@ -348,7 +353,9 @@ witness. This is Exact application policy and remains local.
 On Unix, `AppDirectories::snapshot` pins only roots that already exist and
 leaves the others absent for that invocation. A read-only widget refresh can
 therefore run first-launch application logic without creating the app's data,
-cache or temporary directories. `exact-js` selects it only for a snapshot;
+cache or temporary directories. Reads under an absent root report ENOENT,
+just like reads of absent files under an existing root.
+`exact-js` selects it only for a snapshot;
 `missing_snapshot_roots_do_not_prevent_activation_or_create_app_directories`
 is the direct consumer test. This is LLP 1126 D8 application policy and
 remains local.
@@ -1290,3 +1297,11 @@ executes the app’s network work on a separate host with its own transports.
 
 `Fetch::new` binds grants to a supplied HTTP transport. Exact's driver uses
 it for a fixture response without constructing a WebSocket client or stores.
+
+## Local patch 53, cancelling portable HTTP
+
+A fired signal ends DNS, connect and socket I/O with `ConnectionAborted`,
+including a pending Winsock connect. This lets rustls and `write_all` finish
+on cancellation. Fetch checks the signal after I/O and returns its
+`AbortError` to the caller. Replay on refresh in `transport/rustls_http.rs`
+and `transport/windows_connect.rs` (expo/exact#1578).

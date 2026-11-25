@@ -39,6 +39,16 @@
 //! cancels it or it ends: work it started runs on as origin `action`, but
 //! is admitted no further name held to the person (LLP 1133.023 D7a,
 //! [`Runner::invocation_live`]).
+//!
+//! A control whose press opens the app first (LLP 1126.004 D5: Android's
+//! recording tile, whose capture only the app in front may start) is
+//! pressed from the visible app, `foreground`, still as origin `action`:
+//! the app in front is what Android needs to grant the microphone, not a
+//! grant of the app's authority. Its press is refused unless the bake
+//! offers the control so, refused `busy` unless it can run at once, and
+//! refused `unavailable` if the page is hidden when it dispatches. While it
+//! runs and the page shows, it starts the same two captures a recording
+//! press starts on Apple (`press_records`).
 
 use super::provenance::{CallOrigin, Cause};
 use super::seams::Tools;
@@ -86,6 +96,9 @@ pub struct CallHow {
     pub hidden: bool,
     /// The face's digest the door was compiled with, where it has one.
     pub digest: Option<String>,
+    /// A control's press the host delivered to the app it brought to the
+    /// front (module doc).
+    pub foreground: bool,
 }
 
 struct Call {
@@ -122,6 +135,8 @@ impl Call {
 #[derive(Default)]
 pub(in crate::runner) struct Calls {
     waiting: VecDeque<Call>,
+    /// The cold door reports no view while dispatching this action.
+    dispatching_hidden: bool,
     current: Option<Call>,
     /// The calls that ended, for `state.intents` and the door's `called`.
     ended: VecDeque<Json>,
@@ -131,6 +146,14 @@ pub(in crate::runner) struct Calls {
 }
 
 impl<D: DataSource> Runner<D> {
+    /// Whether press `id` still runs uncancelled within its bound: what a
+    /// host asks where it acquires a device for the press's capture, on the
+    /// host's clock as it reads now.
+    pub fn press_live(&mut self, id: u64) -> bool {
+        self.sample();
+        self.live_press(id).is_some()
+    }
+
     /// The call `id` while it runs uncancelled within its bound.
     fn live_call(&self, id: u64) -> Option<&Call> {
         let c = self.calls.current.as_ref()?;
@@ -173,6 +196,9 @@ impl<D: DataSource> Runner<D> {
         if let Some(why) = refused {
             return Ok(self.refuse_call("unavailable", &why));
         }
+        if call.how.foreground && self.page.in_background() {
+            return Ok(self.refuse_call("unavailable", "the app is not in front"));
+        }
         let origin = call.origin();
         let action = self.plan.action(tool.action).clone();
         let mut fields = Vec::new();
@@ -212,9 +238,16 @@ impl<D: DataSource> Runner<D> {
             Some(i) => format!("control:{}", self.plan.str(self.plan.controls[i].kind)),
             None => format!("tool:system:{door}"),
         };
+        let hidden_entry = call.how.cold && call.how.hidden;
+        let cause = if origin == CallOrigin::Action {
+            Cause::control(id, call.how.foreground)
+        } else {
+            Cause::call(false, id)
+        };
         self.log(format!("{by} {name} dispatched"));
-        let cause = Cause::call(origin == CallOrigin::Action, id);
+        self.calls.dispatching_hidden = hidden_entry;
         let result = self.as_cause(cause, |r| r.run_action(tool.action, args, &[]));
+        self.calls.dispatching_hidden = false;
         match result {
             Ok(receipt) => Ok(Some(receipt)),
             Err(e) => {
@@ -366,6 +399,45 @@ impl<D: DataSource> Runner<D> {
 /// The tool seam, linked: the calls above.
 pub(crate) struct LinkedTools;
 
+impl<D: DataSource> Runner<D> {
+    /// Refuse a restricted contributor's request to show a hidden window
+    /// (LLP 1133.023 D7a). A call's remaining commands follow LLP 1111 D4a,
+    /// including in an app with no declared tools.
+    pub(in crate::runner) fn filter_call_commands(&mut self, first: usize) {
+        let cause = self.cause();
+        let hidden_show = cause
+            .hidden_show_reason()
+            .filter(|_| self.page.hidden || self.calls.dispatching_hidden);
+        if !cause.is_call() && hidden_show.is_none() {
+            return;
+        }
+        let mut i = first;
+        while i < self.commands.len() {
+            let command = &self.commands[i];
+            if let Some(reason) = hidden_show.filter(|_| command.shows_window()) {
+                let name = self.commands.remove(i).name;
+                if cause.is_call() && SKIPPED.contains(&name.as_str()) {
+                    self.seams.tools.call_skipped(self, &name);
+                }
+                self.log(format!("{name}: refused: hidden page ({reason})"));
+                continue;
+            }
+            if !cause.is_call() || RUN.contains(&command.name.as_str()) {
+                i += 1;
+                continue;
+            }
+            let name = self.commands.remove(i).name;
+            if SKIPPED.contains(&name.as_str()) {
+                let t = self.seams.tools;
+                t.call_skipped(self, &name);
+                self.log(format!("{name}: skipped in a tool call"));
+            } else {
+                self.log(format!("{name}: refused: in a tool call"));
+            }
+        }
+    }
+}
+
 impl<D: DataSource> Tools<D> for LinkedTools {
     /// A door's call of `tool` with `args`, a JSON object: queued, and its
     /// invocation id answered. `Err` for a tool the plan does not name.
@@ -420,9 +492,24 @@ impl<D: DataSource> Tools<D> for LinkedTools {
                 "control `{kind}` opens a location, which its host opens"
             ));
         };
-        // A binary whose bake placed its controls presses only those it offers.
-        if (r.calls.placements.as_ref()).is_some_and(|p| p[kind]["offered"].is_null()) {
-            return Err(format!("control `{kind}` is not offered by this binary"));
+        let foreground = how.foreground;
+        // A binary whose bake placed its controls presses only those it
+        // offers, each from where its placement says.
+        if let Some(placed) = r.calls.placements.as_ref().map(|p| &p[kind]) {
+            if placed["offered"].is_null() {
+                return Err(format!("control `{kind}` is not offered by this binary"));
+            }
+            let opens = placed["offered"][0]["intent"] == "foreground";
+            if opens != foreground {
+                return Err(match opens {
+                    true => {
+                        format!("control `{kind}` opens the app, whose visible activity presses it")
+                    }
+                    false => format!(
+                        "control `{kind}` runs where it is pressed, not from the app it opened"
+                    ),
+                });
+            }
         }
         let tool = tool.0 as usize;
         let action = plan.action(plan.tools[tool].action);
@@ -453,6 +540,18 @@ impl<D: DataSource> Tools<D> for LinkedTools {
             let message = json!("it is already pressed");
             r.log(format!(
                 "control:{kind} {name}: refused, busy (already pressed)"
+            ));
+            r.finish_call(call, "refused", "none", "busy", message);
+            return Ok(id);
+        }
+        // A press that opened the app runs now or not at all: one queued
+        // behind other work could start after the person moved on.
+        if foreground
+            && (r.calls.current.is_some() || !r.calls.waiting.is_empty() || r.wake_running())
+        {
+            let message = json!("other work is running");
+            r.log(format!(
+                "control:{kind} {name}: refused, busy (other work is running)"
             ));
             r.finish_call(call, "refused", "none", "busy", message);
             return Ok(id);
@@ -501,7 +600,13 @@ impl<D: DataSource> Tools<D> for LinkedTools {
         let (Some(control), Some(placed)) = (r.live_press(id), &r.calls.placements) else {
             return false;
         };
-        placed[r.plan.str(r.plan.controls[control].kind)]["offered"][0]["intent"] == "recording"
+        // A recording press on Apple starts with the app hidden; one that
+        // opened the app on Android, only while it shows.
+        match placed[r.plan.str(r.plan.controls[control].kind)]["offered"][0]["intent"].as_str() {
+            Some("recording") => true,
+            Some("foreground") => !r.page.in_background(),
+            _ => false,
+        }
     }
 
     /// Whether a call is between dispatch and its end.
@@ -557,32 +662,12 @@ impl<D: DataSource> Tools<D> for LinkedTools {
         }
     }
 
-    /// Take off this commit's commands from `first` that a call does not
-    /// run, when the commit is a call's work (LLP 1111 D4a), after the call
-    /// too (LLP 1133.023 D7a).
-    fn skip_in_call(&self, r: &mut Runner<D>, first: usize) {
+    /// The running call's record says what its work skipped.
+    fn call_skipped(&self, r: &mut Runner<D>, name: &str) {
         let cause = r.cause();
-        if !cause.is_call() {
-            return;
-        }
-        let mut i = first;
-        while i < r.commands.len() {
-            let name = r.commands[i].name.clone();
-            if RUN.contains(&name.as_str()) {
-                i += 1;
-                continue;
-            }
-            r.commands.remove(i);
-            if SKIPPED.contains(&name.as_str()) {
-                // The running call's record says what it skipped.
-                let ours = |c: &&mut Call| c.id == cause.invocation() || c.id == cause.owner();
-                if let Some(call) = (r.calls.current.as_mut()).filter(ours) {
-                    call.skipped.push(name.clone());
-                }
-                r.log(format!("{name}: skipped in a tool call"));
-            } else {
-                r.log(format!("{name}: refused: in a tool call"));
-            }
+        let ours = |c: &&mut Call| c.id == cause.invocation() || c.id == cause.owner();
+        if let Some(call) = (r.calls.current.as_mut()).filter(ours) {
+            call.skipped.push(name.to_owned());
         }
     }
 

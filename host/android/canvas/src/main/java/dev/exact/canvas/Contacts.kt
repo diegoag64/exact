@@ -11,6 +11,13 @@ import kotlin.math.abs
  * scroll interception rule; a child can disallow interception through its parent chain.
  */
 internal class Contacts(private val view: ExactView, private val scrolling: Scrolling) {
+    var pendingDrive: AgentModuleFinger? = null
+    private var driving: AgentModuleFinger? = null
+    fun dispatch(event: MotionEvent, send: () -> Boolean): Boolean {
+        driving = pendingDrive?.takeIf { it.matches(event) }
+        return try { send() } finally { driving = null }
+    }
+    internal val sequence get() = serial
     private val module = ModuleContact { target, matrix -> view.natives?.transform(target, matrix) == true }
     private val pending = ArrayDeque<MotionEvent>()
     private val candidateEvents = ArrayList<MotionEvent>()
@@ -29,6 +36,8 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
     private var stopped = false
     private var engine = false
     private var field = false
+    /** Whether the hosted view under the finger could scroll the way the finger went past the slop; null before. */
+    private var scrollsAlong: Boolean? = null
     val fieldKeeps get() = field && view.fields?.keeps == true
     private val slop = ViewConfiguration.get(view.context).scaledTouchSlop
     /** When the contact that is down becomes a long press (uptime ms; 0: none armed). */
@@ -48,7 +57,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
                         if (pending.any { it.actionMasked == MotionEvent.ACTION_POINTER_DOWN }) {
                             finishHold(null)
                         } else {
-                            DragOut.held(downTime); view.forward(4, downX, downY, tool, -1L)
+                            DragOut.held(downTime); view.forward(4, downX, downY, tool, -1L, at = -1L)
                             view.ask(downX, downY) { words ->
                                 if (token == serial && !stopped) finishHold(words)
                             }
@@ -76,7 +85,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
     /** The long press to exact2. One it took (its menu, or a drag that lifts as the finger moves on, LLP 1094.000 D7) keeps
      * the rest of the contact from a scroller, which would otherwise claim the finger's next move along its axis. */
     private fun longPress() {
-        DragOut.held(downTime); view.forward(4, downX, downY, tool, -1L)
+        DragOut.held(downTime); view.forward(4, downX, downY, tool, -1L, at = -1L)
         val token = serial
         // The moves that come meanwhile wait for the answer ([drain]), so a scroller cannot claim one first.
         waiting = true
@@ -99,7 +108,9 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
         waiting = false
         val additional = pending.any { it.actionMasked == MotionEvent.ACTION_POINTER_DOWN }
         if (!additional && words != null && longPressesIn(words) != longPresses) {
-            dropCandidate(); module.cancel(); endEngine(); scrolling.yieldToHosted()
+            dropCandidate(); module.cancel()
+            if (words[0] and 64 == 0) endEngine() // A lifted reorder row still follows this contact.
+            scrolling.yieldToHosted()
         } else {
             contextPending = false
             admit()
@@ -110,10 +121,12 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
     fun hold(e: MotionEvent?) {
         view.removeCallbacks(held)
         heldAt = 0L
-        if (e == null) return
+        if (e == null || scrolling.caughtSharedFling) return
         heldAt = e.eventTime + ViewConfiguration.getLongPressTimeout()
         view.postDelayed(held, (heldAt - android.os.SystemClock.uptimeMillis()).coerceAtLeast(0))
     }
+
+    fun awaiting(target: View) = candidate === target
 
     fun resume() { stopped = false }
 
@@ -126,7 +139,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
         for (e in pending) e.recycle()
         pending.clear(); dropCandidate(); module.clear(); releaseInterception()
         if (field) view.fields?.cancel()
-        if (engine) view.forward(3, downX, downY, tool, 0L)
+        if (engine) view.forward(3, downX, downY, tool, 0L, at = -1L)
         engine = false; field = false
     }
 
@@ -137,7 +150,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
 
     fun scrollClaimed(x: Float, y: Float, tool: Int) {
         dropCandidate(); module.cancel(); hold(null); releaseInterception()
-        if (field || engine) view.forward(3, x, y, tool, 0L)
+        if (field || engine) view.forward(3, x, y, tool, 0L, at = -1L)
         field = false; engine = false
     }
 
@@ -169,7 +182,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
         if (down) {
             module.clear(); dropCandidate(); hold(null); releaseInterception()
             downX = e.x; downY = e.y; downTime = e.downTime; tool = e.getToolType(0)
-            engine = false; field = false
+            engine = false; field = false; scrollsAlong = null
             view.fingers.began(e)
             val caughtFling = scrolling.touch(e)
             field = !caughtFling && view.fields?.touch(e) == true
@@ -179,9 +192,18 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
             val fieldToken = view.fields?.serial ?: 0
             val first = MotionEvent.obtain(e)
             waiting = true
-            view.ask(e.x, e.y) { words ->
+            // A driven down needs the admission result before it can answer the socket.
+            val finger = driving
+            fun hit(done: (IntArray) -> Unit) {
+                if (finger == null) view.ask(e.x, e.y, done)
+                else {
+                    val x = e.x; val y = e.y
+                    done(view.owner?.ask { Native.under(x, y) } ?: Native.under(x, y))
+                }
+            }
+            hit { words ->
                 try {
-                    if (token != serial || stopped) return@ask
+                    if (token != serial || stopped) return@hit
                     if (field) {
                         field = view.fields?.under(fieldToken, words.getOrElse(2) { 0 }) == true
                         engine = !field
@@ -196,6 +218,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
                     if (!field && words.size >= at + 13) {
                         val session = (words[at + 8].toLong() and 0xffffffffL) or (words[at + 9].toLong() shl 32)
                         candidate = view.natives?.taker(words[at], words[at + 5], words[at + 6], session)
+                        if (finger != null && candidate !== finger.target) candidate = null
                         originX = Float.fromBits(words[at + 10]); originY = Float.fromBits(words[at + 11])
                         if (candidate != null) {
                             if (caughtFling) { engine = true; view.fingers.relay(first); hold(first) }
@@ -223,17 +246,21 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
         if (module.active && engine) {
             val dx = abs(e.x - downX); val dy = abs(e.y - downY)
             if (e.actionMasked == MotionEvent.ACTION_MOVE && (dx > slop || dy > slop)) {
-                if (claimed(dx, dy, view.natives?.keeps == true, e.y - downY)) {
+                if (claimed(dx, dy, kept(e), e.y - downY)) {
                     module.clear(); releaseInterception()
                 } else endEngine()
             } else if (e.actionMasked == MotionEvent.ACTION_POINTER_DOWN) endEngine()
         }
         if (module.active && e.actionMasked == MotionEvent.ACTION_POINTER_DOWN) scrolling.yieldToHosted()
-        if (scrolling.touch(e, module.active && view.natives?.keeps == true)) { hold(null); return true }
+        if (scrolling.touch(e, module.active && kept(e))) {
+            driving?.scrolled = true
+            hold(null); return true
+        }
         if (field && view.fields?.touch(e) == true) { hold(null); return true }
         if (module.owned) {
             if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) endEngine()
-            module.deliver(e)
+            val to = module.deliver(e)
+            driving?.received(to, e.actionMasked)
             if (e.actionMasked == MotionEvent.ACTION_UP || e.actionMasked == MotionEvent.ACTION_CANCEL) releaseInterception()
             return true
         }
@@ -244,6 +271,17 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
         if (engine) view.fingers.forward(e, action)
         if (action == 1 || action == 3) engine = false
         return true
+    }
+
+    /** Whether the hosted view that has the contact keeps its drag from a scroller around it: it asked its parent not to
+     * intercept, or it can scroll the way the finger went past the slop, as a `ViewPager` leaves a child the drag that
+     * child can scroll (`canScroll`). The second is judged once, at the slop, so a frame scrolled to its edge during
+     * the drag keeps it, as a browser latches a scroll to one scroller. */
+    private fun kept(e: MotionEvent): Boolean {
+        if (view.natives?.keeps == true) return true
+        val dx = e.x - downX; val dy = e.y - downY
+        if (scrollsAlong == null && (abs(dx) > slop || abs(dy) > slop)) scrollsAlong = module.scrolls(dx, dy)
+        return scrollsAlong == true
     }
 
     /** Whether a drag past the slop, longer along [dx] or [dy], is Exact's and not the hosted view's. A gesture's claim
@@ -261,7 +299,8 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
         val events = candidateEvents.toList()
         candidateEvents.clear(); candidate = null
         hold(null)
-        if (offer && module.begin(v, events.first(), originX, originY)) {
+        if (offer && module.begin(v, events.first(), originX, originY, place = view.natives?.placesFrame(v) != true)) {
+            pendingDrive?.offered(v, events.first())
             scrolling.hosted()
             // Android starts its long-click timer on down. Keep Exact's contact until movement chooses an axis,
             // so a native button can recognize a hold without taking the surrounding row's swipe.
@@ -279,7 +318,7 @@ internal class Contacts(private val view: ExactView, private val scrolling: Scro
 
     private fun endEngine() {
         hold(null)
-        if (engine) view.forward(3, downX, downY, tool, 0L)
+        if (engine) view.forward(3, downX, downY, tool, 0L, at = -1L)
         engine = false
     }
 

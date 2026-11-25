@@ -1,11 +1,49 @@
 <!--
 `contract vocab <name>` answers each concept below with its whole idiom (LLP 1116.004 D5.1):
 what a builder looked up a recipe or the grammar for, answered in one lookup. A section is
-`## <name>: <what it does>`, then `names: …`, the other names it answers to, then the answer:
+`## <name>: <what it does>`, then `names: …` lines for its aliases, then the answer:
 a sentence or two, the minimal complete code, and the recipe for depth. A name that is also a
 tag, attribute or function prints its entry first, then the concept. Every `contract` block
 compiles (`contract/cli/tests/it/vocab.rs`).
 -->
+
+## viewport-and-container-units: viewport and container lengths
+names: viewport-units, vw, vh, vmin, vmax, svw, svh, lvw, lvh, dvw, dvh
+names: cqw, cqh, cqi, cqb, cqmin, cqmax
+
+Write viewport lengths as quoted CSS strings: `width="100vw"` is the viewport's
+width. `vw` and `vh` are 1% of its width and height; `vmin` and `vmax` are 1% of
+its smaller and larger side. `svw`/`svh`, `lvw`/`lvh` and `dvw`/`dvh` use the
+small, large and dynamic viewports. Browsers resolve `vw`/`vh` against the large
+viewport; native windows have no retractable browser chrome, so those three
+sizes coincide. Lengths update on resize. On iOS, every viewport unit is the
+window's in every sheet, never the sheet's.
+
+Dimension rows (width/height, their min/max, padding/margins, offsets and border
+radii) and scalar rows (`font-size`, `line-height`, `letter-spacing`,
+`text-indent`, gaps, border widths, border spacing and `shape-margin`) take
+them, including in `calc()`, `min()`, `max()` and `clamp()` where the row admits
+those forms. `padding-left="calc(100vw - 100%)"` is the viewport width minus the
+containing block's width. Property-specific subsets still apply: `translate`,
+grid tracks and pixel-only rows such as `perspective` refuse viewport units.
+Unsupported units include `vi`, `vb` and the `s`/`l`/`d` forms of `vmin`/`vmax`.
+
+```contract
+component App
+  view
+    column width="100%" min-height="100dvh" padding-left="calc(100vw - 100%)"
+      text "Viewport lengths"
+```
+
+Dimension rows also accept container units (`cqw`, `cqh`, `cqi`, `cqb`, `cqmin`,
+`cqmax`), alone or in a math function: a share of the nearest content owner's
+content root on each axis its host fixes, else of the small viewport
+(LLP 1123 D16). The text and spacing rows that take viewport units take them
+too; custom properties and inset overrides refuse them.
+The web keeps CSS's units, which use the small viewport until a content root
+declares a container there; an SVG attribute using one is left unwritten.
+
+docs/contract-for-agents.md#viewport-and-container-units; CSS Values 4: https://www.w3.org/TR/css-values-4/#viewport-relative-lengths
 
 ## bluetooth: Bluetooth grants for an app's native module
 names: device.bluetooth, device.bluetooth-background
@@ -516,7 +554,7 @@ component App
 More: docs/recipes/persisted-setting.md
 
 ## swipe: a list row's swipe actions
-names: delete, swipe-actions, swipeActions, swipe-to-delete, swipeleft, swipeContent, swipeLeading, swipeTrailing, swipe actions
+names: delete, swipe-actions, swipeActions, swipe-to-delete, swipeContent, swipeLeading, swipeTrailing, swipe actions
 
 `delete=action` on a list row is its swipe to delete: a red Delete beside the row, which a
 full swipe performs. On iOS it is UIKit's own swipe action; on the web and the Mac the row
@@ -542,10 +580,14 @@ component App
 - On a row of a grouped list's `section`, or of a `list` whose rows go down the page;
   anywhere else it does nothing (warning `lower-delete-row`). A `list` with sections is a
   grouped list only with `appearance="auto"` (warning `lower-list-section`).
-- `swipeleft=action` and `swiperight=action` are not swipe actions: the node follows the
-  finger and the one action runs when it lifts past 64 points, with no button revealed
-  (a message's swipe to reply; `contract vocab swipeleft`). A row that shows Delete is
-  `delete=`.
+- `swipe=action swipe-follow="left"` (or `"right"`) is not a swipe action: the node follows
+  the finger one way and the one action runs when it lifts at or past 64 points, with no
+  button revealed (a message's swipe to reply; `contract vocab swipe-follow`). A row that
+  shows Delete is `delete=`.
+- `swipe=action swipe-flick="down"` is not a swipe action either: the platform's discrete
+  swipe, which nothing follows, runs the action once (a flick down on a composer that puts the
+  keys away; `contract vocab swipe-flick`). An element takes one `swipe` and exactly one of
+  the two.
 - Other actions than Delete (Pin, Flag, a leading action, several) are the long form: a
   horizontal snap `scroll` laid out as a row (`display="flex"`), naming its content
   (`swipeContent`) and its actions (`swipeTrailing`, `swipeLeading`: buttons' `id`s, inside
@@ -1200,8 +1242,8 @@ A root `-exact-menu-keys="close-window=none"` keeps File ▸ Close Window with n
 chord, so ⌘W reaches the page; declare `-exact-menu-remove="close-all"` with it,
 or AppKit's Close All ⌥⌘W shows as a row of its own. `close-window=Meta+Shift+W`
 gives it ⇧⌘W. `close-window` is the one id; the chord is one `aria-keyshortcuts`
-chord with `Meta` that is not the host's or the system's own (⌘Q, ⌘W, ⌘H, ⌘M,
-⌘-comma and the like). Another id, an id named twice, a chord without `Meta`, a
+chord with `Meta` or `Mod` that is not the host's or the system's own (⌘Q, ⌘W, ⌘H, ⌘M,
+⌘-comma and the like). Another id, an id named twice, a chord without `Meta` or `Mod`, a
 standard chord and nested use fail with `lower-menu-keys`. An app command with
 the chord still takes it; without the declaration Close Window has ⌘W (LLP 1021
 §5.3.3).
@@ -1333,7 +1375,10 @@ surface of your own takes `backgroundMaterial`: `"glass"` or `"glass-clear"` is
 `.dark` and so on: no material's grey wash, as expo-blur's `tint="dark"`), and `"sidebar"`,
 `"menu"`, `"popover"`, `"hud-window"` the Mac's. On macOS, `"sidebar"` blends with the
 content behind the window. The node's own fill and content still paint above it.
-The web and Linux draw a blur that approximates each. A glass button is `buttonStyle="glass"` or
+The painted hosts (Android, Windows and Linux) approximate each material with its
+table tint and backdrop blur; `"glass"` and `"glass-clear"` have no Liquid Glass
+refraction or specular highlights there. Android before 12 draws only the tint.
+The web also approximates each with tint and blur. A glass button is `buttonStyle="glass"` or
 `"prominent-glass"`, and `glassGroup=<points>` on a box merges the glass inside it as
 SwiftUI's `GlassEffectContainer` does. On iOS a glass a tap adds to a group grows out of the
 nearest glass within that spacing, and one it removes is drawn back into it.
@@ -1349,8 +1394,9 @@ component App
 ```
 
 - CSS's `backdrop-filter="blur(12px) saturate(1.8)"` blurs what is behind on the web, macOS
-  and Linux; iOS draws a fixed light material for it, so a surface meant for iPhone says
-  `backgroundMaterial`, which wins when both are written.
+  and the painted hosts (Android 12 and later, Windows and Linux). iOS draws a fixed light
+  material for it, so a surface meant for iPhone says `backgroundMaterial`, which wins
+  when both are written.
 - A material's strength is the platform's: UIKit's blurs take no radius or intensity, so there
   is no "dark at 40%" (expo-blur's `intensity` holds a paused animation part way). To darken
   the blurred result, put the content in one child that fills the box and paints the colour,
@@ -1358,13 +1404,17 @@ component App
   `column backgroundMaterial="dark" border-radius=16` holding
   `column flex=1 border-radius=16 padding=12 background-color="rgba(14,16,21,0.5)"`. The
   box's own `background-color` is no way to do it, as each host differs: iOS paints it under
-  the blur, so it colours what is blurred; the Mac's material covers it; the web and Linux
-  paint it in place of the material's tint.
+  the blur, so it colours what is blurred; the Mac's material covers it; the web and
+  painted hosts paint a nontransparent background in place of the material's tint.
 - A navigation bar's buttons share one glass capsule on iOS 26; `buttonStyle="glass"` on
   each gives it a capsule of its own (`contract vocab bar-buttons`).
-- `-exact-glass-tint="rgba(10,12,16,0.55)"` tints the glass itself (`UIGlassEffect.tintColor`);
-  a `background-color` is painted behind it. Glass reacts to a finger on a box with a `press`;
-  `glassInteractive=false` keeps it still, `true` makes it react without one.
+- `-exact-glass-tint="rgba(10,12,16,0.55)"` tints the glass itself on iOS/tvOS 26
+  (`UIGlassEffect.tintColor`) and macOS 26 (`NSGlassEffectView.tintColor`); a
+  `background-color` is painted behind their glass. On the web and painted hosts,
+  the tint replaces the material table's tint unless a background colour overrides it.
+- On iOS and tvOS 26, glass reacts to a finger on a box with a `press` that is not disabled;
+  `glassInteractive=false` keeps it still, `true` makes it react without one. Other hosts
+  ignore `glassInteractive`.
 
 ## bar-buttons: the navigation bar's buttons, grouped or each in its own capsule
 names: bar button, bar-button, barbuttons, UIBarButtonItem, sharesBackground, headerRight, headerLeft, toolbarItem, ToolbarItem, ToolbarItemGroup
@@ -1747,6 +1797,52 @@ for the launch.
   first request.
 
 More: docs/reference.md ("A setting a launch gives")
+
+## edges: insets, scroll bars, the keyboard and folds
+names: insets, content inset, contentInset, scrollIndicatorInsets, scroll indicator, scroll bar, scrollbar, KeyboardAvoidingView, keyboard avoidance, keyboardVerticalOffset, keyboardLayoutGuide, iPhone Duo, Duo, fold, hinge, floating action button, FAB, bottom bar
+
+On a phone, measure none of these. Say what each part is, and the host keeps it clear of the bars, the home indicator and the docked keyboard:
+
+- **A list, a feed, an article, a form:** the `header`, then the scroller as the next child (`list`, or `scroll flex=1 min-height=0`). Padding goes inside the scroller: around it, it moves the scroll bar in.
+- **A row pinned at the bottom** (a composer, Save, a player): a `row` after the scroller.
+- **A floating button** over a scroller that ends the route: placed by the safe area, as `add` is below.
+- **A field:** nothing. The focused one is shown above the keyboard (`contract vocab keyboard-and-focus`).
+- **A list beside its detail:** `contract vocab navigationSplit`.
+- **Two parts that stand together** (lyrics and their player, a map and its list), either side of a fold: `contract vocab arrangement`.
+- **One thing a fold must not cross** (a timer, a dial): a box that starts at the viewport's left edge, padded there as `Timer` is below, whose fallback is its padding with no fold; for a fold across, a box at its top and `env(viewport-segment-top 0 1, 24px)`. Panes on either side: `contract vocab foldables`.
+- **A colour behind the bars:** the route's `background-color`. A picture there: `contract vocab safe-area`.
+
+```contract
+component Notes
+  state notes = ["Milk", "Bread"]
+  action add()
+    notes = notes.concat(["Eggs"])
+  view
+    column width="100%" height="100%"
+      column flex=1 min-height=0 position="relative"
+        scroll flex=1 min-height=0
+          column padding=16 gap=12
+            for n, i in notes key=`${i}`
+              text n
+        button press=add() buttonStyle="filled" position="absolute" right=16 bottom="calc(16px + var(--exact-safe-area-inset-bottom))" testId="add"
+          text "Add"
+```
+
+```contract
+component Timer
+  state running = false
+  action start()
+    running = not running
+  view
+    column width="100%" height="100%" box-sizing="border-box" align-items="center" justify-content="center" gap=12 padding="24px 24px 24px env(viewport-segment-left 1 0, 24px)"
+      text (running ? "24:59" : "25:00") font="-exact-large-title" font-variant-numeric="tabular-nums"
+      button press=start() buttonStyle="filled" testId="start"
+        text (running ? "Pause" : "Start")
+```
+
+A keyboard's height, a bar's, a device's name or its size is none of the layout's. Where there is an iPhone Duo simulator, `verify ios` also reads an iPhone app's first screen and the screens its passing tests end on in its poses, and with the keyboard up where a field raises one: `edge` is what lies outside the safe area, `fold` what a fold crosses, `covered` what lies under a bar or the keys.
+
+More: `contract vocab safe-area`, docs/recipes/foldables.md, docs/recipes/keyboard-and-focus.md
 
 ## safe-area: the notch, the status bar and the home indicator
 names: env(), safe-area-inset, safe-area-inset-top, safe-area-inset-bottom, safe-area-inset-left, safe-area-inset-right, SafeAreaView, useSafeAreaInsets, react-native-safe-area-context, safeAreaInsets, notch, home indicator, home-indicator, --exact-safe-area-inset-top, --exact-safe-area-inset-bottom, --exact-safe-area-inset-left, --exact-safe-area-inset-right, bar height, navigation bar height, headerHeight, useHeaderHeight, -exact-safe-area, ignoresSafeArea, contentInsetAdjustmentBehavior

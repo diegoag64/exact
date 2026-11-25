@@ -297,6 +297,7 @@ extension Agent {
         }
         // A plain tap's aim: the target's own press (`AgentAddressedTap.swift`).
         let press = (req["aim"] as? [String: Any])?["press"] as? Bool == true
+        if press, at["at"] == nil, at["x"] == nil, at["y"] == nil, let refusal = inertDialogTap(req) { return refusal }
         // A row a grouped list draws, or its toggle's or detail button's
         // control (LLP 1084 D5): the finger aims at UIKit's cell or
         // accessory, never the hidden authored node beneath it.
@@ -323,6 +324,10 @@ extension Agent {
             }
             target = field; barred = true
         }
+        #if os(iOS)
+        // A header's pressable group the bar's title stands for: the title.
+        if flat == nil, target === v, let title = presenter.navigation.titleSurface(for: v) { target = title; barred = true }
+        #endif
         // A tab a tab bar shows, UIKit's or the one its tablist is drawn as: its item there.
         if flat == nil, target === v, let item = tabItem(v) {
             switch item {
@@ -358,7 +363,7 @@ extension Agent {
                          native: ["kind": "contextMenuDismissal", "label": "Dismiss context menu"])
         }
         #endif
-        if let why = obscured(inBar ? barItemTarget(v, bar: target, hit: seen!) : target, at: p, hit: seen!)
+        if let why = obscured(target, at: p, hit: seen!, barItem: inBar, request: at)
             ?? flat.flatMap({ flatObscured($0, at: p, hit: seen!) }) { return ["error": "tap #\(v.id): \(why)"] }
         // Named, it presses what it names, as the activation's tap does.
         var avoided: PressReach?

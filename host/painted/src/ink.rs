@@ -878,7 +878,7 @@ impl Backend for Ink {
         Some(
             self.finish_output(rotation, readback)
                 .and_then(|(target, pixels)| {
-                    let Selected::Wgpu(device) = &self.device;
+                    let Selected::Wgpu(device) = &mut self.device;
                     let view = device.scanout_view(target);
                     self.accept(view)
                         .map(|view| (view, pixels))
@@ -1009,12 +1009,12 @@ impl Backend for Ink {
         ts: Transform,
         pivot: (f32, f32),
         _reference: (f32, f32),
-        base: [f32; 7],
+        base: [f32; 8],
     ) -> bool {
         self.observe_transform(ts);
         // Transforming a rasterized group would move the stationary outer clips.
         // @ref LLP 1149 D4: let the walk apply motion before clipping.
-        if base[0] != 0. || base[1] != 0. || base[2] != 1. || base[3] != 0. {
+        if base[0] != 0. || base[1] != 0. || base[2] != 1. || base[7] != 1. || base[3] != 0. {
             return false;
         }
         self.record_layer(key, ts, pivot, base);

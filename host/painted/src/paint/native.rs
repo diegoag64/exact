@@ -145,6 +145,53 @@ impl FrameCommands {
     }
 }
 
+/// An auto-width container can be shrink-to-fit and owe its width to this very module.
+/// Measure up to its containing width, then let CSS assign the module its final box.
+fn module_width_offer(kernel: &Kernel, node: &NodeRef<'_>) -> f32 {
+    let mut auto = vec![*node];
+    let mut parent = node.parent.and_then(|id| kernel.node(id));
+    let mut width = kernel.env().viewport_width;
+    while let Some(n) = parent {
+        if n.is_root
+            || n.style.width.resolve(&kernel.arena().env_of(n.key.index)) != Dimension::Auto
+        {
+            width = exact_kernel::svg::scene::content_box(kernel, &n).2;
+            break;
+        }
+        auto.push(n);
+        parent = n.parent.and_then(|id| kernel.node(id));
+    }
+    for n in auto.into_iter().rev() {
+        let env = kernel.arena().env_of(n.key.index);
+        let (pl, _, pr, _) = kernel.resolved_padding(n.key).unwrap_or_default();
+        let [_, br, _, bl] = n.style.border_widths_in(&env);
+        let margins =
+            n.style.margin_left.at_basis(&env, width) + n.style.margin_right.at_basis(&env, width);
+        let inset = pl + pr + bl + br;
+        let constraint = |size: &Dimension| {
+            matches!(
+                size.resolve(&env),
+                Dimension::Points(_)
+                    | Dimension::Percent(_)
+                    | Dimension::Calc(..)
+                    | Dimension::Compare(_)
+            )
+            .then(|| {
+                let px = size.at_basis(&env, width);
+                if n.style.box_sizing == exact_kernel::BoxSizing::BorderBox {
+                    px - inset
+                } else {
+                    px
+                }
+            })
+        };
+        let max = constraint(&n.style.max_width).unwrap_or(f32::INFINITY);
+        let min = constraint(&n.style.min_width).unwrap_or(0.);
+        width = (width - margins - inset).min(max).max(min).max(0.);
+    }
+    width
+}
+
 impl Painter {
     /// @ref LLP 1115.001.000 D4 — a view a Kotlin hatch hosts at `node`:
     /// over its paint, in its border box `rect`, where the node is. A node
@@ -227,8 +274,13 @@ impl Painter {
         props
     }
 
-    pub(super) fn boxless_audio(&mut self, walk: &Walk<'_, '_>, node: &NodeRef<'_>) {
-        if !walk.scene.kernel.has_type(NodeType::Video)
+    /// A subtree that paints nothing (`display: none`, a closed `dialog`):
+    /// its audio plays on, boxless, and its module views are named held,
+    /// made and given their props but shown nowhere, as iOS keeps a hidden
+    /// one and the web its element.
+    pub(super) fn unpainted(&mut self, walk: &Walk<'_, '_>, node: &NodeRef<'_>) {
+        let kernel = walk.scene.kernel;
+        if !(kernel.has_type(NodeType::Video) || kernel.has_type(NodeType::NativeView))
             || (walk.scene.hidden)(node.id)
             || walk.skip == Some(node.key)
             || walk.draws_alert_elsewhere(node)
@@ -237,9 +289,11 @@ impl Painter {
         }
         if is_audio(node) {
             self.record_boxless_audio(node);
+        } else if node.node_type == NodeType::NativeView {
+            self.held_module(kernel, node);
         }
         for child in node.child_nodes() {
-            self.boxless_audio(walk, &child);
+            self.unpainted(walk, &child);
         }
     }
 
@@ -249,18 +303,24 @@ impl Painter {
     /// each audio as a boxless one. Named first in the stream, so no layer the
     /// reader takes in before them lets the element go.
     pub(super) fn held_media(&mut self, kernel: &Kernel) {
-        if self.media.held.is_empty() || !kernel.has_type(NodeType::Video) {
+        let media = |t| t == NodeType::Video || t == NodeType::NativeView;
+        if self.media.held.is_empty()
+            || !(kernel.has_type(NodeType::Video) || kernel.has_type(NodeType::NativeView))
+        {
             return;
         }
-        for id in kernel.preorder_where(&self.media.held, |t, _| t == NodeType::Video) {
+        for id in kernel.preorder_where(&self.media.held, |t, _| media(t)) {
             let Some(node) = kernel.node(id) else {
                 continue;
             };
-            if is_audio(&node) {
+            if node.node_type == NodeType::NativeView {
+                self.held_module(kernel, &node);
+            } else if is_audio(&node) {
                 self.record_boxless_audio(&node);
             } else {
                 let props = self.media_props(&node);
-                self.backend.held_video(node.id, &props.to_string());
+                self.backend
+                    .held(node.id, NativeKind::Video, &props.to_string());
             }
         }
     }
@@ -310,6 +370,30 @@ impl Painter {
         picture
     }
 
+    /// A module view alive and shown nowhere: in a subtree that paints
+    /// nothing or under `visibility: hidden`, as iOS keeps a hidden view.
+    pub(super) fn held_module(&mut self, kernel: &Kernel, node: &NodeRef<'_>) {
+        let props = self.module_props(kernel, node);
+        self.backend
+            .held(node.id, NativeKind::Module, &props.to_string());
+    }
+
+    fn module_props(&self, kernel: &Kernel, node: &NodeRef<'_>) -> serde_json::Value {
+        let p = node.props;
+        let mut props = serde_json::json!({
+            "module": p.str(PropId::NativeViewModuleName),
+            "generation": node.key.generation,
+            "slot": node.key.index,
+            "session": self.native_session,
+            "disabled": p.bool(PropId::Disabled) == Some(true),
+            "props": p.str(PropId::NativeViewProps),
+        });
+        if cfg!(any(target_os = "android", test)) {
+            props["hasPreferred"] = kernel.arena().intrinsic(node.key.index).is_some().into();
+        }
+        props
+    }
+
     /// Name `node`'s platform element to the backend, shown in `edge`: its
     /// content box on the content edge's curve.
     pub(super) fn native(
@@ -320,8 +404,11 @@ impl Painter {
         ts: Transform,
     ) {
         let p = node.props;
-        let flag = |id| p.bool(id) == Some(true);
-        if edge.rect.2 <= 0.0 || edge.rect.3 <= 0.0 {
+        // A module view is made whatever its size, as iOS makes its view at a
+        // zero frame: an empty box can hold a player or a scanner that draws
+        // elsewhere. Every other element waits for a box.
+        let empty = edge.rect.2 <= 0.0 || edge.rect.3 <= 0.0;
+        if empty && node.node_type != NodeType::NativeView {
             return;
         }
         let (kind, props) = match node.node_type {
@@ -364,17 +451,22 @@ impl Painter {
                 }
                 (NativeKind::WebView, props)
             }
-            NodeType::NativeView => (
-                NativeKind::Module,
-                serde_json::json!({
-                    "module": p.str(PropId::NativeViewModuleName),
-                    "generation": node.key.generation,
-                    "slot": node.key.index,
-                    "session": self.native_session,
-                    "disabled": flag(PropId::Disabled),
-                    "props": p.str(PropId::NativeViewProps),
-                }),
-            ),
+            NodeType::NativeView => {
+                let kernel = walk.scene.kernel;
+                let mut props = self.module_props(kernel, node);
+                if cfg!(any(target_os = "android", test)) {
+                    let env = kernel.arena().env_of(node.key.index);
+                    if node.style.width.resolve(&env) == exact_kernel::Dimension::Auto {
+                        props["autoWidth"] = module_width_offer(kernel, node).into();
+                    }
+                    props["autoHeight"] =
+                        (node.style.height.resolve(&env) == exact_kernel::Dimension::Auto).into();
+                }
+                (NativeKind::Module, props)
+            }
+            // Only surfaces opened by a GPU module need a window or buffers from the Android reader.
+            #[cfg(target_os = "android")]
+            NodeType::Canvas if !self.gpu_canvases.contains_key(&node.id) => return,
             NodeType::Canvas => (NativeKind::Surface, serde_json::json!({})),
             _ => return,
         };
@@ -384,7 +476,7 @@ impl Painter {
             edge,
             ts,
             &props.to_string(),
-            self.direct_canvases.contains(&node.id),
+            self.gpu_canvases.get(&node.id) == Some(&true),
         );
     }
 }

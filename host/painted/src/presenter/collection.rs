@@ -554,6 +554,8 @@ impl<D: DataSource> Presenter<D> {
                 self.host.content_region(),
                 &node,
                 None,
+                &|id| self.host.presented(id),
+                self.host.scaled_presented(),
             );
             let end_port = tracks_end.then(|| {
                 let kernel = self.host.kernel();
@@ -766,6 +768,9 @@ impl<D: DataSource> Presenter<D> {
         let Some(node) = self.host.kernel().node_by_key(facts.list) else {
             return false;
         };
+        if node.props.str(PropId::ListStyle).is_some() {
+            return true;
+        }
         let snapshots = self.host.collections_shallow();
         let Some(snapshot) = snapshots.iter().find(|s| s.view == node.id) else {
             return false;
@@ -796,8 +801,14 @@ impl<D: DataSource> Presenter<D> {
         let (port, max) = kernel.node(view).map_or(((0., 0.), (0., 0.)), |node| {
             let bounds = self.display.bounds(kernel, view).unwrap_or_else(|| {
                 let limit = self.collection_scroll_limits().get(&view).copied();
-                self.brush
-                    .scroll_bounds(kernel, self.host.content_region(), &node, limit)
+                self.brush.scroll_bounds(
+                    kernel,
+                    self.host.content_region(),
+                    &node,
+                    limit,
+                    &|id| self.host.presented(id),
+                    self.host.scaled_presented(),
+                )
             });
             ((node.frame.width, node.frame.height), bounds.max)
         });

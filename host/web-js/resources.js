@@ -158,7 +158,7 @@ function reply(t, name, source, held, f, next, gone) {
     recommit(() => {
       if (t.r) again(t);
     }, 'a failed request');
-  }));
+  }), t.input);
   return o => {
     if (!deferForReplacement(() => land(o))) return land(o);
   };
@@ -305,7 +305,10 @@ export function res(
     r.slept = false;
     // In a render, keep the call that gave the answer taken: the checkpoint lists the answer in `open` when that call
     // watched a document or was refused storage or visitor credentials (checkpoint.js `answers`)
-    if (globalThis.__exactRender) r.renderCall = call;
+    if (globalThis.__exactRender) {
+      r.renderCall = call;
+      if (!globalThis.__exactProduction) for (const url of call?.urls ?? []) (r.renderUrls ??= new Set()).add(url);
+    }
     r.stand = null;
     r.stale = false;
     r.passed = undefined;
@@ -349,7 +352,6 @@ export function res(
             }
             return;
           }
-          if (globalThis.__exactRender && !globalThis.__exactProduction) for (const url of t.call?.urls ?? []) (r.renderUrls ??= new Set()).add(url);
           // what the first frame showed, said once the answer is taken
           const stood = r.stale && r.stand && [eq(p.v, r.value), r.stand];
           take(p.v, t.args, t.origin, t.generation, t.madeBy);
@@ -766,7 +768,7 @@ export function mut(name, slot, refreshes, type, mode) {
         if (p.req) {
           const req = { ...p.req, origin: t.req?.origin };
           if (o.more) {
-            const n = { id: ++Ticket, name, owner: m, invocation: t.invocation, askOrigin: t.askOrigin, source: t.source, args: t.args, req, write: t.write, send: t.send };
+            const n = { id: ++Ticket, name, owner: m, invocation: t.invocation, askOrigin: t.askOrigin, input: t.input, source: t.source, args: t.args, req, write: t.write, send: t.send };
             if (m.parallel) m.tickets = [...m.tickets.filter(x => x !== t), n];
             else m.ticket = n;
             send(n, land(n));
@@ -882,6 +884,7 @@ export function mut(name, slot, refreshes, type, mode) {
           owner: m,
           invocation: Invocation.id,
           askOrigin: Origin.now(),
+          input: Origin.input,
           source,
           args,
           req: a.req && { ...a.req, origin: Origin.now() },

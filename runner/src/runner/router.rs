@@ -1090,6 +1090,7 @@ impl<D: DataSource> Runner<D> {
             return;
         }
         self.commands.push(super::Command {
+            window_reach: None,
             name: "scrollToFragment".into(),
             args: vec![
                 Value::Number(visit as f64),
@@ -1133,6 +1134,13 @@ impl<D: DataSource> Runner<D> {
         self.router
             .as_ref()
             .is_some_and(|r| r.matches_pattern(location))
+    }
+
+    /// Whether the router takes `location`, including its `notfound` fallback.
+    /// `false` without a router.
+    pub fn route_accepts(&self, location: &str) -> bool {
+        self.router.is_some()
+            && (self.route_matches(location) || self.plan.routes.iter().any(|r| r.notfound))
     }
 
     /// Whether the route table declares one location besides `notfound`

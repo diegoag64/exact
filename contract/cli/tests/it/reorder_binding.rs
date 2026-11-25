@@ -51,6 +51,19 @@ fn reorder_prop_event_roundtrip_and_exact_payload_types() {
     assert_eq!(PropId::TransformDragFor as u16, 76);
 }
 #[test]
+fn cancel_reorder_takes_one_string_list_id() {
+    let app = source(
+        "item: string, before: option<string>",
+        "\"arrange\"",
+        "receive",
+    );
+    for args in ["", "3", "\"arrange\", \"other\""] {
+        let invalid = app.replace("received = item", &format!("cancelReorder({args})"));
+        let error = contract::compile(&invalid).unwrap_err().to_string();
+        assert!(error.contains("type-cancel-reorder"), "{error}");
+    }
+}
+#[test]
 fn reorder_handler_rejects_wrong_option_and_key_types_after_currying() {
     for params in [
         "item: number, before: option<string>",

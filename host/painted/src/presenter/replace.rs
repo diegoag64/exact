@@ -34,7 +34,7 @@ impl<D: DataSource> Presenter<D> {
             fields,
             field_history,
             field_drag,
-            file_drag,
+            drag_in,
             mouse_selection,
             #[cfg(any(target_os = "android", test))]
             reader_selection,
@@ -155,7 +155,6 @@ impl<D: DataSource> Presenter<D> {
             pointer_kind: _,
             slop: _,
             window: _,
-            segments: _,
             choice: _,
             #[cfg(any(windows, test))]
                 deferred_painter: _,
@@ -166,6 +165,9 @@ impl<D: DataSource> Presenter<D> {
             agent: _,
             booting: _,
             content_registration: _,
+            lifter: _,
+            shown,
+            plan_drags,
         } = self;
         // Turns still wait for the frame; none of the old tree's do.
         if let Some(waiting) = deferred_collections {
@@ -196,7 +198,10 @@ impl<D: DataSource> Presenter<D> {
         fields.clear();
         *field_history = Default::default();
         *field_drag = None;
-        *file_drag = Default::default();
+        drag_in.reset();
+        // A new plan's frames are the ones a lift cuts its picture from
+        *shown = None;
+        *plan_drags = None;
         *mouse_selection = Default::default();
         #[cfg(any(target_os = "android", test))]
         {
@@ -235,6 +240,7 @@ impl<D: DataSource> Presenter<D> {
         self.give_clock();
         self.modules_replaced();
         self.auth_replaced();
+        self.opens_replaced();
         self.frame_partitions_asked();
         self.brush.replaced();
         self.brush.canvases.drawings = self.host.canvas_snapshots().clone();

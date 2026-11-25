@@ -105,9 +105,9 @@ impl<D: DataSource> Presenter<D> {
                 }
                 "deliveryActivate" => self.owe_update(true),
                 "relaunch" => self.host.log(if self.agent {
-                    "relaunch refused: the agent owns this process; start a new drive on the same storage"
+                    "relaunch refused: the agent owns this process; start a new drive on the same storage".to_string()
                 } else {
-                    "relaunch refused: process relaunch is unsupported on Linux"
+                    format!("relaunch refused: process relaunch is unsupported on {}", crate::agent::HOST_NAME)
                 }),
                 "setScheme" => self.app_scheme(super::preferences::app_dark(c.args.first())),
                 // The shell's haptic engine (LLP 1077 D14); desktop Linux has
@@ -132,6 +132,13 @@ impl<D: DataSource> Presenter<D> {
                 // The shell's share sheet; with no shell, refused into the
                 // journal. Held for the agent like every host (LLP 1069.003 D6).
                 "share" => self.share(&c.args, c.source),
+                "cancelReorder" => {
+                    if let Some(id) = c.args.first().and_then(exact_plan::Value::as_str) {
+                        if let Err(error) = self.cancel_reorder(id) {
+                            self.host.log(error);
+                        }
+                    }
+                }
                 "blur" => self.blur_command(&c.args),
                 "focus" => {
                     self.focus_command(&c.args);
@@ -211,7 +218,7 @@ impl<D: DataSource> Presenter<D> {
                 | "load" | "exitPictureInPicture") => {
                     eprintln!("exact: {name} unsupported on the headless/DRM host");
                     if name == "openURL" {
-                        self.answer_open(&c.args, false);
+                        self.answer_open(c.args.get(1).and_then(exact_plan::Value::as_str), false);
                     }
                 }
                 // The image hears the refusal too, once the commands have run (LLP 1042 §9).
@@ -220,6 +227,8 @@ impl<D: DataSource> Presenter<D> {
                     floats.extend(c.args.first().and_then(exact_plan::Value::as_str).map(str::to_owned));
                 }
                 // A window that fades or leaves full screen is the Mac's so far (LLP 1069.010).
+                "panel" => self.host.log("panel unsupported: route panels are available on macOS only"),
+                name @ ("setBounds" | "setAspectRatio" | "setWindowAlwaysOnTop" | "setWindowIgnoreMouseEvents") => self.host.log(format!("{name} refused: supported on macOS only")),
                 name @ ("exitFullscreen" | "setWindowOpacity") => self
                     .host
                     .log(format!("{name} refused: the window's full screen and opacity are on the Mac host only")),

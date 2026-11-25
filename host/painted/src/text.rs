@@ -15,6 +15,8 @@
 //! in the box. Glyphs are rasterized by swash once per (glyph, color) into
 //! small premultiplied pixmaps.
 
+#[cfg(target_os = "android")]
+pub(crate) mod android_advances;
 #[cfg(test)]
 mod background_tests;
 pub(crate) mod backgrounds;
@@ -27,6 +29,8 @@ mod edges_tests;
 mod fallback;
 pub(crate) mod field;
 use field::WidthUse;
+#[cfg(any(target_os = "android", test))]
+mod android_symbols;
 #[cfg(test)]
 pub(crate) mod fixtures;
 mod flow;
@@ -270,7 +274,7 @@ impl Spec {
         // host does not carry (LLP 1001).
         static AUTO: std::sync::Once = std::sync::Once::new();
         if request.paragraph.hyphens == exact_kernel::Hyphens::Auto {
-            AUTO.call_once(|| eprintln!("[Text] hyphens-auto: Linux has no hyphenation dictionary; `hyphens: auto` breaks only at soft hyphens, as `manual` (LLP 1001)"));
+            AUTO.call_once(|| eprintln!("[Text] hyphens-auto: {} has no hyphenation dictionary; `hyphens: auto` breaks only at soft hyphens, as `manual` (LLP 1001)", crate::agent::HOST_NAME));
         }
         let spec = Spec {
             strut: Run::from_style("", request.paragraph.strut),

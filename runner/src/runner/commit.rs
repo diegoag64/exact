@@ -592,6 +592,8 @@ impl<D: DataSource> Runner<D> {
         }
         for (name, args) in outcome.commands {
             self.commands.push(Command {
+                window_reach: (name == "focus" && args.is_empty())
+                    .then(|| self.reach_of(self.cause())),
                 name,
                 args,
                 source: self.input_source,
@@ -755,8 +757,9 @@ impl<D: DataSource> Runner<D> {
         // A module's sends that answer nothing (LLP 1133.004 D5): the
         // runner's, run once the commit stands.
         let effects = self.take_module_effects(first_command);
+        // A hidden window's refusal precedes D4a's ordinary focus skip.
+        self.filter_call_commands(first_command);
         self.refuse_in_wake(first_command);
-        self.skip_in_call(first_command);
         // The scheme and root size a development host holds: kept as asked, not applied (LLP 1122 T7).
         self.take_held(first_command);
         // `setRootFontSize` is the runner's too: the size lands in this
@@ -1059,6 +1062,8 @@ impl<D: DataSource> Runner<D> {
         let name = self.target_name(target);
         let mut request = request;
         crate::canvas_capture::from_fetch(&mut request);
+        request.mutation_ticket =
+            (request.is_native() && !matches!(target, Target::Resource(_))).then_some(ticket);
         self.number_data_call(&mut request);
         request.reach = self.reach_of(self.cause_for(target));
         self.log(super::lines::enqueued(ticket, &name, &request));

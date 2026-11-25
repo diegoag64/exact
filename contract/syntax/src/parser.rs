@@ -38,7 +38,7 @@ mod steps;
 mod theme;
 mod tool;
 mod view;
-pub use steps::{is_launch, same_launch};
+pub use steps::{is_launch, same_launch, TEST_HOSTS};
 use steps::{launch_word, LAUNCH};
 
 /// A parse failure.
@@ -133,6 +133,7 @@ struct Parser {
     /// Expressions (and prefix operators) open around the current token.
     depth: u32,
     view_depth: usize,
+    platform_matches: Vec<(String, Span)>,
     /// The tree depth of the expression last parsed.
     last: usize,
     /// Free calls of a method's name (`trim(s)`), each with its refusal: refused
@@ -1457,6 +1458,7 @@ impl Parser {
 fn describe(k: &TokenKind) -> String {
     match k {
         TokenKind::Ident(w) => format!("`{w}`"),
+        TokenKind::Json(_) => "a JSON value".into(),
         TokenKind::Number(n) => format!("number {n}"),
         TokenKind::Str(_) => "a string".into(),
         TokenKind::Template(_) => "a template string".into(),

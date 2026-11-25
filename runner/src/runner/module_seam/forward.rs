@@ -489,6 +489,17 @@ impl<D: DataSource> Runner<D> {
         m.release_sampled(self)
     }
 
+    /// Observe the committed track bindings of this runner's displayed package views.
+    pub fn observe_view_bindings(
+        &mut self,
+        props: &[(&str, &str)],
+        observer: Option<crate::Announce>,
+    ) {
+        self.seams
+            .modules
+            .observe_view_bindings(self, props, observer);
+    }
+
     /// Report each package view's change since the last report (module doc).
     /// A host calls this again after it changes what is displayed without a
     /// commit (a cover set as it lays the commit out), as it reads the wake

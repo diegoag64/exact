@@ -68,6 +68,25 @@ impl ScrollBounds {
         kernel: &Kernel,
         collection_max: Option<f32>,
     ) -> Self {
+        Self::capture_with(
+            node,
+            kernel,
+            collection_max,
+            &|id| {
+                kernel
+                    .node(id)
+                    .map_or(Presented::IDENTITY, |n| Presented::from_style(n.style))
+            },
+            &Default::default(),
+        )
+    }
+    fn capture_with(
+        node: &NodeRef<'_>,
+        kernel: &Kernel,
+        collection_max: Option<f32>,
+        presented: &dyn Fn(ViewId) -> Presented,
+        scaled_presented: &std::collections::BTreeSet<ViewId>,
+    ) -> Self {
         let axes = effective_overflow(node);
         // Not a scroll container: nothing to measure; it never moves.
         if axes == (Overflow::Visible, Overflow::Visible) && collection_max.is_none() {
@@ -76,7 +95,8 @@ impl ScrollBounds {
                 max: (0., 0.),
             };
         }
-        let (width, height) = content_size(node, kernel);
+        let (width, height) =
+            super::space::content_size_with(node, kernel, presented, scaled_presented);
         let mut max = (
             (width - node.frame.width).max(0.),
             (height - node.frame.height).max(0.),
@@ -132,6 +152,7 @@ struct NodePaint {
     key: NodeKey,
     id: ViewId,
     pointer_hit: bool,
+    visible: bool,
     scrollbar: bool,
     paint: BoxPaint,
     payload: Payload,
@@ -486,6 +507,7 @@ impl Picture {
                 pointer_hit: node
                     .computed_row(exact_kernel::StyleId::PointerEvents, |s| s.pointer_events)
                     != exact_kernel::PointerEvents::None,
+                visible: super::paints(scene.kernel, id, None),
                 scrollbar: node.style.scrollbar_width != exact_kernel::ScrollbarWidth::None,
                 paint,
                 payload,
@@ -554,6 +576,8 @@ impl Painter {
         region: Option<&crate::content_region::ContentRegionState>,
         node: &NodeRef<'_>,
         collection_max: Option<f32>,
+        presented: &dyn Fn(ViewId) -> Presented,
+        scaled_presented: &std::collections::BTreeSet<ViewId>,
     ) -> ScrollBounds {
         if let Some(region) = region {
             if let Some(bounds) = self.region_scroll_bounds(region, node.key) {
@@ -579,7 +603,7 @@ impl Painter {
                 };
             }
         }
-        ScrollBounds::capture(node, kernel, collection_max)
+        ScrollBounds::capture_with(node, kernel, collection_max, presented, scaled_presented)
     }
     pub(super) fn validate_region_presentation(
         &self,
@@ -721,7 +745,7 @@ impl<'a> Replay<'a> {
                                 || !p.translate.0.is_finite()
                                 || !p.translate.1.is_finite()
                                 || p.translate_percent != (0., 0.)
-                                || p.scale != 1.
+                                || p.scale != (1., 1.)
                                 || p.rotate != 0.
                                 || p.layout != Presented::IDENTITY.layout
                                 || p.opacity != n.opacity
@@ -740,7 +764,7 @@ impl<'a> Replay<'a> {
                             transform = parent.pre_concat(
                                 Transform::from_translate(cx + tx, cy + ty)
                                     .pre_rotate(p.rotate)
-                                    .pre_scale(p.scale, p.scale)
+                                    .pre_scale(p.scale.0, p.scale.1)
                                     .pre_translate(-cx, -cy),
                             );
                         }
@@ -862,6 +886,7 @@ impl<'a> Replay<'a> {
                             },
                             shape_clips: Vec::new(),
                             pointer_hit: n.pointer_hit,
+                            visible: n.visible,
                             projective: None,
                             affine: Some((parent, g.outer.rect)),
                             unpress: Transform::identity(),
@@ -1016,6 +1041,7 @@ mod hit_tests {
                 rounded_border: None,
                 shape_clips: Vec::new(),
                 pointer_hit: true,
+                visible: true,
                 id: 1,
                 rect: bbox(ts, rect),
                 clip: None,

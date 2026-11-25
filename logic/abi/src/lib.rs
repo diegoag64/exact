@@ -825,6 +825,7 @@ fn read_http(r: &mut Reader<'_>, tag: u8) -> Result<Request, String> {
         preload: None,
         prefetch: false,
         held: false,
+        mutation_ticket: None,
         reach: Default::default(),
         listen: None,
         due_ms: None,
