@@ -391,13 +391,12 @@ public final class ExactSession {
     let buttonMeasurements = ButtonMeasureCache()
     package let presenter: Presenter
     var launchLocation: String? // a pre-boot `openURL`'s location, until the first frame (LaunchURL.swift)
-    /// Nil until this session's launch route is journaled.
     var seenNavigationEntries: Set<UInt64>?
     /// When work last ended (`workEnded`), on the `CACurrentMediaTime` clock: a metric's ledger read is no earlier (`ExactLaunch.readLedger`).
     var workEndedAt = 0.0
     var pendingLaunchLocations: [String] = []
-    /// The host's window for a link's `target`, `_blank` or a name (LLP 1030.004 D1); unset, links navigate in place.
-    /// `resume` (Settings…, D5): the window forward as it stands, or opened where it last was.
+    package var openPanel: ((_ location: String, _ window: String) -> Void)?
+    /// A link’s target window (LLP 1030.004 D1). Settings uses `resume` to reopen at its last location.
     public var openWindow: ((_ location: String, _ window: String, _ resume: Bool) -> Void)?
     var heldModuleEvents: [String] = [] // module events before first pixel (SessionActivation.swift)
     var webMount: [String: String] = ExactEnv.appMetadata["ExactWebMount"] as? [String: String] ?? [:]
@@ -481,7 +480,7 @@ public final class ExactSession {
     private(set) var fillInFlight = false { didSet { releaseWaitingFirings() } }
     typealias IdleWork = (views: Int?, work: () -> Void, cancelled: (() -> Void)?, cause: AnyObject?)
     /// Work waiting for a slice or a batch to finish, in request order. A stale slice releases its work next turn.
-    var afterFill: [IdleWork] = [], draining = false, idleScheduled = false
+    var afterFill: [IdleWork] = [], draining = false, idleScheduled = false, outside: [() -> Void] = [], callingOut = false
     /// A slice's batch is applying, ahead of the work that waited for it
     var fillLanding = false
     private(set) var viewsEpoch = 0
@@ -839,7 +838,7 @@ public final class ExactSession {
             apply(runtime.focusEvent(id, entering: kind == "focusin", target: target, related: related, now: now()))
         } }
         presenter.onContextmenu = { [unowned self] id in applyInput(runtime.contextmenu(id, now: now()), at: id) }
-        presenter.onSwiperight = { [unowned self] id in applyInput(runtime.swiperight(id, now: now()), at: id) }
+        presenter.onSwiperight = { [unowned self] id in applyInput(runtime.swipe(id, .right, now: now()), at: id) }
         presenter.onRefresh = { [unowned self] id in applyInput(runtime.refresh(id, now: now()), at: id) }
         presenter.onPan = { [unowned self] id, dx, dy in applyInput(runtime.pan(id, dx: dx, dy: dy, now: now()), at: id) }
         presenter.onPanRelease = { [unowned self] id, vx, vy in applyInput(runtime.panRelease(id, vx: vx, vy: vy, now: now()), at: id) }
@@ -934,7 +933,7 @@ public final class ExactSession {
         if batch.error == nil {
             sampler?.reset(); frameHealth.reset() // a new runner numbers its transactions afresh (LLP 1079 D3)
             // A fresh boot over a running app (the dev menu's reload from the baked plan) starts the views over; the library already replaced its host.
-            routerOp = nil
+            routerOp = nil; routerBeneath = nil
             notificationHost.replaceBackgroundActions(self)
             if booted { awaitingTree = true; resetHeld(); viewsEpoch += 1; forgetAppearances(); presenter.launchAutofocusReleased = false } // a fresh boot's autofocus waits again
             booted = true; app.buildSessionBooted(self)
@@ -1026,7 +1025,7 @@ public final class ExactSession {
 
     func presentCommitted(_ batch: Batch, label: String, assetChanges: [UInt32: Set<String>] = [:]) {
         showBudgetWarning(nil)
-        routerOp = nil
+        routerOp = nil; routerBeneath = nil
         let restart = booted, kept = keptFocus
         keptFocus = nil
         awaitingTree = true // the tint a reset gives back is reported with the new tree
@@ -1069,6 +1068,7 @@ public final class ExactSession {
     /// commands go to the delegate after it.
     /// @ref LLP 1038 D7/D11 — observation only; Swift never interprets slots.
     private(set) var routerOp: [String: Any]?
+    var routerBeneath: (visit: UInt64, location: String)? // the router's top and where Back goes from it (`locationBeneath`)
 
     /// Run `work` in the chain of covers corrections `cause` (`coversCause`)
     package func inCoversChain(_ cause: AnyObject?, _ work: () -> Void) { let outer = coversCause; coversCause = cause; defer { coversCause = outer }; work() }
@@ -1194,6 +1194,7 @@ public final class ExactSession {
         if let must = batch.mustFinish { finishHold.moved(must) }
         HostLog.capabilities(self, batch)
         let outputs = SessionBatchOps(batch.ops)
+        if let beneath = batch.beneath { routerBeneath = beneath }
         for op in outputs.routers { routerOp = op.payload; presenter.armFragment(op.payload["activation"]); NavigationMarks.shared.routerChanged(self, payload: op.payload, input: batch.input) } // a scroll to its fragment, which the runner's `scrollToFragment` makes (LLP 1153 D5)
         // @ref LLP 1048.003 D1 — the head's title, for the app that owns the chrome.
         for op in outputs.titles {
@@ -1305,7 +1306,9 @@ public final class ExactSession {
                     app.deliver { [weak self] in if name == "setRangeText" { self?.presenter.fieldSelections.setRangeText(args) } else { self?.presenter.fieldSelections.setSelectionRange(args) } }
                     continue
                 }
+                if name == "panel" { app.deliver { [weak self] in self?.presentRoutePanel(args) }; continue }
                 if name == "blur" { app.deliver { [weak self] in self?.presenter.blurElement(args) }; continue }
+                if name == "cancelReorder", let id = args.first as? String { app.deliver { [weak self] in self?.presenter.reorders.cancel(id) }; continue }
                 if ["showPopover", "hidePopover", "togglePopover"].contains(name) { app.deliver { [weak self] in self?.presenter.menus.action(name, args) }; continue }
                 if name == "showModal" || (name == "close" && args.first is String) { let id = args.first as? String ?? ""; app.deliver { [weak self] in self?.presenter.dialogCommand(name, id) }; continue } // a dialog's, by id (LLP 1115 D6); bare `close()` is the window's
                 if name == "scrollIntoView" {
@@ -1342,7 +1345,6 @@ public final class ExactSession {
 
     /// `drainSurfaceWork` from outside a batch (a deferred module's load).
     package func drainSurfaceWorkNow() { if !applying { drainSurfaceWork() } }
-
     private func drainSurfaceWork() {
         // A held canvas load (`loadCanvases`) drains when it is released.
         guard !canvasesHeld, canvases.ready || canvases.failed != nil || canvases.isEmpty,
@@ -1464,8 +1466,9 @@ public final class ExactSession {
         guard state != .destroyed else { return }
         runtime.completions.close()
         state = .destroyed
+        natives.endViewBindings()
         agentPasteboard.map(AgentPasteboard.remove)
-        let waiting = afterFill; afterFill.removeAll()
+        let waiting = afterFill; afterFill.removeAll(); outside.removeAll()
         waiting.forEach { $0.cancelled?() }
         cancelAuthSessions()
         taskTimers.cancel(); clockTimer?.invalidate(); timerAdmissions.takeover()

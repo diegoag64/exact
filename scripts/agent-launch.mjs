@@ -16,14 +16,15 @@ import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { types as utilTypes } from 'node:util';
 import { filesystemLock } from './filesystem.mjs';
+import { webPackageBindingChanged } from '../js/bake/src/package-config.mjs';
 import { boundSettings, isSettingInput, settingInputs, sourceInputChanges } from '../js/bake/src/__exact_env.mjs';
 export { bakedSettingChanges, builtSettingLines } from '../js/bake/src/__exact_env.mjs';
 import { backendOriginSelection, literalBackendOrigin, selectBackendOrigin } from '../js/bake/src/typescript.mjs';
 import { besidePattern } from '../host/web/beside.mjs';
-import { chooseSimulator, phone, simulatorLaunch } from '../host/apple/devices.mjs';
+import { chooseSimulator, phone, simulatorLaunch, simulatorTempDirectory } from '../host/apple/devices.mjs';
 import { androidDevice } from './agent-android.mjs';
 import { bakeOutput, gpuModules, linuxBinary, moduleDirectory, pendingBuildInputs, readBuilds, resolveApp, windowsFile, shaderWatchRoots, webDist } from './app.mjs';
-import { directoryInputSnapshot, outputRoots, packageTests, watchedTree, watchOutput } from './cargo-dep-info.mjs';
+import { directoryInputSnapshot, missingInputChanges, outputRoots, packageTests, sameWatchedDirectory, sameWatchedFile, watchedTree, watchLinkTrace, watchOutput } from './cargo-dep-info.mjs';
 import { HOST_CRATES } from './cargo-check.mjs';
 import { partitionWebRoots, webSourceRoots } from '../host/web/build.mjs';
 import { changedContractReads } from './web-build.mjs';
@@ -729,7 +730,7 @@ export function faultSpec(spec) {
  * off (LLP 1075.003.000.001 §2.6). */
 export function agentPage(address, { facts, storage, env }) {
   address.searchParams.set('agent', '1');
-  for (const [key, value] of Object.entries(facts)) if (key !== 'failFetch') address.searchParams.set(key, value);
+  for (const [key, value] of Object.entries(facts)) if (key !== 'failFetch' && key !== 'substitutes' && key !== 'restoreSubstitutes') address.searchParams.set(key, value);
   if (env?.EXACT_AUTH_FIXTURE) address.searchParams.set('authFixture', env.EXACT_AUTH_FIXTURE);
   if (storage !== undefined) address.searchParams.set('storage', storage);
   if ((env?.EXACT_HATCHES ?? process.env.EXACT_HATCHES) === 'off') address.searchParams.set('hatches', 'off');
@@ -753,7 +754,7 @@ export function withEpoch(href, epoch) {
   return url.href;
 }
 
-export function launchFacts({seed, locale, formatLocale, timeZone, epoch, failFetch, env = {}}) {
+export function launchFacts({seed, locale, formatLocale, timeZone, epoch, failFetch, substitutes, restoreSubstitutes, env = {}}) {
   seed = Number(seed ?? env.EXACT_AGENT_SEED ?? 1);
   // An ISO date, Unix milliseconds or `now` (the machine's clock, read here, once); hosts are told milliseconds.
   epoch = String(epoch ?? env.EXACT_AGENT_EPOCH ?? AGENT_EPOCH);
@@ -771,20 +772,14 @@ export function launchFacts({seed, locale, formatLocale, timeZone, epoch, failFe
   formatLocale = formatLocale ?? env.EXACT_AGENT_FORMAT_LOCALE;
   if (formatLocale !== undefined) formatLocale = Intl.getCanonicalLocales(formatLocale)[0];
   failFetch = faultSpec(failFetch ?? env.EXACT_AGENT_FAIL_FETCH);
-  return {seed, locale, timeZone, epoch, ...(formatLocale ? {formatLocale} : {}), ...(failFetch ? {failFetch} : {})};
+  return {seed, locale, timeZone, epoch, ...(substitutes ? {substitutes: {...substitutes}} : {}), ...(restoreSubstitutes ? {restoreSubstitutes: true} : {}), ...(formatLocale ? {formatLocale} : {}), ...(failFetch ? {failFetch} : {})};
 }
 
-export function launchEnvironment(facts) {
-  return {EXACT_AGENT_SEED: String(facts.seed), EXACT_AGENT_LOCALE: facts.locale, EXACT_AGENT_TIME_ZONE: facts.timeZone, EXACT_AGENT_EPOCH: String(facts.epoch), ...(facts.formatLocale ? {EXACT_AGENT_FORMAT_LOCALE: facts.formatLocale} : {}), ...(facts.failFetch ? {EXACT_AGENT_FAIL_FETCH: facts.failFetch} : {})};
+export function launchEnvironment(facts, host) {
+  return {...(facts.substitutes && host !== 'web' ? {EXACT_AGENT_SUBSTITUTES: JSON.stringify({ values: facts.substitutes, restore: !!facts.restoreSubstitutes, target: host })} : {}), EXACT_AGENT_SEED: String(facts.seed), EXACT_AGENT_LOCALE: facts.locale, EXACT_AGENT_TIME_ZONE: facts.timeZone, EXACT_AGENT_EPOCH: String(facts.epoch), ...(facts.formatLocale ? {EXACT_AGENT_FORMAT_LOCALE: facts.formatLocale} : {}), ...(facts.failFetch ? {EXACT_AGENT_FAIL_FETCH: facts.failFetch} : {})};
 }
 
-// A build older than what it was made from is refused before launch
-// (LLP 1012.001.000 D1), so a drive never verifies yesterday's app. Each build
-// answers from its own record of its inputs: Cargo's dep-info, the Apple
-// receipt, and the web marker's source digests and dependency roots.
-// These detect staleness; passing them is not proof of freshness. A
-// binary the caller names (EXACT_LINUX_BIN, EXACT_MAC_BIN) is the caller's
-// own: the driver says it did not check. A served page (--url) is its server's.
+// Each carrier checks the inputs its build recorded (LLP 1012.001.000 D1).
 export const shown = path => within(ROOT, path) ? relative(ROOT, path) : path;
 const listed = changed => changed.slice(0, 3).join(', ') + (changed.length > 3 ? ` and ${changed.length - 3} more` : '');
 
@@ -852,13 +847,11 @@ export function watchedNewer(since, paths, directories = [], products = new Map(
   for (const root of paths) {
     const output = watchOutput(outputs, [root], roots);
     const ignored = skipFor(root), skip = (path, directory) => products.has(path) || ignored(path, directory);
-    const filtered = snapshot => ({...snapshot,
-      entries:snapshot.entries?.filter(({name, directory}) => !skip(resolve(snapshot.path, name), directory)) ?? null});
     // Captured entries already exclude outputs. Resolving them against today's
     // links would erase a source that has since been retargeted into an output.
     const previousRoot = inventory.get(root);
     let rootLink; try { rootLink = readlinkSync(root); } catch { /* not a link */ }
-    if (previousRoot && previousRoot.link !== rootLink) changed.push(shown(root));
+    if (previousRoot && (previousRoot.link !== rootLink || (previousRoot.via ?? undefined) !== watchLinkTrace(root))) changed.push(shown(root));
     for (const node of watchedTree([root], {outputs, skip, roots})) {
       const {path, info, link, snapshot, error, cycle} = node;
       if (error) {
@@ -867,11 +860,11 @@ export function watchedNewer(since, paths, directories = [], products = new Map(
       } else if (snapshot) {
         const previous = inventory.get(path);
         if (previous) {
-          if (JSON.stringify(filtered(snapshot)) !== JSON.stringify(filtered(previous))) changed.push(shown(path));
+          if (!sameWatchedDirectory(previous, snapshot, skip)) changed.push(shown(path));
         } else if (info.mtimeMs > since) {
           // Without an inventory, a skipped entry's birth can explain a directory's newer mtime.
           let created = -Infinity;
-          for (const entry of directoryInputSnapshot(path).entries ?? []) {
+          for (const entry of directoryInputSnapshot(path, undefined, false).entries ?? []) {
             const child = resolve(path, entry.name);
             if (skip(child, entry.directory) || output(child, entry.directory)) {
               try { created = Math.max(created, statSync(child).birthtimeMs || -Infinity); } catch { /* gone */ }
@@ -879,8 +872,11 @@ export function watchedNewer(since, paths, directories = [], products = new Map(
           }
           if (packageTests(path) || info.mtimeMs > created + 1) changed.push(shown(path));
         }
-      } else if (!cycle && ((inventory.has(path) && inventory.get(path).error !== 'ENOTDIR') || info.mtimeMs > since)) changed.push(shown(path));
-      if (link !== undefined && !inventory.has(path) && lstatSync(path).mtimeMs > since) changed.push(shown(path));
+      } else if (!cycle && (path === root || !inventory.has(dirname(path)))) {
+        const prior = inventory.get(path) ?? inventory.get(dirname(path))?.entries?.find(entry => entry.name === basename(path));
+        if (prior ? prior.link !== link || !sameWatchedFile(path, prior) : info.mtimeMs > since || (link !== undefined && lstatSync(path).mtimeMs > since)) changed.push(shown(path));
+      }
+      if (link !== undefined && !inventory.has(path) && !inventory.has(dirname(path)) && lstatSync(path).mtimeMs > since) changed.push(shown(path));
     }
   }
   return [...new Set(changed)];
@@ -1112,7 +1108,6 @@ export function receiptChanges(receipt, app, { hashed = false, launch, retained 
   // The Apple crates are read by digest below; every other host's are no input.
   const hosts = otherHosts(app);
   const own = newerThan(since, [app.dir], path => hosts(path) || skip(path));
-  own.push(...sourceInputChanges(build?.typescriptSources).map(shown));
   // Platform-local modules live under the host crate directory skipped above,
   // but their separate dylib's sources are absent from the binary receipt.
   const platform = target.includes('-ios') ? 'ios' : 'macos';
@@ -1143,13 +1138,16 @@ export function receiptChanges(receipt, app, { hashed = false, launch, retained 
     if (record) {
       ({paths:baked, missing} = record);
       directories = [...directories, ...record.watchedDirectories];
-      unread = missing.filter(existsSync).map(shown);
+      unread = missingInputChanges(missing, record.watchedDirectories).map(shown);
+      if (record.unstable) unread.push(shown(record.unstable));
     } else unread = [shown(resolve(build.linkedPlan, 'inputs.json'))];
   }
   // Absence recorded by Cargo or the linked bake is unchanged while absent; first creation counts even at an old mtime.
   const absent = new Set([...(build?.binary?.missing ?? []), ...missing]), stillAbsent = path => { const at = resolve(ROOT, path); return absent.has(at) && !existsSync(at); };
   const tools = info || retained ? [...(info ? depInfoNewer(since, null, info, app.workspace, directories, products, outputs) : []), ...watchedNewer(since, baked, directories, products, outputs)].filter(path => !skipped(path) && !products.has(resolve(ROOT, path)) && !stillAbsent(path)) : [];
-  return [...new Set([...(build?.binary && !hashed ? pendingBuildInputs(build, { launch }) : []), ...own.filter(path => !products.has(resolve(ROOT, path))), ...tools, ...unread, ...replaced])];
+  const recorded = new Map(directories.flatMap(row => row.entries?.map(entry => [resolve(row.path, entry.name), entry]) ?? [[row.path, row]]));
+  const newer = own.filter(name => { const path = resolve(ROOT, name), file = recorded.get(path); return !products.has(path) && !(file?.sha256 && sameWatchedFile(path, file)); });
+  return [...new Set([...(build?.binary && !hashed ? pendingBuildInputs(build, { launch }) : []), ...newer, ...sourceInputChanges(build?.typescriptSources).filter(path => !products.has(resolve(path))).map(shown), ...tools, ...unread, ...replaced])];
 }
 
 /** What a web build of `app` reads, modified after `since` (every file by default):
@@ -1207,8 +1205,7 @@ export function webChanges(dist, app) {
   if (built.inputs && !built.inputRoots) return { app: [], shared: [shown(marker)], all: [shown(marker)] };
   if (existsSync(resolve(app.dir,'app.ts')) && !(built.sourceInputs ?? appSourceInputs(app.dir))) return {app:[shown(resolve(app.dir,'app.ts'))],shared:[],all:[shown(resolve(app.dir,'app.ts'))]};
   const contract = built.reads?.contract;
-  // Candidates: what changed since the build read its inputs (`inputsAt`, as it started, less the file
-  // system's clock grain), else since its marker.
+  // Allow for the filesystem clock's grain when nominating inputs by time.
   const since = typeof built.inputsAt === 'number' ? built.inputsAt - 2000 : statSync(marker).mtimeMs;
   let inputRoots = built.inputRoots;
   // A root query that fails (Cargo's lock, a manifest) leaves the build unverified: the build says why.
@@ -1221,6 +1218,7 @@ export function webChanges(dist, app) {
   const changed = path => !hashedRead(path) && !byContractReceipt(path) && (!built.inputs || built.inputs[path] !== contentDigest(path));
   const { app: own, shared: roots } = webInputs(app, built.target === 'js', since, inputRoots, built.sourceInputs);
   const appChanges = own.filter(changed), shared = roots.filter(changed);
+  if (webPackageBindingChanged(app.dir, built.packageViews)) appChanges.push('web package view binding or configuration');
   if (built.inputs) for (const path of [...appModules(app.dir,built.sourceInputs).files.values()].map(shown)) if (changed(path) && !appChanges.includes(path)) (within(app.dir,resolve(ROOT,path)) ? appChanges : shared).push(path);
   for (const path of sourceInputChanges(built.sourceInputs ?? appSourceInputs(app.dir))) (within(app.dir,path) ? appChanges : shared).push(shown(path));
   if (contract) for (const path of changedContractReads(contract)) (within(app.dir, path) ? appChanges : shared).push(shown(path));
@@ -1229,7 +1227,6 @@ export function webChanges(dist, app) {
   for (const path of Object.keys(built.inputs ?? {})) if (!byContractReceipt(path) && !['EXACT_BACKEND_ORIGIN', 'PORT'].includes(path) && !isSettingInput(path) && built.inputs[path] !== null && !appChanges.includes(path) && !webInputPresent(app, path)) (within(app.dir, resolve(ROOT, path)) ? appChanges : shared).push(path);
   if ((built.inputs?.EXACT_BACKEND_ORIGIN ?? null) !== (process.env.EXACT_BACKEND_ORIGIN ?? null)) appChanges.push('EXACT_BACKEND_ORIGIN');
   if ((built.inputs?.PORT ?? null) !== (process.env.PORT ?? null)) appChanges.push('PORT');
-  // A setting whose value or source moved, one the build read and is no longer declared, or one declared since.
   const settings = settingInputs(app, process.env, appModules(app.dir, built.sourceInputs));
   for (const key of new Set([...Object.keys(settings), ...Object.keys(built.inputs ?? {}).filter(isSettingInput)])) if ((built.inputs?.[key] ?? null) !== (settings[key] ?? null)) appChanges.push(key);
   return { app: appChanges, shared, all: [...new Set([...appChanges, ...shared])] };
@@ -1401,7 +1398,7 @@ export const cdpEscape = (call) => async () => { for (const type of ['rawKeyDown
 
 /** The lock file of a simulator's display (`['display', udid]`) or of one app on it (`[udid, bundle]`). */
 const simulatorLock = (key) => createHash('sha256').update(JSON.stringify(key)).digest('hex') + '/.lock';
-
+export const simulatorDisplayLockPath = udid => resolve(simulatorTempDirectory(), 'exact-ios-drives', simulatorLock(['display', udid]));
 /** Runs `fn` holding the simulator lock `key`, trying again every 100 ms while another process holds it: `waiting`
  *  is called at the first refusal, and after `timeout` the error says `busy(seconds)`. */
 async function holdSimulator(key, fn, { directory, timeout, busy, waiting = () => {} }) {
@@ -1420,7 +1417,7 @@ async function holdSimulator(key, fn, { directory, timeout, busy, waiting = () =
 
 /** One simulator's display, across every drive and checkout: a capture that reads it (`withDisplay`) holds it, and so
  *  does a launch, which brings its app to the front over another drive's. Runs `fn` holding it. */
-export async function simulatorDisplay(udid, fn, { directory = resolve(tmpdir(), 'exact-ios-drives'), timeout = 60000 } = {}) {
+export async function simulatorDisplay(udid, fn, { directory = resolve(simulatorTempDirectory(), 'exact-ios-drives'), timeout = 60000 } = {}) {
   return holdSimulator(['display', udid], fn, { directory, timeout, busy: (s) => `simulator ${udid}'s display busy: another drive still held it after ${s}s` });
 }
 

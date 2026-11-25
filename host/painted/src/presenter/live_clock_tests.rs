@@ -452,7 +452,7 @@ fn a_live_contact_animates_press_feedback_like_a_pointer() {
   action pressed
     active = true
   view
-    box testId="pad" press=pressed width=80 height=40 -exact-press-scale=0.6
+    box testId="pad" press=pressed width=80 height=40 -exact-press-scale=0.6 transition="scale 100ms linear"
 "#,
     );
     let sample = |agent| {
@@ -656,7 +656,7 @@ fn retained_input_clock_keeps_live_release_time_and_coalesces_missed_beats() {
   task ticker mount
     every(100, timer)
   view
-    box swiperight=go testId="go" transition="translate -exact-spring(300, 30, 1)"
+    box swipe=go swipe-follow="right" testId="go" transition="translate -exact-spring(300, 30, 1)"
       text "Swipe"
 "#;
     let (mut p, _) = Presenter::boot_with(

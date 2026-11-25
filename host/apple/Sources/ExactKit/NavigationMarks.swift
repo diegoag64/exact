@@ -262,7 +262,7 @@ package final class NavigationMarks: NSObject {
         guard let p = pending, p.presented != nil, let session = p.session else { return }
         guard !reading else { readAgain = true; return }
         reading = true
-        ExactLaunch.readLedger(session) { [weak self, weak p] ledger in
+        ExactLaunch.readLedger(session, while: { [weak self, weak p] in p != nil && self?.pending === p }) { [weak self, weak p] ledger in
             guard let self else { return }
             reading = false
             defer { if readAgain { readAgain = false; evaluate() } }
@@ -274,7 +274,7 @@ package final class NavigationMarks: NSObject {
             stop()
             var f = p.fields
             f["name"] = "tti"
-            // Work that landed meanwhile was outstanding when UIKit showed the screen.
+            // Work that landed meanwhile times it at the ledger's time (`readLedger`).
             f["value"] = max(ledger.quiet ? clear ?? ledger.at : ledger.at, presented) - p.start
             if !ledger.failed.isEmpty { f["exact.tti.failed"] = ledger.failed.count }
             ExactJournal.shared.record("navigation", f)

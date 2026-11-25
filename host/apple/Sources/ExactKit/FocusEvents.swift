@@ -18,7 +18,7 @@ private struct FocusSnapshot {
 }
 
 extension Presenter {
-    /// A bubbling `focusin` or `focusout` at a listening ancestor (#283).
+    /// A bubbling `focusin` or `focusout` at a listening ancestor.
     var onFocusEvent: ((UInt32, String, String, String?) -> Void)? {
         get { focusEvents.onEvent }
         set { focusEvents.onEvent = newValue }
@@ -71,6 +71,7 @@ final class FocusEvents {
     func reset() { current = nil; pending = nil }
     /// The node that has the focus, as the page was told.
     var focused: UInt32? { current?.node }
+    var blurring: UInt32? { pending?.node }
 
     private func snapshot(_ id: UInt32) -> FocusSnapshot? {
         guard let presenter, let view = presenter.textHost(id) else { return nil }

@@ -215,6 +215,28 @@ final class GalleryUITests: XCTestCase {
         try data.write(to: output.appendingPathComponent("video-controls.png"))
     }
 
+    /// A card dragged onto the drop zone in the same app: UIKit lifts it, its
+    /// drop interaction takes it, and the zone shows the text it carried
+    /// (LLP 1094.000 D4, LLP 1094.001 D4).
+    func testACardDraggedOntoTheDropZoneDropsItsText() throws {
+        let app = XCUIApplication(bundleIdentifier: "com.exact.uigallery")
+        launchShowingTheList(app)
+        open("drag", in: app)
+        let card = app.descendants(matching: .any)["drag-switch-card"], zone = app.descendants(matching: .any)["drop-zone"]
+        XCTAssertTrue(card.waitForExistence(timeout: 10))
+        // A container is never hittable itself, so its middle says whether it is on screen, clear of the bars
+        let scroll = app.otherElements["gallery"].firstMatch, shown = app.windows.firstMatch.frame.insetBy(dx: 0, dy: 60)
+        let middle = { (e: XCUIElement) in CGPoint(x: e.frame.midX, y: e.frame.midY) }
+        for _ in 0..<10 where !(shown.contains(middle(card)) && shown.contains(middle(zone))) {
+            if middle(zone).y > shown.maxY { scroll.swipeUp(velocity: .slow) } else { scroll.swipeDown(velocity: .slow) }
+        }
+        XCTAssertTrue(shown.contains(middle(card)) && shown.contains(middle(zone)), "the card and the zone are both on screen: card \(card.frame), zone \(zone.frame)")
+        card.press(forDuration: 1.2, thenDragTo: zone)
+        let text = app.staticTexts["drop-text"]
+        XCTAssertTrue(text.waitForExistence(timeout: 10), "the drop arrived")
+        XCTAssertEqual(text.label, "Text: Turn dragging on or off")
+    }
+
     /// Every page starts below its range bar, and beside the list.
     func testPageSwitchesKeepContentBelowTheRangeBarAndBesideTheSidebar() throws {
         let app = XCUIApplication(bundleIdentifier: "com.exact.uigallery")
@@ -254,13 +276,15 @@ final class GalleryUITests: XCTestCase {
         cell.tap()
     }
 
-    /// Launches the gallery with its list showing: UIKit keeps a list hidden at the next launch, so a test does not
-    /// rely on the one before it to have shown the list again
+    /// Launches the gallery with its list showing: the app opens on its first section, which a compact window shows
+    /// over the list with Back, and UIKit keeps a list hidden at the next launch, so a test does not rely on the one
+    /// before it to have shown the list again
     private func launchShowingTheList(_ app: XCUIApplication) {
         app.launch()
-        let sidebar = app.collectionViews["gallery-sidebar"], show = app.buttons["Show Sidebar"]
+        let sidebar = app.collectionViews["gallery-sidebar"], show = app.buttons["Show Sidebar"], back = app.buttons["BackButton"].firstMatch
         let rows = [sidebar.cells["sidebar-typography"], sidebar.cells["sidebar-drag"]], deadline = Date().addingTimeInterval(20)
-        while Date() < deadline, !rows.contains(where: \.isHittable), !show.isHittable { RunLoop.current.run(until: Date().addingTimeInterval(0.3)) }
+        while Date() < deadline, !rows.contains(where: \.isHittable), !show.isHittable, !back.isHittable { RunLoop.current.run(until: Date().addingTimeInterval(0.3)) }
+        if back.isHittable { back.tap() }
         if show.isHittable { show.tap() }
         XCTAssertTrue(waitForList(app, shown: true), "The list shows at launch")
     }

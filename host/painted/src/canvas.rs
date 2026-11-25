@@ -171,7 +171,7 @@ mod boot;
 mod clip;
 #[cfg(any(target_os = "android", test))]
 #[path = "canvas/clock.rs"]
-mod clock;
+pub(crate) mod clock;
 #[cfg(target_os = "android")]
 #[path = "canvas/codec.rs"]
 mod codec;
@@ -183,6 +183,9 @@ pub use colors::colors;
 #[cfg(any(target_os = "android", test))]
 #[path = "canvas/device.rs"]
 mod device;
+#[cfg(target_os = "android")]
+#[path = "canvas/drop.rs"]
+mod drop;
 #[cfg(target_os = "android")]
 #[path = "canvas/field.rs"]
 pub mod field;
@@ -735,12 +738,8 @@ impl Backend for Recorder {
         self.record_native(id, crate::paint::NativeKind::Video, &empty, props);
     }
 
-    fn held_video(&mut self, id: ViewId, props: &str) {
-        self.transform(Transform::identity());
-        let at = self.ops.len();
-        let empty = Shape::rect((0., 0., 0., 0.));
-        self.record_native(id, crate::paint::NativeKind::Video, &empty, props);
-        self.ops[at + 2] |= 1 << 9;
+    fn held(&mut self, id: ViewId, kind: crate::paint::NativeKind, props: &str) {
+        self.record_held(id, kind, props);
     }
 
     fn canvas(&mut self, pixels: &Arc<Pixmap>, dst: Rect4, clips: &[Shape], ts: Transform) {
@@ -952,7 +951,7 @@ impl Backend for Recorder {
         ts: Transform,
         pivot: (f32, f32),
         reference: (f32, f32),
-        base: [f32; 7],
+        base: [f32; 8],
     ) -> bool {
         // Retained layers animate in page coordinates, outside any projective plane.
         if !self.planes.is_empty() {
@@ -1099,6 +1098,7 @@ pub struct CanvasHost<D: DataSource> {
     /// Scroll deferral state across `frame`, `requests`, `refine`, and input
     /// (`scroll::ScrollHold`). Only active once the reader calls `refine` (`prefetching`).
     scroll_hold: scroll::ScrollHold,
+    input_clock: crate::presenter::InputClock,
     prefetching: bool,
     /// The kernel epoch a collection pass left, when nothing else changed
     /// since the paint: rows mounted or retired out of view, which the next
@@ -1254,8 +1254,10 @@ impl<D: DataSource + Default> CanvasHost<D> {
                 if !quick {
                     self.p.sync_surfaces();
                 }
-                self.surfaces = self.p.render_surfaces(now);
-                self.p.direct_canvases();
+                self.surfaces = self
+                    .p
+                    .render_surfaces(now, vsync || agent::clock(&self.p).is_some());
+                self.p.sync_canvas_views();
             }
         }
 
@@ -1328,7 +1330,8 @@ impl<D: DataSource + Default> CanvasHost<D> {
     /// Whether more work is wanted, or only work that must wait for vsync.
     pub fn animating(&self, vsync_only: bool) -> bool {
         if vsync_only {
-            return agent::clock(&self.p).is_none() && self.p.wants_frames();
+            return agent::clock(&self.p).is_none()
+                && (self.surfaces || self.p.wants_frames() || crate::surfaces::sensors::waiting());
         }
         self.p.dirty()
             || self.p.scroll_end_due().is_some_and(|due| due <= self.now())
@@ -1355,7 +1358,7 @@ impl<D: DataSource + Default> CanvasHost<D> {
             self.moves
         }
         .min(self.paint_by.unwrap_or(u32::MAX));
-        if !p.brush.direct_canvases.is_empty() || p.has_window_canvases() {
+        if p.brush.gpu_canvases.values().any(|direct| *direct) || p.has_window_canvases() {
             return None;
         }
         if !p.dirty() || self.force || self.moved >= limit {

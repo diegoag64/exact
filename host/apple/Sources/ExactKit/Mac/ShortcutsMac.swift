@@ -34,10 +34,11 @@ private struct Shortcut {
         else { return nil }
         let function = Int(last.dropFirst()).map { (1...35).contains($0) && last == "F\($0)" } == true
         guard last.count == 1 || Self.namedKeys[String(last)] != nil || function else { return nil }
+        if parts.contains("Mod"), parts.contains("Control") || parts.contains("Meta") { return nil }
         var mask: NSEvent.ModifierFlags = []
         for part in parts {
             switch part {
-            case "Meta": mask.insert(.command)
+            case "Mod", "Meta": mask.insert(.command)
             case "Control": mask.insert(.control)
             case "Alt": mask.insert(.option)
             case "Shift": mask.insert(.shift)
@@ -104,7 +105,7 @@ private struct Shortcut {
     }
     /// A paste variant, which the HIG puts right after Paste: Paste and
     /// Match Style ⌥⇧⌘V (TextEdit, Safari, Chrome) and ⇧⌘V, Chrome's other
-    /// chord for it and many apps' Paste as Text (#141).
+    /// chord for it and many apps' Paste as Text.
     var isPasteVariant: Bool {
         key == "v" && (modifiers == [.command, .shift] || modifiers == [.command, .shift, .option])
     }
@@ -623,7 +624,7 @@ package final class ShortcutHost: NSObject, NSMenuItemValidation {
     /// does (`claim`), so Edit ▸ Undo is the app's "Undo Move" whatever has
     /// the focus, as its ⌘Z already is; a paste variant follows Paste, as
     /// Paste and Match Style does; the rest follow Select All, after a
-    /// separator, ahead of Speech and of what AppKit appends (#141).
+    /// separator, ahead of Speech and of what AppKit appends.
     private func placeEdit(_ commands: [NSMenuItem], pastes: [NSMenuItem], in menu: NSMenu, removals: Set<String>) {
         var extra: [NSMenuItem] = []
         // A removed submenu (`find`) holds no command: it would not show.

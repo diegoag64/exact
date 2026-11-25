@@ -107,6 +107,9 @@ pub fn validate(line: &str) -> Result<(), String> {
 /// Whether `grant`, the origin an `auth.session` line names, admits a
 /// sign-in page at `origin`, as a `net.fetch` line of it would admit a fetch.
 pub fn session_admits(grant: &str, origin: &str) -> bool {
+    if grant == "self" {
+        return false;
+    }
     let Ok(origin) = exact_grants::origin_of(origin) else {
         return false;
     };
@@ -267,6 +270,7 @@ pub(crate) fn own(line: &str) -> bool {
         || exact_grants::process::is_process_line(line)
         || line.starts_with("net.dns-sd ")
         || line.split_whitespace().next() == Some("net.listen")
+        || line == "clipboard.read"
         || line == "browser.automation"
         || line == "payment.google-pay"
         || line.starts_with("payment.apple-pay ")
@@ -399,6 +403,7 @@ fn quote(text: &str, out: &mut String) {
 fn grant_json(grant: &exact_grants::Grant, out: &mut String) {
     use exact_grants::Grant;
     match grant {
+        Grant::FetchSelf => out.push_str(r#"["fetch-self"]"#),
         Grant::Fetch(origin)
         | Grant::FetchSubdomains(origin)
         | Grant::WebSocket(origin)

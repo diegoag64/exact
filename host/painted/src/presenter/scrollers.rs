@@ -89,6 +89,9 @@ pub struct Under {
 /// revision it knows and where its own moves left the offset.
 #[derive(Default)]
 pub(super) struct Reader {
+    pub(super) lifting_touch: bool,
+    pub(super) pending_height_end: Option<exact_kernel::NodeKey>,
+    pub(super) height_scroll_release: Option<(exact_kernel::NodeKey, f32)>,
     tracked: BTreeMap<ViewId, (u32, (f32, f32))>,
     /// The last statement [`Presenter::reader_scrollers`] returned.
     #[cfg(any(target_os = "android", test))]
@@ -121,6 +124,8 @@ const NODE: i32 = 4;
 const BARLESS: i32 = 8;
 /// Bits 6 and 7: what a drag of it does to the keyboard, its authored
 /// `keyboardDismissMode`; unsaid, Android's: nothing (LLP 1115.001 D12).
+/// Android shows no accessory bar over its keyboard, so UIKit's accessory
+/// modes are the plain ones (LLP 1123 D7).
 const DISMISS_ON_DRAG: i32 = 64;
 const DISMISS_INTERACTIVE: i32 = 128;
 /// Bits 4 and 5: it hears `refresh`, and its `refreshing` is true: the
@@ -210,6 +215,8 @@ impl<D: DataSource> Presenter<D> {
                 self.host.content_region(),
                 &node,
                 limits.get(&id).copied(),
+                &|id| self.host.presented(id),
+                self.host.scaled_presented(),
             )
         }))
     }
@@ -329,9 +336,28 @@ impl<D: DataSource> Presenter<D> {
         let mut claims = self.touch_kept(key);
         for candidate in self.candidates(key) {
             let (x, y) = match candidate {
-                Candidate::Arrange(_) | Candidate::Height { .. } => (false, true),
+                // An ordinary grip takes a finger on the platform's long press.
+                // Before then only touch-action keeps the list from scrolling.
+                Candidate::Arrange(_) => (false, false),
+                Candidate::Height { .. } => (false, true),
                 Candidate::Swipe(_) => (true, false),
-                Candidate::Transform(_) | Candidate::Group(_) => (true, true),
+                Candidate::Transform(b) => {
+                    kernel.node_by_key(b.handle).map_or((false, false), |n| {
+                        let action = n.style.touch_action;
+                        if matches!(
+                            action,
+                            exact_kernel::TouchAction::Auto
+                                | exact_kernel::TouchAction::Manipulation
+                        ) {
+                            (true, true)
+                        } else {
+                            let (x, y) = gives(action);
+                            (!x, !y)
+                        }
+                    })
+                }
+                // A mouse's lift takes a drag in any direction (LLP 1094.000 D13).
+                Candidate::Group(_) | Candidate::Lift { .. } => (true, true),
                 // A `pan` hears what its `touch-action` does not give to
                 // scrolling, as a browser cancels a pointer it pans with.
                 Candidate::Pan(key) => kernel.node_by_key(key).map_or((false, false), |n| {
@@ -510,7 +536,7 @@ impl<D: DataSource> Presenter<D> {
 
     /// An agent's phased wheel supplies one reader sample on the existing clock.
     pub(crate) fn reader_wheel(&mut self, id: ViewId, dx: f32, dy: f32) -> Result<String, String> {
-        if self.host.route_visibility(id).1 || self.box_of(id).is_none() {
+        if id != PAGE && (self.host.route_visibility(id).1 || self.box_of(id).is_none()) {
             return Err(format!("view {id} is hidden or inert"));
         }
         let limits = self.collection_scroll_limits();
@@ -601,9 +627,14 @@ impl<D: DataSource> Presenter<D> {
                 let kernel = self.host.kernel();
                 let node = kernel.node(id).unwrap();
                 let region = self.host.content_region();
-                let bounds =
-                    self.brush
-                        .scroll_bounds(kernel, region, &node, limits.get(&id).copied());
+                let bounds = self.brush.scroll_bounds(
+                    kernel,
+                    region,
+                    &node,
+                    limits.get(&id).copied(),
+                    &|id| self.host.presented(id),
+                    self.host.scaled_presented(),
+                );
                 self.stage_shown(id, key, bounds);
             }
             held.insert(id);
@@ -646,12 +677,26 @@ impl<D: DataSource> Presenter<D> {
             under.chain.len() as i32,
             under.field.unwrap_or(0) as i32,
         ];
-        let tapped =
-            (self.hit(x / scale, y / scale)).and_then(|hit| self.double_tap_container(hit));
+        if self
+            .contact
+            .as_ref()
+            .and_then(|c| c.hold.as_ref())
+            .is_some_and(|h| matches!(h.kind, super::contact::HeldKind::Arrange(_)))
+        {
+            out[0] |= 64;
+        }
+        let hit = self.hit(x / scale, y / scale);
+        let tapped = hit.and_then(|hit| self.double_tap_container(hit));
         for s in &under.chain {
+            let allows_pinch = hit.is_some_and(|hit| self.allows_touch_zoom(hit, Some(s.id)));
             let rev = self.reader_revision(s);
             let tap = if tapped == Some(s.id) { DOUBLE_TAP } else { 0 };
-            out.extend([s.id as i32, self.reader_flags(s) | tap, rev as i32]);
+            let flags = self.reader_flags(s);
+            out.extend([
+                s.id as i32,
+                (if allows_pinch { flags } else { flags & !ZOOM }) | tap,
+                rev as i32,
+            ]);
             let px = [s.offset.0, s.offset.1, s.max.0, s.max.1];
             out.extend(px.iter().chain(&s.port).map(|v| bits(v * scale)));
         }
@@ -721,8 +766,8 @@ impl<D: DataSource> Presenter<D> {
             .filter(|_| s.id != PAGE)
             .and_then(|n| n.props.str(exact_kernel::PropId::KeyboardDismissMode))
         {
-            Some("on-drag") => DISMISS_ON_DRAG,
-            Some("interactive") => DISMISS_INTERACTIVE,
+            Some("on-drag" | "on-drag-with-accessory") => DISMISS_ON_DRAG,
+            Some("interactive" | "interactive-with-accessory") => DISMISS_INTERACTIVE,
             _ => 0,
         };
         let refresh = if s.id == PAGE
@@ -772,17 +817,99 @@ fn bits(v: f32) -> i32 {
 }
 
 impl<D: DataSource> Presenter<D> {
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn module_ancestor(&self, mut id: ViewId) -> Option<ViewId> {
+        loop {
+            let node = self.host.kernel().node(id)?;
+            if node.node_type == NodeType::NativeView {
+                return Some(id);
+            }
+            id = node.parent?;
+        }
+    }
+
+    /// Resolve an addressed finger to the allocation the reader must actually touch.
+    /// The reader answers after Android dispatch. Other inputs stay with the presenter.
+    #[cfg(any(target_os = "android", test))]
+    pub(crate) fn reader_agent_tap(
+        &mut self,
+        request: &serde_json::Value,
+        scale: f32,
+    ) -> Option<Result<serde_json::Value, String>> {
+        let args = request.as_object()?;
+        if request["op"] != "tap"
+            || !args.keys().all(|key| {
+                matches!(
+                    key.as_str(),
+                    "op" | "id" | "at" | "phase" | "x" | "y" | "session" | "modifiers"
+                )
+            })
+            || args.contains_key("phase") && request["phase"] != "down"
+        {
+            return None;
+        }
+        let id = u32::try_from(request["id"].as_u64()?).ok()?;
+        let module = self.module_ancestor(id)?;
+        let mut aim = || -> Result<_, String> {
+            if self.contact_position().is_some() {
+                return Err("a contact is already down".into());
+            }
+            let b = self
+                .box_of(id)
+                .ok_or_else(|| format!("view {id} has no painted box"))?;
+            let coord = |v: &serde_json::Value| {
+                v.as_f64()
+                    .map(|n| n as f32)
+                    .ok_or("invalid tap coordinates")
+            };
+            let (x, y) = if let Some(at) = args.get("at") {
+                if at.as_array().map(Vec::len) != Some(2) {
+                    return Err("tap at needs two coordinates".into());
+                }
+                (b.rect.0 + coord(&at[0])?, b.rect.1 + coord(&at[1])?)
+            } else if args.contains_key("x") || args.contains_key("y") {
+                (coord(&request["x"])?, coord(&request["y"])?)
+            } else {
+                b.center()
+            };
+            let hit = self.hit(x, y);
+            if !b.contains(x, y)
+                || !self.alert_allows(id)
+                || self.host.route_visibility(id).1
+                || self.placement_hidden(id)
+                || !hit.is_some_and(|h| h == id || self.is_inside(h, id))
+            {
+                return Err(format!(
+                    "view {id} is covered or not hittable at ({x}, {y})"
+                ));
+            }
+            let under = self.reader_module(x * scale, y * scale, scale);
+            if under[0] as u32 != module {
+                return Err(format!("module view {module} is not hittable"));
+            }
+            if args.contains_key("modifiers") {
+                return Err("Android module touches with modifiers are unsupported".into());
+            }
+            Ok(
+                serde_json::json!({"moduleContact":{"id":module,"slot":under[5],"generation":under[6],
+                "session":self.brush.native_session}, "at":[x,y]}),
+            )
+        };
+        Some(aim())
+    }
+
     /// The module view under a point of the Android reader (pixels), for
     /// its hit reply (`Native.under` in `host/android/canvas` has the
     /// words): its id, border box, allocation slot and generation, the
     /// long-press count, the painter's session token, the painted origin of
-    /// its content box and the node a long press there would give to.
+    /// its content box and the node a long press there would give to. A
+    /// frame's WebView is offered its contacts as a module's view is.
     #[cfg(any(target_os = "android", test))]
     pub(crate) fn reader_module(&mut self, x: f32, y: f32, scale: f32) -> [i32; 13] {
         let module = self.hit(x / scale, y / scale).filter(|id| {
             // A video with `controls` takes its gestures as a module's view does (LLP 1042.001 D4).
             self.host.kernel().node(*id).is_some_and(|node| {
-                (node.node_type == NodeType::NativeView
+                (matches!(node.node_type, NodeType::NativeView | NodeType::WebView)
                     || (node.node_type == NodeType::Video
                         && node.props.bool(PropId::Controls) == Some(true)))
                     && self.host.retained_action_eligible(node.key)
@@ -814,6 +941,10 @@ impl<D: DataSource> Presenter<D> {
             origin(content.1),
             (self.context_menu_at(x / scale, y / scale).map(|v| v.0))
                 .or_else(|| self.lift_source_at(x / scale, y / scale))
+                .or_else(|| {
+                    self.arrange_hold_at(x / scale, y / scale)
+                        .and_then(|b| self.host.kernel().node_by_key(b.handle).map(|n| n.id))
+                })
                 .map_or(0, |id| id as i32),
         ]
     }

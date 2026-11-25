@@ -452,3 +452,277 @@ component App
     assert!(r.set_display_scale(1.5).unwrap().is_some());
     assert_eq!(r.viewport().device_pixel_ratio, Some(1.5));
 }
+
+#[test]
+fn bottom_toolbar_belongs_to_one_route_column() {
+    let bar = "row role=\"toolbar\" toolbarPlacement=\"bottom\"";
+    let route = |body: &str| {
+        format!(
+            "component App\n  state left = true\n  state right = false\n  view\n    main navigationKey=\"home\"\n      column navigationKey=\"home\"\n{body}\n"
+        )
+    };
+    for (body, id) in [
+        (
+            format!("        {bar}\n        {bar}"),
+            "lower-toolbar-count",
+        ),
+        (
+            format!("        column\n          {bar}"),
+            "lower-toolbar-place",
+        ),
+        (
+            "        row toolbarPlacement=\"bottom\"".into(),
+            "lower-toolbar-place",
+        ),
+        (
+            "        row toolbarPlacement=\"\"".into(),
+            "lower-attr-value",
+        ),
+        (
+            "        row toolbarPlacement=\"botom\"".into(),
+            "lower-attr-value",
+        ),
+    ] {
+        assert_eq!(
+            contract::compile(&route(&body)).unwrap_err().id,
+            id,
+            "{body}"
+        );
+    }
+    for body in [
+        format!(
+            "        if left == right\n          {bar}\n        if left != right\n          {bar}"
+        ),
+        format!("        for n in [1,2] key=n\n          if n == 1\n            {bar}"),
+        format!(
+            "        if left == right\n          {bar}\n        if left != right\n          text \"Different\""
+        ),
+        format!("        {bar}\n        if left\n          {bar}"),
+    ] {
+        let (plan, warnings) = contract::compile_warned(&route(&body));
+        plan.unwrap();
+        assert!(
+            !warnings.iter().any(|w| w.id == "lower-toolbar-last"),
+            "{body}"
+        );
+    }
+    for before in [
+        format!("        {bar}"),
+        format!("        if left\n          {bar}"),
+    ] {
+        let (plan, warnings) =
+            contract::compile_warned(&route(&format!("{before}\n        text \"After\"")));
+        plan.unwrap();
+        assert_eq!(
+            warnings
+                .iter()
+                .filter(|w| w.id == "lower-toolbar-last")
+                .count(),
+            1
+        );
+    }
+    let dir = crate::scratch::Scratch::new(format!("toolbar-hosts-{}", std::process::id()));
+    std::fs::write(
+        dir.join("app.contract"),
+        route(&format!(
+            "        {bar}\n          if left\n            progress"
+        )),
+    )
+    .unwrap();
+    for target in ["web", "ios"] {
+        std::fs::write(
+            dir.join("app.json"),
+            format!(r#"{{"app":{{"name":"Bar","id":"dev.test.bar"}},"host":{{"{target}":{{}}}}}}"#),
+        )
+        .unwrap();
+        let (plan, _) = contract::compile_path_all_warned(&dir.join("app.contract"), false);
+        if target == "web" {
+            plan.unwrap();
+        } else {
+            assert_eq!(plan.err().unwrap()[0].id, "lower-toolbar-item");
+        }
+    }
+}
+
+#[test]
+fn bottom_toolbar_warns_only_for_a_proven_visit_under_native_tabs() {
+    let dir = crate::scratch::Scratch::new(format!("toolbar-tabs-{}", std::process::id()));
+    let manifest = dir.join("app.json");
+    std::fs::write(
+        &manifest,
+        r#"{"app":{"id":"dev.test.tabs","name":"Tabs"},"host":{"ios":{}}}"#,
+    )
+    .unwrap();
+    let route = include_str!("../../../../host/apple/tests/fixtures/static-toolbar-tabs.contract");
+    let root = include_str!("../../../../host/apple/tests/fixtures/bottom-toolbar.contract");
+    let conditional =
+        include_str!("../../../../host/apple/tests/fixtures/bottom-toolbar-tabs.contract");
+    let list = "row role=\"tablist\"";
+    let row = "row role=\"toolbar\" toolbarPlacement=\"bottom\"";
+    let names = &["typography", "swift", "detail", "single"][..];
+    let check = |source: &str, expected: &[&str]| {
+        let file = dir.join("app.contract");
+        std::fs::write(&file, source).unwrap();
+        let (plan, warnings) = contract::compile_path_all_warned(&file, false);
+        plan.unwrap();
+        let collisions: Vec<_> = warnings
+            .iter()
+            .filter(|w| w.id.starts_with("lower-toolbar-tab"))
+            .collect();
+        if expected.is_empty() {
+            assert!(collisions.is_empty(), "{source}: {collisions:?}");
+            return;
+        }
+        let [w] = &collisions[..] else {
+            panic!("{source}: {collisions:?}")
+        };
+        assert!(
+            w.message.contains("On an iPhone, UIKit draws")
+                && w.message.contains("under the app's tab bar")
+        );
+        if expected == ["home"] {
+            assert_eq!(w.id, "lower-toolbar-tab-root");
+            assert!(
+                w.message.contains("`home` tab root")
+                    && w.message.contains("header or push the screen")
+            );
+        } else {
+            assert_eq!(w.id, "lower-toolbar-tabs");
+            let names = expected
+                .iter()
+                .map(|n| format!("\"{n}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let guard = if expected.len() == 1 {
+                format!("top(nav).name == {names}")
+            } else {
+                format!("[{names}].includes(top(nav).name)")
+            };
+            let display = format!("display=({guard} ? \"none\" : \"flex\")");
+            assert!(
+                w.message
+                    .contains(&format!("`{display}` on the app's tablist")),
+                "{}",
+                w.message
+            );
+            std::fs::write(&file, source.replace(list, &format!("{list} {display}"))).unwrap();
+            contract::compile_path(&file).unwrap();
+        }
+    };
+    check(route, names);
+    check(&route.replace("if e.name == \"typography\" or e.name == \"swift\" or e.name == \"single\" or e.name == \"detail\"", "if e.name == \"swift\""), &["swift"]);
+    check(root, &["home"]);
+    check(conditional, &[]);
+
+    let first_list = route.find("      row role=\"tablist\"").unwrap();
+    let page = route.find("\ncomponent Page").unwrap();
+    let root_only = format!(
+        "{}      if top(nav).name == \"labs\"\n{}\n{}",
+        &route[..first_list],
+        route[first_list..page]
+            .lines()
+            .map(|l| format!("  {l}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        &route[page..]
+    );
+    let app_drawn = route
+        .replace(
+            "component ToolbarTabs",
+            "style Painted\n  appearance=\"none\"\n\ncomponent ToolbarTabs",
+        )
+        .replace(list, &format!("{list} class=Painted"));
+    for source in [
+        root_only, app_drawn,
+        route.replace("component ToolbarTabs", "shape PinnedLocation\n  id: number\nfn top(r: Router): PinnedLocation = PinnedLocation(id=0)\ncomponent ToolbarTabs"),
+        route.replace("              else\n                Page", "              else if e.name == \"labs\"\n                column navigationKey=`${e.id}` role=\"tablist\"\n                  button role=\"tab\" aria-controls=\"panel-controls\"\n                    text \"Controls\"\n              else\n                Page"),
+        route.replace(list, &format!("{list} display=\"none\"")),
+        route.replace(list, &format!("{list} display=\"flex\"")),
+        route.replace(list, &format!("{list} display=(top(nav).name == \"swift\" ? \"none\" : \"flex\")")),
+        route.replace("aria-controls=`panel-", "aria-controls=`other-"),
+        route.replace(row, &format!("{row} display=\"none\"")),
+        route.replace("                    button testId=\"widget\"", "                    if last == \"\"\n                      button testId=\"widget\"")
+            .replace("                      text \"Widget\"", "                        text \"Widget\""),
+        route.replace("column navigationKey=visit", "column navigationKey=visit navigationPresentation=\"modal\""),
+    ] { check(&source, &[]); }
+    let start = route
+        .find("                  row role=\"toolbar\"")
+        .unwrap();
+    let end = route
+        .find("              else\n                Page")
+        .unwrap();
+    let indent = |text: &str| text.lines().map(|l| format!("  {l}\n")).collect::<String>();
+    let toolbar = &route[start..end];
+    for block in [
+        format!("                  for n in [1] key=n\n{}", indent(toolbar)),
+        format!("                  match some(1)\n                    case some(n)\n{}                    case none\n                      text \"None\"\n", indent(&indent(toolbar))),
+        format!("                  {row}\n                    spacer\n"),
+    ] {
+        check(&route.replace(toolbar, &block), &[]);
+    }
+    // Detail itself is pushed, but its Section parent starts a presented stack.
+    let presented = route.replace("              else\n                Page", "              else if e.name == \"section\"\n                column navigationKey=`${e.id}` navigationPresentation=\"modal\"\n                  text \"Section\"\n              else\n                Page");
+    check(&presented, &["typography", "swift", "single"]);
+    let outside_tabs = route
+        .replace(
+            "    section \"/section\"\n      detail \"/section/detail\"",
+            "    section \"/section\"",
+        )
+        .replace(
+            "  tab sound \"/sound\"",
+            "  tab sound \"/sound\"\n  detail \"/detail\"",
+        );
+    check(&outside_tabs, &["typography", "swift", "single"]);
+
+    for host in [
+        r#"{"app":{"id":"dev.test.tabs","name":"Tabs"},"host":{"ios":{"deviceFamily":["ipad"]}}}"#,
+        r#"{"app":{"id":"dev.test.tabs","name":"Tabs"},"host":{"web":{}}}"#,
+    ] {
+        std::fs::write(&manifest, host).unwrap();
+        check(route, &[]);
+    }
+}
+
+#[test]
+fn shared_placement_action_keeps_its_old_words_and_cannot_make_an_unchecked_bottom_toolbar() {
+    let source = r#"component App
+  state placement = "window"
+  action place(value: string)
+    placement = value
+  view
+    column
+      row role="toolbar" toolbarPlacement=placement testId="tools"
+        text "Actions"
+      button "Keyboard" testId="keys" press=place("keyboard")
+      button "Bottom" testId="bad" press=place("bottom")
+"#;
+    let plan = contract::bake(contract::compile(source).unwrap(), boxed(NoData)).unwrap();
+    let mut runner = Runner::boot(
+        plan,
+        boxed(NoData),
+        Kernel::with_monospace(),
+        Default::default(),
+        "/",
+    )
+    .unwrap();
+    let key = runner.kernel().find_by_test_id("tools")[0];
+    for (button, expected) in [
+        ("keys", Some("keyboard")),
+        ("bad", None),
+        ("keys", Some("keyboard")),
+    ] {
+        let target = runner.kernel().find_by_test_id(button)[0];
+        let id = runner.kernel().node_by_key(target).unwrap().id;
+        runner.dispatch(id, exact_runner::Event::Press).unwrap();
+        assert_eq!(
+            runner
+                .kernel()
+                .node_by_key(key)
+                .unwrap()
+                .props
+                .str(PropId::ToolbarPlacement),
+            expected
+        );
+    }
+    assert!(agent::logs(&runner, 0).contains("write a literal bottom toolbar row"));
+}

@@ -178,6 +178,9 @@ impl<D: DataSource> Runner<D> {
             self.log(format!("{}: refused, {why}", self.key(row)));
             return Decision::Now(refused);
         }
+        if self.route(row) != Route::Substitute && self.substitute(row)["shortcut"] == "register" {
+            self.note_shortcut_site(row, args, cause);
+        }
         let decision = match self.route(row) {
             Route::Real => return Decision::Forward,
             // A target's own restriction holds under the agent too (D14 step 2).
@@ -209,7 +212,7 @@ impl<D: DataSource> Runner<D> {
                 if !send && self.substitute(row)["shortcut"] == "register" {
                     self.note_registration_reader(row, args);
                 }
-                Decision::Now(self.desktop_answer(row, args))
+                Decision::Now(self.desktop_answer(row, args, cause))
             }
             // A host that names its target after boot: what the first read
             // registered goes with the answer it no longer has.
@@ -471,10 +474,33 @@ impl<D: DataSource> Runner<D> {
         Some((name, held.cause))
     }
 
+    /// An input-gated read in a mixed app also requires the requesting source's grant.
+    pub(super) fn scoped_input_refusal(
+        &self,
+        row: &ModulesRow,
+        cause: Cause,
+        scope: Option<&str>,
+    ) -> Option<Json> {
+        let scope = scope?;
+        let sub = self.substitute(row);
+        if sub["origin"] != "input" || !cause.input_started() || self.page.hidden {
+            return None;
+        }
+        let names = sub["nameGrants"].as_array()?;
+        let granted = names
+            .iter()
+            .filter_map(Json::as_str)
+            .any(|name| scope.lines().any(|line| line.trim() == name));
+        (!names.is_empty() && !granted).then(|| json!({ "error": "NotAllowedError" }))
+    }
+
     /// The checks before any decision: why the call is refused, if it is.
     pub(super) fn admit(&self, row: &ModulesRow, args: &Json, cause: Cause) -> Result<(), String> {
         let origin = cause.origin();
         let sub = self.substitute(row);
+        if sub["origin"] == "input" && (!cause.input_started() || self.page.hidden) {
+            return Err(format!("person-required ({} origin)", origin.word()));
+        }
         let lines: Vec<&str> = (self.data.grants().lines())
             .filter_map(|l| l.split_whitespace().next())
             .collect();
@@ -646,9 +672,7 @@ impl<D: DataSource> Runner<D> {
     pub(super) fn press_starts_audio(&self, row: &ModulesRow, args: &Json, cause: Cause) -> bool {
         let audio_only = match (self.plan.str(row.package), self.plan.str(row.declared)) {
             ("@exact/media-capture", "getUserMedia") => {
-                (args["audio"] == true || args["audioConstraints"].is_object())
-                    && args["video"] != true
-                    && args["videoConstraints"].is_null()
+                (args["audio"] == true || args["audioConstraints"].is_object()) && !asks_video(args)
             }
             ("@exact/recording", "startMediaRecorder") => true,
             _ => false,
@@ -677,6 +701,12 @@ impl<D: DataSource> Runner<D> {
         }
         answer
     }
+}
+
+/// Whether `getUserMedia`'s `args` ask for video: `video` as `true` or as
+/// a constraints object, or `videoConstraints`.
+fn asks_video(args: &Json) -> bool {
+    !matches!(args["video"], Json::Null | Json::Bool(false)) || !args["videoConstraints"].is_null()
 }
 
 fn admit_field(

@@ -270,7 +270,13 @@ fn a_board_hears_its_menu_point_its_wheel_its_drop_and_its_unload() {
     assert!(r.take_commands().iter().any(|c| c.name == "preventDefault"));
     r.dispatch(
         world,
-        event(38, "12,30,Shift\ndoc:/3/plan.board\ndoc:/4/b.board"),
+        event(
+            38,
+            concat!(
+                "12,30,Shift\n",
+                r#"[["doc:/3/plan.board","doc:/4/b.board"],"",""]"#
+            ),
+        ),
     )
     .unwrap();
     assert_eq!(
@@ -278,11 +284,15 @@ fn a_board_hears_its_menu_point_its_wheel_its_drop_and_its_unload() {
         Some(&Value::str("2 doc:/3/plan.board+doc:/4/b.board 12"))
     );
     assert!(
-        Event::of_host_kind(38, "12,30\n/etc/passwd").is_err(),
+        Event::of_host_kind(38, concat!("12,30\n", r#"[["/tmp/plan.board"],"",""]"#)).is_err(),
         "only minted handles drop"
     );
     // A folder is a handle as a file is (`fs.stat` tells them apart).
-    r.dispatch(world, event(38, "0,0\ndoc:/5/photos")).unwrap();
+    r.dispatch(
+        world,
+        event(38, concat!("0,0\n", r#"[["doc:/5/photos"],"",""]"#)),
+    )
+    .unwrap();
     assert_eq!(r.slot("dropped"), Some(&Value::str("1 doc:/5/photos 0")));
     r.take_commands();
     r.dispatch(world, event(36, "")).unwrap();

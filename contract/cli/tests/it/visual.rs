@@ -199,22 +199,6 @@ fn a_native_button_haptic_repair_compiles() {
     }
 }
 
-/// The euxy port: a cancelled pointer is a `pointerup` on every host, and
-/// the refusal of `pointercancel` says so.
-#[test]
-fn pointercancel_names_the_pointerup_that_ends_a_hold() {
-    let e = contract::compile(
-        "component App\n  state held = false\n  action up\n    held = false\n  view\n    button pointerup=up pointercancel=up\n      text \"Hold\"\n",
-    )
-    .unwrap_err();
-    assert_eq!(e.id, "lower-unknown-attr");
-    assert!(
-        e.message
-            .contains("a cancelled pointer ends with `pointerup` (its `buttons` 0)"),
-        "{e}"
-    );
-}
-
 /// An agent who knows CSS writes `animationend=`: the refusal names the timer.
 #[test]
 fn a_motion_end_handler_names_the_gated_timer() {

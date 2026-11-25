@@ -8,10 +8,12 @@ mod clears;
 pub mod control_size;
 mod decorations;
 mod fonts;
+mod press;
 mod selection;
 pub mod text_style;
 pub use decorations::{atom_faces, decoration_styles};
 pub use fonts::{font_alias, font_family_names, runtime_font_family};
+pub use press::PRESS_ROWS;
 
 use exact_kernel::style::safe_area_properties::SafeAreaProperties;
 use exact_kernel::style::ColorValue;
@@ -37,20 +39,21 @@ pub const HAIRLINE: &str = "var(--exact-hairline, 1px)";
 /// Keep `em` and viewport units for the browser: its control fonts and viewport
 /// variants can differ from the kernel's.
 pub fn css_text(style: &StyleProps, font_names: &[String]) -> (String, Vec<Skipped>) {
-    css_text_in(style, font_names, false)
+    css_text_in(style, font_names, false, Default::default())
 }
 
 /// [`css_text`] preserving authored `rem`/`em` for [`crate::host::template`].
 /// The JS target keeps no kernel; the browser follows root and parent font changes.
 /// @ref LLP 1069.000 D3
 pub fn css_text_relative(style: &StyleProps, font_names: &[String]) -> (String, Vec<Skipped>) {
-    css_text_in(style, font_names, true)
+    css_text_in(style, font_names, true, Default::default())
 }
 
-fn css_text_in(
+pub(crate) fn css_text_in(
     style: &StyleProps,
     font_names: &[String],
     relative: bool,
+    bound_press: exact_kernel::StyleMask,
 ) -> (String, Vec<Skipped>) {
     let authored = |out: &mut String, id| {
         use exact_kernel::style::relative::Unit;
@@ -95,8 +98,12 @@ fn css_text_in(
     let mut out = String::from(exact_kernel::style::roles::scheme_color(style));
     let mut skipped = Vec::new();
     // @ref LLP 1061: row scale and host feedback multiply independently.
-    let press = press_composes(style);
-    let shift = style.mask.union(style.written).has(StyleId::PressTranslate);
+    let press = press_composes(style) || bound_press.has(StyleId::PressScale);
+    let shift = style
+        .mask
+        .union(style.written)
+        .union(bound_press)
+        .has(StyleId::PressTranslate);
     if shift {
         out.push_str("--exact-translate-composes:1;");
         if style.mask.has(StyleId::Translate) {
@@ -147,7 +154,12 @@ fn css_text_in(
                 let (mut text, spring_skipped) = transition_css(t);
                 // Transition the authored base below the press's animation stack.
                 for (compose, property, name, bases) in [
-                    (press, Property::Scale, "scale", &["--exact-scale"][..]),
+                    (
+                        press,
+                        Property::Scale,
+                        "scale",
+                        &["--exact-scale", "--exact-scale-y"][..],
+                    ),
                     (
                         shift,
                         Property::Translate,
@@ -415,9 +427,11 @@ fn css_text_in(
             (StyleId::Perspective, RowValue::Number(n)) if *n == 0.0 => {
                 out.push_str("perspective:none;")
             }
-            (StyleId::Scale, RowValue::Number(n)) if press => {
+            (StyleId::Scale, RowValue::Vec2(v)) if press => {
                 out.push_str("--exact-scale:");
-                num_into(&mut out, *n as f32);
+                num_into(&mut out, v.x);
+                out.push_str(";--exact-scale-y:");
+                num_into(&mut out, v.y);
                 out.push(';');
             }
             (StyleId::PressTranslate, RowValue::Vec2(v)) => {
@@ -436,7 +450,7 @@ fn css_text_in(
             (StyleId::PressTranslatePercent, _) => {}
             (StyleId::PressScale, RowValue::Number(n)) => {
                 if press {
-                    out.push_str("scale:calc(var(--exact-scale,1) * var(--exact-press-factor,1))!important;--exact-press:");
+                    out.push_str("scale:calc(var(--exact-scale,1) * var(--exact-press-factor,1)) calc(var(--exact-scale-y,1) * var(--exact-press-factor,1))!important;--exact-press:");
                     num_into(&mut out, *n as f32);
                     out.push(';');
                 }
@@ -617,6 +631,7 @@ fn css_text_in(
                 | StyleId::SafeAreaExtendBoundsLeft
                 | StyleId::ScrollInsetAdjustment
                 | StyleId::ScrollIndicatorAdjustment
+                | StyleId::SafeAreaTrack
                 | StyleId::ScrollEdgeEffectSoft
                 | StyleId::ScrollEdgeEffectHard
                 | StyleId::ScrollEdgeEffectHidden
@@ -676,6 +691,7 @@ fn css_text_in(
             }),
         }
     }
+    press::write_timing(&mut out, style, bound_press);
     (out, skipped)
 }
 
@@ -729,8 +745,14 @@ pub fn press_keyframes_css(text: &str) -> String {
         out.push_str(part);
         let declaration = part.rsplit_once('{').map_or(part, |(_, d)| d);
         if let Some(value) = declaration.strip_prefix("scale:") {
-            out.push_str("--exact-scale:");
-            out.push_str(value);
+            if let Some(v) = exact_motion::property::scale(value.trim_end_matches(';')) {
+                push_text!(
+                    &mut out,
+                    "--exact-scale:{};--exact-scale-y:{};",
+                    Shortest32(v.x as f32),
+                    Shortest32(v.y as f32)
+                );
+            }
         } else if let Some(value) = declaration.strip_prefix("translate:") {
             let Some((px, pct)) =
                 exact_kernel::style::space::translate(value.trim_end_matches(';'))
@@ -859,7 +881,7 @@ fn apple_corner(style: &StyleProps, id: StyleId) -> bool {
 /// Whether a row's value is one CSS declaration here.
 fn lowered(id: StyleId, value: &RowValue<'_>) -> bool {
     match value {
-        RowValue::Vec2(_) => id == StyleId::Translate,
+        RowValue::Vec2(_) => matches!(id, StyleId::Translate | StyleId::Scale),
         // Apple's affordances: no CSS property (LLP 1077 §5).
         RowValue::SymbolPalette(_) => false,
         _ if matches!(
@@ -1097,6 +1119,13 @@ fn declared(out: &mut String, id: StyleId, value: &RowValue<'_>) {
         RowValue::RotateAxis(_) | RowValue::SymbolPalette(_) => {}
         RowValue::Tracks(tracks) => out.push_str(tracks.css()),
         RowValue::Placement(placement) => out.push_str(&placement.css()),
+        RowValue::Vec2(v) if id == StyleId::Scale => {
+            num_into(out, v.x);
+            if v.x != v.y {
+                out.push(' ');
+                num_into(out, v.y);
+            }
+        }
         RowValue::Vec2(v) => {
             num_into(out, v.x);
             out.push_str("px ");

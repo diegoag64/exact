@@ -828,7 +828,10 @@ pub(crate) fn unplaced(
 fn section_list(all: &[Attr], children: &[Node], span: Span, out: &mut Vec<LowerError>) {
     let windowed =
         last(all, "virtualized").is_some_and(|a| !matches!(a.value, Expr::Bool(false, _)));
-    if !windowed && crate::cells::sectioned(children) && crate::cells::rows("list", all, &[], false)
+    if !windowed
+        && crate::grouped::style("list", all).ok().flatten().is_none()
+        && crate::cells::sectioned(children)
+        && crate::cells::rows("list", all, &[], false)
     {
         out.push(LowerError {
             id: "lower-list-section",

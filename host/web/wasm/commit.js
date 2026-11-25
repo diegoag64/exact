@@ -94,6 +94,7 @@ function settleMovers(later) {
 // `apply` and its `children` case name the portal functions above only on a batch with movers: the page's tests run
 // them alone.
 function apply(batch) {
+  if (batch.packageViewOwners) host.packageViewOwners = batch.packageViewOwners;
   // Hidden movers this batch makes: to the holder once it has made them.
   const hiddenLater = [];
   let holding = false;
@@ -616,6 +617,7 @@ function apply(batch) {
               globalThis.exact?.fragment?.cancel();
             }
           } else if ([
+            "cancelReorder",
             "showPopover",
             "hidePopover",
             "togglePopover"
@@ -859,6 +861,10 @@ function apply(batch) {
             if (document.fullscreenElement) {
               document.exitFullscreen().catch((e) => log(`exitFullscreen: refused: ${e.name}`));
             }
+          } else if (op.name === "panel") {
+            log("panel unsupported: route panels are available on macOS only");
+          } else if (["setBounds", "setAspectRatio", "setWindowAlwaysOnTop", "setWindowIgnoreMouseEvents"].includes(op.name)) {
+            log(`${op.name} refused: the browser has no such window command`);
           } else if (op.name === "setWindowOpacity") {
             log("setWindowOpacity refused: a page cannot change its window's opacity");
           } else if (op.name === "hideWindow") {
@@ -1018,7 +1024,9 @@ function apply(batch) {
   syncLists();
   // Focusing can dispatch an action: every node/value of the batch is committed before its focus handler runs.
   for (const command of focusCommands) {
-    if ([
+    if (command.name === "cancelReorder") {
+      arrange.cancel(command.args[0]);
+    } else if ([
       "showPopover",
       "hidePopover",
       "togglePopover"
@@ -1246,6 +1254,7 @@ export function applyBatch(batch) {
       globalThis.exact.gpu?.syncPerformance?.();
       globalThis.exact.gpu?.drainRecords();
       globalThis.exact.gpu?.layout?.();
+      if (HAS_PACKAGE_VIEWS) host.packageViews?.report();
       globalThis.exact.committed?.();
       // A commit may settle the request a replacement waits for (boot.js).
       globalThis.exact.replacementChanged?.();

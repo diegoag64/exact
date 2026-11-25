@@ -62,6 +62,7 @@ use std::collections::VecDeque;
 const REFUSED: &[&str] = &[
     "copyText",
     "openURL",
+    "panel",
     "playSound",
     "playSounds",
     "requestFullscreen",

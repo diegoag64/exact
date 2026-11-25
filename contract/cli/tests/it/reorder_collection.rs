@@ -897,3 +897,41 @@ fn reorder_wrappers_contain_absolute_descendants_before_and_after_preview() {
         );
     }
 }
+
+#[test]
+fn a_grouped_reorder_needs_a_single_vertical_list() {
+    let fixture = include_str!("../../../../host/web-js/conformance/grouped-settings.contract");
+    for (spelling, expected) in [
+        ("appearance=\"auto\"", None),
+        ("listStyle=\"inset-grouped\"", None),
+        (
+            "appearance=\"auto\" display=layout",
+            Some("lower-collection-reorder"),
+        ),
+        ("class=Grid", Some("lower-collection-reorder")),
+    ] {
+        let source = format!(
+            "style Grid\n  appearance=\"auto\"\n  display=\"grid\"\n{}",
+            fixture
+                .replace("  state last", "  state layout = \"grid\"\n  state last")
+                .replace("appearance=\"auto\"", spelling)
+        );
+        assert_eq!(
+            contract::compile(&source).err().map(|e| e.id).as_deref(),
+            expected,
+            "{spelling}"
+        );
+    }
+    let (prefix, list) = fixture.split_once("      list id=").unwrap();
+    let child =
+        format!("      list id={list}").replace("appearance=\"auto\"", "class=SettingsList");
+    let child = child
+        .lines()
+        .map(|line| format!("  {line}\n"))
+        .collect::<String>();
+    let source = format!("style SettingsList\n  appearance=\"auto\"\n{prefix}      list\n{child}");
+    assert_eq!(
+        contract::compile(&source).unwrap_err().id,
+        "lower-collection-reorder"
+    );
+}

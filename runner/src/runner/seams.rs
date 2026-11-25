@@ -147,8 +147,8 @@ pub trait Tools<D: DataSource> {
     fn call_superseded(&self, _: &mut Runner<D>, _: u64, _: bool) {}
     /// A name that needs a person was called by the running call's work.
     fn call_person_required(&self, _: &mut Runner<D>) {}
-    /// Take off this commit's commands from `first` that a call does not run.
-    fn skip_in_call(&self, _: &mut Runner<D>, _: usize) {}
+    /// The running call's work skipped host command `name`.
+    fn call_skipped(&self, _: &mut Runner<D>, _: &str) {}
     /// Whether a running call is in a session no one sees.
     fn call_stops_timers(&self, _: &Runner<D>) -> bool {
         false
@@ -383,6 +383,8 @@ pub trait PresenceSecrets<D: DataSource> {
     fn pump_presence(&self, _: &mut Runner<D>) {}
     /// The agent answered a presence hold.
     fn presence_answered(&self, _: &mut Runner<D>, _: u64, _: &HoldAnswer) {}
+    /// Presence calls whose request is no longer held leave their queues.
+    fn presence_let_go(&self, _: &mut Runner<D>) {}
     /// The backend's occupancy, adopted into the store.
     fn adopt_presence(&self, _: &mut Runner<D>) {}
 }
@@ -454,11 +456,6 @@ impl<D: DataSource> Runner<D> {
     pub(in crate::runner) fn call_person_required(&mut self) {
         let t = self.links_tools();
         t.call_person_required(self)
-    }
-
-    pub(in crate::runner) fn skip_in_call(&mut self, first: usize) {
-        let t = self.links_tools();
-        t.skip_in_call(self, first)
     }
 
     pub(in crate::runner) fn call_stops_timers(&self) -> bool {
@@ -559,6 +556,7 @@ impl<D: DataSource> Runner<D> {
                     cold: true,
                     hidden: true,
                     digest: None,
+                    foreground: false,
                 };
                 self.log(format!("launch --call ({tool})"));
                 let id = self.call_tool(tool, args.trim(), how);
@@ -575,6 +573,7 @@ impl<D: DataSource> Runner<D> {
                     cold: v["cold"] == true,
                     hidden: v["hidden"] == true,
                     digest: v["digest"].as_str().map(str::to_owned),
+                    foreground: false,
                 };
                 let id = self.call_tool(&tool, &args, how);
                 Some(
@@ -695,6 +694,11 @@ impl<D: DataSource> Runner<D> {
     pub(in crate::runner) fn presence_answered(&mut self, hold: u64, answer: &HoldAnswer) {
         let p = self.seams.presence;
         p.presence_answered(self, hold, answer)
+    }
+
+    pub(in crate::runner) fn presence_let_go(&mut self) {
+        let p = self.seams.presence;
+        p.presence_let_go(self)
     }
 
     pub(in crate::runner) fn adopt_presence(&mut self) {

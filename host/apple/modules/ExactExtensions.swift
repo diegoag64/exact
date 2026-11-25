@@ -270,7 +270,7 @@ enum ExactExtensions {
         if let view = request["view"] as? String {
             let origin = request["origin"] as? String ?? "app"
             if let shown = request["displayed"] as? Bool { a.displayed(view, shown, origin: origin) }
-            if let prop = request["bound"] as? String { a.bound(view, prop, origin: origin) }
+            if let prop = request["bound"] as? String, !(request["value"] is NSNull) { a.bound(view, prop, origin: origin) }
             reply.send([:])
         } else if let surface = request["surface"] as? String, let shown = request["displayed"] as? Bool {
             a.displayed(surface: surface, shown, origin: request["origin"] as? String ?? "app")
@@ -359,6 +359,9 @@ enum ExactExtensions {
         if let session = sessions[key] { ExactCredentialMembers.cancelSession(session) }
         #endif
         sessions[key] = nil
+        #if canImport(ExactPackage)
+        (tables[key] as? ExactTracks)?.endViewBindings()
+        #endif
         tables[key] = nil
         facts[key] = nil
         angles[key] = nil
@@ -445,6 +448,14 @@ private let audioEvent: AudioClaims.EventFn = { ctx, code in
 #if canImport(ExactPackage)
 // Only an artifact that composes packages has their seam to compile against.
 extension ExactExtensions {
+    static func tracks(_ m: ExactModule) -> ExactTracks {
+        let key = ObjectIdentifier(m)
+        if let tracks = tables[key] as? ExactTracks { return tracks }
+        let tracks = ExactTracks()
+        tables[key] = tracks
+        return tracks
+    }
+
     static func prepareContext(_ m: ExactModule, _ name: String, _ context: ExactPackageContext) {
         if let shown = facts[ObjectIdentifier(m)]?[name]?.foreground { context.foreground = shown }
     }
@@ -454,8 +465,7 @@ extension ExactExtensions {
     /// files, the host's audio session, its canvases' inputs, the window's angle and
     /// the package's configuration.
     static func context(_ m: ExactModule, _ name: String, session: String) -> ExactPackageContext {
-        let module = m.context, tracks = tables[ObjectIdentifier(m)] as? ExactTracks ?? ExactTracks()
-        tables[ObjectIdentifier(m)] = tracks
+        let module = m.context, tracks = tracks(m)
         let label = module.poster["session"].flatMap { $0.isEmpty ? nil : $0 }
         return ExactPackageContext(
             agent: module.agent && !real.contains(name), session: session, hostSession: module.poster["owner"] ?? "",
