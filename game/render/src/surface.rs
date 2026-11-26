@@ -69,6 +69,10 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     hooks: H,
     hook_clock: crate::hooks::HookClock,
     hook_poses: crate::hooks::Poses,
+    /// The game's stage at the last two ticks seen (the tick, the one
+    /// before, and that tick's): a headset frame draws between them as the
+    /// world's transforms are drawn, so a stage the hands move is smooth.
+    xr_stages: Option<(u64, exact_game::XrStage, exact_game::XrStage)>,
     gpu_timing: Option<crate::hooks::gpu_timing::GpuTiming>,
     /// What the last `render` encoded, for timing once the module submits it.
     encoded: Option<u64>,

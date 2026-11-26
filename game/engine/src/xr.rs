@@ -46,6 +46,27 @@ impl Default for XrStage {
 }
 
 impl XrStage {
+    /// Between this stage and `to`, `t` of the way (0 this, 1 `to`): its
+    /// centre, position, scale and extent straight, its turn the short way
+    /// round. What a frame draws between two ticks while the stage moves.
+    pub fn lerp(&self, to: &XrStage, t: f32) -> XrStage {
+        let t = t.clamp(0.0, 1.0);
+        let mut turn = to.yaw - self.yaw;
+        while turn > core::f32::consts::PI {
+            turn -= core::f32::consts::TAU;
+        }
+        while turn < -core::f32::consts::PI {
+            turn += core::f32::consts::TAU;
+        }
+        XrStage {
+            center: self.center.lerp(to.center, t),
+            scale: self.scale + (to.scale - self.scale) * t,
+            yaw: self.yaw + turn * t,
+            position: self.position.lerp(to.position, t),
+            extent: self.extent + (to.extent - self.extent) * t,
+        }
+    }
+
     /// A tabletop: the world point `center` at `height` metres above the
     /// floor, `distance` metres in front of where the session started, and
     /// `size` world units across `metres` metres.
