@@ -25,6 +25,8 @@ mod android_init;
 pub(crate) use android_init::{attach as attach_application, bind as bind_application};
 #[cfg(any(target_os = "android", test))]
 mod fingers;
+#[cfg(any(target_os = "android", windows))]
+pub(crate) mod headset;
 mod performance;
 #[cfg(any(target_os = "android", test))]
 mod retry;
@@ -182,6 +184,8 @@ impl Abi {
                 android_init::run(&abi, path)?;
                 abi.initialized = true;
             }
+            #[cfg(any(target_os = "android", windows))]
+            headset::attach(artifact, path);
             if artifact.is_empty()
                 && compat["inputs"]["gpuModules"]
                     .as_object()
@@ -228,6 +232,8 @@ impl Abi {
                         .map_err(|e| format!("GPU ABI {name}: {e}"))?;
                 }
                 abi.load_device()?;
+                #[cfg(windows)]
+                headset::device_made(artifact);
                 abi.symbol::<unsafe extern "C" fn(bool)>(b"gpu_seekable")(
                     std::env::var("EXACT_AGENT").as_deref() == Ok("1"),
                 );
@@ -611,7 +617,9 @@ impl Surfaces {
     }
 
     fn lifecycle(&mut self, hidden: bool, interrupted: bool) {
-        for canvas in self.canvases.values() {
+        // The headset's session, not the window, pauses and resumes the
+        // canvas it draws (`gpu/openxr/src/session.rs`).
+        for canvas in self.canvases.values().filter(|c| !Self::in_headset(c)) {
             let abi = &self.abis[&canvas.artifact];
             if self.hidden != hidden {
                 abi.lifecycle(canvas.id, u32::from(!hidden));

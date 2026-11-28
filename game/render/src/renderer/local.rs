@@ -205,6 +205,7 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
             let local = &self.local_culls[layer / 4];
             let view = (layer % 4) as u32;
             self.probe_stage(super::probe::Stage::LocalShadow(layer as u8));
+            crate::counters::pass();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("game local shadow"),
                 color_attachments: &[],
@@ -242,11 +243,13 @@ impl<const ASSETS: bool> RendererWithAssets<ASSETS> {
                 if self.cull.direct {
                     let mesh = &self.meshes[self.batches[group.batch].mesh.0];
                     bound.scene(&mut pass, &self.scene_binds[self.current], 0);
+                    crate::counters::commands(1);
                     pass.draw_indexed(mesh.indices.clone(), mesh.base_vertex, group.range.clone());
                 } else {
                     let (offset, draw) = local.cull.draw(view, index);
                     let binds = &local.binds.as_ref().unwrap().0;
                     bound.scene(&mut pass, &binds[self.current], offset);
+                    crate::counters::commands(1);
                     pass.draw_indexed_indirect(&local.cull.indirect.raw, draw);
                 }
                 draws += 1;

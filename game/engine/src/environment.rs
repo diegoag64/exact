@@ -111,6 +111,21 @@ impl EnvironmentMap {
     }
 }
 
+/// How much of its colour the lit world keeps: 1 (the default, as if absent)
+/// as authored, 0 grey. Everything drawn is graded, its emission included:
+/// models lit or unlit, primitives (a `Material::glow` too), particles and
+/// sprites, the sky, the background and the fog. A model material marked
+/// `MaterialData::keeps_colour` keeps its colour (an interface, or what
+/// should stand in colour in a grey world). No pass is added: the shading
+/// that draws a surface applies it.
+#[derive(Clone, Copy, Debug, PartialEq, Resource)]
+pub struct Saturation(pub f32);
+impl Default for Saturation {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
 /// Screen-space ambient occlusion, an optional effect: inserting this resource
 /// turns it on. Creases and contacts darken where nearby geometry covers a
 /// surface's hemisphere within `radius`.
@@ -265,11 +280,13 @@ pub enum ToneMapping {
     /// Linear output, encoded to sRGB by the target or the shader.
     None,
 }
-/// Scene colour/depth sampling; selected once by `Game::SAMPLES`.
+/// Scene colour/depth sampling, requested by `Game::samples`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SceneSamples {
     /// One sample per pixel.
     One,
+    /// Two-sample MSAA on supported native stereo targets.
+    Two,
     /// Four-sample MSAA (the default).
     #[default]
     Four,
@@ -279,6 +296,7 @@ impl SceneSamples {
     pub fn count(self) -> u32 {
         match self {
             Self::One => 1,
+            Self::Two => 2,
             Self::Four => 4,
         }
     }
@@ -333,6 +351,13 @@ pub enum Quality {
     Mid,
     /// Everything the game asks for.
     High,
+    /// The immersive profile on every frame (`exact_game_render::profile`):
+    /// what a headset draws, one sun cascade fitted to `Game::xr_stage`, no
+    /// bloom, a lean water surface, tonemapped straight into the target, and
+    /// models' coarse levels of detail sooner. An immersive frame takes it
+    /// whatever the rung; this asks for it on a flat screen, to measure or
+    /// look at a headset's picture on a desktop.
+    Xr,
 }
 
 /// Height fog, or near/far fog along the camera's forward axis.

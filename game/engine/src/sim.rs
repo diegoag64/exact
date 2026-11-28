@@ -11,6 +11,7 @@ pub use pointer::PointerSample;
 mod paranoid;
 mod queue;
 mod snapshot;
+mod xr;
 
 /// One immutable simulation instant; Copy keeps world borrows short in game code.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Data)]
@@ -36,6 +37,8 @@ pub trait Game: 'static {
     /// Keeps shadows, textures, emission, fog and rim; ignores metallic/specular response.
     /// Fixed for the renderer's lifetime; primitive and custom materials are unaffected.
     const MATTE_MODELS: bool = false;
+    /// Draw model outline hulls in immersive frames.
+    const XR_MODEL_OUTLINES: bool = true;
     /// Surface name in Contract.
     const NAME: &'static str = "world";
     /// Stable save identity, independent of the shared surface name.
@@ -144,6 +147,19 @@ pub trait Game: 'static {
     fn samples(_args: &Self::Args) -> crate::SceneSamples {
         Self::SAMPLES
     }
+    /// Where the world stands in an immersive (WebXR) session, read each
+    /// immersive frame: the headset's eyes replace the world's camera. Only a
+    /// game whose app.json sets `game.xr` offers a session. Never saved or
+    /// hashed; the default puts world metres on the session's floor.
+    fn xr_stage(_world: &World, _args: &Self::Args) -> crate::XrStage {
+        crate::XrStage::default()
+    }
+    /// The canvas's arguments as a native headset app runs it (app.json's
+    /// `host.android.xr`, a Quest build), where the HUD and menus are not
+    /// drawn: each bind is adjusted here before the world sees it, so a game
+    /// can start straight into play. Never called otherwise; the default
+    /// keeps the arguments the app binds.
+    fn xr_args(_args: &mut Self::Args) {}
     /// One fixed step, called after inputs and before transform propagation.
     fn tick(world: &mut World, input: &Input, args: &Self::Args);
     /// Rebuild presentation-only state (`#[derive(Presentation)]` components) from

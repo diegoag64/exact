@@ -14,6 +14,7 @@ extern crate self as exact_game_render;
 
 mod bloom;
 mod buffers;
+mod counters;
 mod cull;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod cull_tests;
@@ -42,6 +43,7 @@ mod outline;
 mod perf;
 mod pipeline;
 mod placed;
+pub mod profile;
 #[cfg(test)]
 mod quad_tests;
 mod quads;
@@ -51,6 +53,8 @@ mod shadows;
 pub mod shapes;
 mod skinning;
 mod ssao;
+mod stereo;
+pub use stereo::{shared_camera, Eye as StereoEye};
 mod surface;
 pub mod tells;
 mod timing;
@@ -376,6 +380,9 @@ pub struct FrameInput<'a> {
     pub environment_map: Option<EnvironmentMapInput<'a>>,
     /// Screen-space ambient occlusion; None (the default) draws none.
     pub ambient_occlusion: Option<exact_game::AmbientOcclusion>,
+    /// How much colour the lit world keeps (`exact_game::Saturation`): 1 as
+    /// authored, 0 grey; emission and unlit materials keep theirs.
+    pub saturation: f32,
     /// A water surface and its effects (`water.rs`); None (the default) draws none.
     pub water: Option<exact_game::Water>,
     /// Optional pass timestamps. Requires TIMESTAMP_QUERY on the device.
@@ -411,6 +418,7 @@ impl Default for FrameInput<'_> {
             environment: Environment::default(),
             environment_map: None,
             ambient_occlusion: None,
+            saturation: 1.0,
             water: None,
             timestamps: None,
             headroom: 1.0,
@@ -434,6 +442,43 @@ pub struct Stats {
     /// Cumulative frames drawn straight into the target, with no HDR image or
     /// tone pass (`Renderer::set_direct`).
     pub direct_frames: u64,
+    /// Cumulative stereo frames drawn in one multiview pass (`stereo.rs`).
+    pub stereo_frames: u64,
+    /// Render and compute passes this view began (counters.rs).
+    pub passes: u32,
+    /// Pipelines this view bound: the state changes a binning GPU replays.
+    pub pipelines: u32,
+    /// Draw and dispatch commands this view recorded; a merged multi-draw is
+    /// one (`draws` counts the groups inside it).
+    pub commands: u32,
+    /// Of `draws`, the caster groups drawn into the sun's shadow cascades.
+    pub shadow_draws: u32,
+    /// Sun shadow cascades drawn.
+    pub cascades: u32,
+    /// The scene's samples per pixel.
+    pub samples: u32,
+    /// CPU milliseconds recording this view (native only; zero on the web).
+    pub encode_ms: f32,
+}
+
+impl Stats {
+    /// Two views' work as one frame's: counts add, cumulative totals keep
+    /// the later view's.
+    pub fn add(&mut self, view: &Stats) {
+        self.draws += view.draws;
+        self.instances += view.instances;
+        self.triangles += view.triangles;
+        self.texture_creations = view.texture_creations;
+        self.direct_frames = view.direct_frames;
+        self.stereo_frames = view.stereo_frames;
+        self.passes += view.passes;
+        self.pipelines += view.pipelines;
+        self.commands += view.commands;
+        self.shadow_draws += view.shadow_draws;
+        self.cascades = self.cascades.max(view.cascades);
+        self.samples = view.samples;
+        self.encode_ms += view.encode_ms;
+    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

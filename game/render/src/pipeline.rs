@@ -14,6 +14,9 @@ const FRAME: &str = piece!("frame");
 /// `particle` (dots) or `sprite` (textured quads), `kind` `plain`, `soft`,
 /// `count` or `soft_count` (a look frame's probe variants), at `samples` 1 or 4.
 pub(crate) fn quad_module(base: &str, kind: &str, samples: u32) -> &'static str {
+    // The multisampled WGSL reads textureNumSamples(depth). Only its binding
+    // type differs from 1x; the render pipeline keeps the actual raster count.
+    let samples = if samples == 1 { 1 } else { 4 };
     macro_rules! quads {
         ($($name:literal)*) => {
             match format!("{base}_{kind}_{samples}").as_str() {
@@ -144,6 +147,38 @@ pub(crate) fn shader_sources() -> Vec<String> {
     all
 }
 
+/// Every module a stereo frame compiles, in its multiview form.
+#[cfg(test)]
+pub(crate) fn multiview_sources() -> Vec<(String, String)> {
+    use crate::stereo::{multiview_source, tone_source};
+    let mut out = Vec::new();
+    for early in [false, true] {
+        let [forward, _, sky, tone, _] = primitive_sources(early);
+        out.push((format!("forward early={early}"), multiview_source(&forward)));
+        out.push((
+            format!("forward half early={early}"),
+            half_precision(&multiview_source(&forward)),
+        ));
+        out.push(("sky".into(), multiview_source(&sky)));
+        out.push(("tone".into(), tone_source(&tone)));
+        out.push((
+            format!("model early={early}"),
+            multiview_source(&model_sources(false, early)),
+        ));
+    }
+    out.push(("outline".into(), multiview_source(&outline_source())));
+    out.push(("water".into(), multiview_source(&water_source())));
+    for samples in [1, 4] {
+        for base in ["particle", "sprite"] {
+            out.push((
+                format!("{base} {samples}"),
+                multiview_source(quad_module(base, "plain", samples)),
+            ));
+        }
+    }
+    out
+}
+
 /// Frustum culling reuses the scene's transform bindings (0-5) in compute.
 pub(crate) fn cull_source() -> String {
     [FRAME, TRANSFORM, piece!("cull")].concat()
@@ -214,6 +249,11 @@ pub(crate) const MODEL_LIGHTS: usize = 2048;
 pub(crate) struct Pipelines {
     pub cache: exact_gpu::PipelineCache,
     pub samples: u32,
+    /// Both eyes' views (`stereo::MASK`): the set a stereo frame draws its
+    /// picture with, whose frame-pass pipelines are multiview and compiled
+    /// from `stereo::multiview_source`; shadow and bloom pipelines stay
+    /// single-view. None: the renderer's own set.
+    pub multiview: Option<std::num::NonZeroU32>,
     pub depth_prepass: bool,
     /// The device has SHADER_F16: forward modules shade in half precision.
     pub half: bool,
@@ -265,6 +305,44 @@ impl Pipelines {
         samples: u32,
         depth_prepass: bool,
     ) -> Self {
+        Self::configured_views(device, format, samples, depth_prepass, None, None)
+    }
+    /// This set's stereo twin: the same targets and settings, its frame-pass
+    /// pipelines drawing both eyes (`stereo::MASK`). It shares this set's
+    /// bind group layouts, so the renderer's bind groups serve both.
+    pub fn stereo(&self, device: &wgpu::Device) -> Self {
+        let mut stereo = Self::configured_views(
+            device,
+            self.format,
+            self.samples,
+            self.depth_prepass,
+            Some(crate::stereo::MASK),
+            Some(self),
+        );
+        stereo.matte_models = self.matte_models;
+        stereo.share_models(device, self);
+        stereo
+    }
+    /// The model family once `from` has one, sharing its material and
+    /// instance layouts.
+    pub fn share_models(&mut self, device: &wgpu::Device, from: &Self) {
+        if self.models.is_none() {
+            if let Some(family) = &from.models {
+                self.prepare_model_with(device, Some((&family.material, &family.instance)));
+            }
+        }
+    }
+    /// [`Self::configured`] with frame-pass pipelines drawing `multiview`'s
+    /// views (a stereo frame's set, `stereo.rs`).
+    pub fn configured_views(
+        device: &wgpu::Device,
+        format: wgpu::TextureFormat,
+        samples: u32,
+        depth_prepass: bool,
+        multiview: Option<std::num::NonZeroU32>,
+        share: Option<&Self>,
+    ) -> Self {
+        let stereo = multiview.is_some();
         let cache = exact_gpu::PipelineCache::new(device);
         let buffer = |binding, ty, visibility| wgpu::BindGroupLayoutEntry {
             binding,
@@ -361,7 +439,11 @@ impl Pipelines {
                 texture(
                     1,
                     wgpu::TextureSampleType::Float { filterable: false },
-                    wgpu::TextureViewDimension::D2,
+                    if stereo {
+                        wgpu::TextureViewDimension::D2Array
+                    } else {
+                        wgpu::TextureViewDimension::D2
+                    },
                 ),
             ],
         );
@@ -447,10 +529,34 @@ impl Pipelines {
                 ),
             ],
         );
+        // A stereo twin binds the renderer's own groups: the same layouts.
+        let (scene_layout, shadow_layout, camera_layout, bloom_layout, bloom_join_layout) =
+            match share {
+                Some(p) => (
+                    p.scene_layout.clone(),
+                    p.shadow_layout.clone(),
+                    p.camera_layout.clone(),
+                    p.bloom_layout.clone(),
+                    p.bloom_join_layout.clone(),
+                ),
+                None => (
+                    scene_layout,
+                    shadow_layout,
+                    camera_layout,
+                    bloom_layout,
+                    bloom_join_layout,
+                ),
+            };
         let early = device
             .features()
             .contains(wgpu::Features::SHADER_EARLY_DEPTH_TEST);
-        let sources = primitive_sources(early);
+        let mut sources = primitive_sources(early);
+        if stereo {
+            // The frame pass's modules: forward, sky and tone.
+            sources[0] = crate::stereo::multiview_source(&sources[0]);
+            sources[2] = crate::stereo::multiview_source(&sources[2]);
+            sources[3] = crate::stereo::tone_source(&sources[3]);
+        }
         let half = device.features().contains(wgpu::Features::SHADER_F16);
         let pbr_source = if half {
             half_precision(&sources[0])
@@ -479,7 +585,8 @@ impl Pipelines {
         let forward = std::array::from_fn(|i| {
             let shadow = i & 1 != 0;
             let layouts = [Some(&scene_layout), Some(&shadow_layout)];
-            make_pipeline(
+            make_pipeline_views(
+                multiview,
                 device,
                 cache.handle.as_ref(),
                 &shaders[0],
@@ -551,10 +658,12 @@ impl Pipelines {
             &scene_layout,
             None,
             samples,
+            multiview,
         );
         let tone = std::array::from_fn(|i| {
             let layouts = [Some(&tone_layout), Some(&bloom_layout)];
-            make_pipeline(
+            make_pipeline_views(
+                multiview,
                 device,
                 cache.handle.as_ref(),
                 &shaders[3],
@@ -671,6 +780,7 @@ impl Pipelines {
         Self {
             cache,
             samples,
+            multiview,
             depth_prepass,
             matte_models: false,
             models: None,
@@ -768,14 +878,31 @@ impl Pipelines {
     }
 
     pub fn prepare_model(&mut self, device: &wgpu::Device) {
+        self.prepare_model_with(device, None);
+    }
+    fn prepare_model_with(
+        &mut self,
+        device: &wgpu::Device,
+        share: Option<(&wgpu::BindGroupLayout, &wgpu::BindGroupLayout)>,
+    ) {
         self.models.get_or_insert_with(|| {
-            let material = crate::model_pipeline::material_layout(device);
-            let instance = crate::model_pipeline::instance_layout(device);
+            let (material, instance) = match share {
+                Some((material, instance)) => (material.clone(), instance.clone()),
+                None => (
+                    crate::model_pipeline::material_layout(device),
+                    crate::model_pipeline::instance_layout(device),
+                ),
+            };
             let shaders = std::array::from_fn(|i| {
                 device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("game model shader"),
                     source: wgpu::ShaderSource::Wgsl({
-                        let source = model_sources(i == 1, self.early);
+                        let mut source = model_sources(i == 1, self.early);
+                        // A stereo set's forward module draws both eyes; its
+                        // shadow module casts once, single-view.
+                        if i == 0 && self.multiview.is_some() {
+                            source = crate::stereo::multiview_source(&source);
+                        }
                         // The forward module shades; the shadow module only casts.
                         if i == 0 && self.half {
                             half_precision(&source).into()
@@ -859,6 +986,7 @@ impl Pipelines {
                 shadow,
                 (self.samples, self.format),
                 (self.early, key & PREPASS != 0, false, self.matte_models),
+                if shadow { None } else { self.multiview },
             )
         };
         if shadow {
@@ -908,6 +1036,7 @@ impl Pipelines {
                 let cache = self.cache.handle.clone();
                 let (target, early) = ((self.samples, self.format), self.early);
                 let matte = self.matte_models;
+                let multiview = self.multiview;
                 family.workers.start(key, move || {
                     slots[key].get_or_init(|| {
                         crate::model_pipeline::pipeline(
@@ -919,6 +1048,7 @@ impl Pipelines {
                             false,
                             target,
                             (early, key & PREPASS != 0, false, matte),
+                            multiview,
                         )
                     });
                 });
@@ -952,6 +1082,7 @@ impl Pipelines {
         let scene_layout = self.scene_layout.clone();
         let shadow_layout = self.shadow_layout.clone();
         let (samples, format, supports_early) = (self.samples, self.format, self.early);
+        let multiview = self.multiview;
         let build = move |key| {
             let general = key & PRIMITIVE_GENERAL != 0;
             let early = key & EARLY != 0;
@@ -967,7 +1098,8 @@ impl Pipelines {
             };
             let flag = |bit| if key & bit != 0 { 1.0 } else { 0.0 };
             let direct = key & DIRECT != 0;
-            make_pipeline(
+            make_pipeline_views(
+                multiview,
                 &device,
                 cache.as_ref(),
                 &shader,
@@ -1058,7 +1190,8 @@ impl Pipelines {
     ) -> &wgpu::RenderPipeline {
         self.camera_depth[usize::from(mirrored) + 2 * usize::from(fading) + 4 * usize::from(direct)]
             .get_or_init(|| {
-                make_pipeline(
+                make_pipeline_views(
+                    self.multiview,
                     device,
                     self.cache.handle.as_ref(),
                     &self.pbr,
@@ -1110,6 +1243,7 @@ impl Pipelines {
                 false,
                 (self.samples, self.format),
                 (false, false, true, self.matte_models),
+                self.multiview,
             )
         };
         let coverage = family.camera_depth[index & !4].get_or_init(|| make(key & !32));
@@ -1129,6 +1263,7 @@ impl Pipelines {
                 &self.scene_layout,
                 Some(self.format),
                 self.samples,
+                self.multiview,
             )
         })
     }
@@ -1166,8 +1301,10 @@ fn sky_pipeline(
     layout: &wgpu::BindGroupLayout,
     direct: Option<wgpu::TextureFormat>,
     samples: u32,
+    multiview: Option<std::num::NonZeroU32>,
 ) -> wgpu::RenderPipeline {
-    make_pipeline(
+    make_pipeline_views(
+        multiview,
         device,
         cache,
         module,
@@ -1194,6 +1331,46 @@ fn sky_pipeline(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn make_pipeline(
+    device: &wgpu::Device,
+    cache: Option<&wgpu::PipelineCache>,
+    shader: &wgpu::ShaderModule,
+    label: &str,
+    vs: &str,
+    fs: Option<&str>,
+    layouts: &[Option<&wgpu::BindGroupLayout>],
+    buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+    depth_stencil: Option<wgpu::DepthStencilState>,
+    samples: u32,
+    format: wgpu::TextureFormat,
+    blend: Option<wgpu::BlendState>,
+    constants: &[(&str, f64)],
+    mirrored: bool,
+    color_write: bool,
+) -> wgpu::RenderPipeline {
+    make_pipeline_views(
+        None,
+        device,
+        cache,
+        shader,
+        label,
+        vs,
+        fs,
+        layouts,
+        buffers,
+        depth_stencil,
+        samples,
+        format,
+        blend,
+        constants,
+        mirrored,
+        color_write,
+    )
+}
+
+/// [`make_pipeline`] drawing `multiview`'s views (a stereo set's).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn make_pipeline_views(
+    multiview: Option<std::num::NonZeroU32>,
     device: &wgpu::Device,
     cache: Option<&wgpu::PipelineCache>,
     shader: &wgpu::ShaderModule,
@@ -1265,7 +1442,7 @@ pub(crate) fn make_pipeline(
                 count: samples,
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: multiview,
             cache,
         })
     })
@@ -1299,201 +1476,9 @@ pub(crate) fn outline_source() -> String {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod model_variant_tests {
-    use super::*;
-
-    #[test]
-    fn first_primitive_draw_uses_fallback_while_worker_specializes() {
-        let Some(gpu) = crate::test_device::device_or_skip(exact_gpu::fixture::device()) else {
-            return;
-        };
-        let p = Pipelines::with_samples(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, 1);
-        for key in [LEAN | SINGLE_CASCADE, LEAN | SINGLE_CASCADE | 4] {
-            let selected = p.forward_variant(&gpu.device, key);
-            let index = 2 * usize::from(key & 4 != 0);
-            assert_eq!(selected, p.primitive_fallback[index].get().unwrap());
-            let specialized = p.variants[key].wait();
-            assert_eq!(specialized, p.forward_variant(&gpu.device, key));
-        }
-    }
-
-    #[test]
-    fn model_preparation_compiles_only_requested_variants_and_reuses_them() {
-        let Some(gpu) = crate::test_device::device_or_skip(exact_gpu::fixture::device()) else {
-            return;
-        };
-        let mut p = Pipelines::with_samples(&gpu.device, wgpu::TextureFormat::Rgba8Unorm, 1);
-        p.prepare_model(&gpu.device);
-        let family = p.models.as_ref().unwrap();
-        assert!(family.forward.iter().all(|v| v.get().is_none()));
-        assert!(family.shadow.iter().all(|v| v.get().is_none()));
-        for key in [32 + 64, 3 + 32 + 64 + 128 + 256, 3 + 8 + 16] {
-            let selected = p.model_variant(&gpu.device, key, false);
-            let class = key & (4 | 8 | 16 | 64 | PREPASS);
-            assert_eq!(
-                selected,
-                family.fallback[class | (key & 32)].get().unwrap(),
-                "even the first draw of a family uses its ready fallback"
-            );
-            let pipeline = family.forward[key].wait();
-            assert_eq!(pipeline, p.model_variant(&gpu.device, key, false));
-        }
-        for key in [0, 4 + 16 + 32] {
-            let pipeline = p.model_variant(&gpu.device, key, true).clone();
-            assert_eq!(&pipeline, p.model_variant(&gpu.device, key, true));
-        }
-        assert_eq!(
-            family.forward.iter().filter(|v| v.get().is_some()).count(),
-            3
-        );
-        assert_eq!(
-            family.shadow.iter().filter(|v| v.get().is_some()).count(),
-            3
-        );
-    }
-}
+mod model_variant_tests;
 
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone, Copy, Default)]
-struct Attempt {
-    running: bool,
-    tries: u8,
-    retry_frames: u8,
-}
-
+mod specializations;
 #[cfg(not(target_arch = "wasm32"))]
-struct Specializations(std::sync::Mutex<Workers>);
-#[cfg(not(target_arch = "wasm32"))]
-struct Workers {
-    attempts: Box<[Attempt]>,
-    handles: Vec<(usize, std::thread::JoinHandle<()>)>,
-}
-#[cfg(not(target_arch = "wasm32"))]
-impl Default for Specializations {
-    fn default() -> Self {
-        Self(std::sync::Mutex::new(Workers {
-            attempts: vec![Attempt::default(); MODEL_GENERAL].into_boxed_slice(),
-            handles: Vec::new(),
-        }))
-    }
-}
-#[cfg(not(target_arch = "wasm32"))]
-impl Specializations {
-    fn start(&self, key: usize, work: impl FnOnce() + Send + 'static) {
-        self.start_with(key, || {
-            std::thread::Builder::new()
-                .name("exact specialization".into())
-                .spawn(work)
-        });
-    }
-
-    fn start_with(
-        &self,
-        key: usize,
-        spawn: impl FnOnce() -> std::io::Result<std::thread::JoinHandle<()>>,
-    ) {
-        let mut workers = self.0.lock().unwrap();
-        let attempt = &mut workers.attempts[key];
-        if attempt.running || attempt.tries == 3 || attempt.retry_frames != 0 {
-            return;
-        }
-        attempt.tries += 1;
-        match spawn() {
-            Ok(handle) => {
-                attempt.running = true;
-                workers.handles.push((key, handle));
-            }
-            Err(error) => {
-                attempt.running = false;
-                attempt.retry_frames = 60;
-                eprintln!("game specialization spawn failed: {error}");
-            }
-        }
-    }
-
-    fn reap(&self, wait: bool) {
-        let mut workers = self.0.lock().unwrap();
-        for attempt in &mut workers.attempts {
-            attempt.retry_frames = attempt.retry_frames.saturating_sub(1);
-        }
-        let mut i = 0;
-        while i < workers.handles.len() {
-            if wait || workers.handles[i].1.is_finished() {
-                let (key, worker) = workers.handles.swap_remove(i);
-                let attempt = &mut workers.attempts[key];
-                attempt.running = false;
-                if worker.join().is_err() {
-                    attempt.retry_frames = 60;
-                    eprintln!("game specialization worker panicked for key {key}");
-                }
-            } else {
-                i += 1;
-            }
-        }
-    }
-}
-#[cfg(not(target_arch = "wasm32"))]
-impl Drop for Specializations {
-    fn drop(&mut self) {
-        // No worker may execute artifact code after gpu_unload returns.
-        self.reap(true);
-    }
-}
-
-#[cfg(all(test, not(target_arch = "wasm32")))]
-mod worker_tests {
-    use super::*;
-
-    #[test]
-    fn spawn_failure_and_panic_clear_running_and_retry_with_a_bound() {
-        let workers = Specializations::default();
-        workers.start_with(17, || Err(std::io::Error::other("injected spawn failure")));
-        assert!(!workers.0.lock().unwrap().attempts[17].running);
-        workers.start_with(17, || panic!("retry must wait for later frames"));
-        for _ in 0..60 {
-            workers.reap(false);
-        }
-        workers.start(17, || panic!("injected worker panic"));
-        workers.reap(true);
-        assert!(!workers.0.lock().unwrap().attempts[17].running);
-        for _ in 0..60 {
-            workers.reap(false);
-        }
-        let result = std::sync::Arc::new(OnceLock::new());
-        let output = result.clone();
-        workers.start(17, move || {
-            output.set(42).unwrap();
-        });
-        workers.reap(true);
-        assert_eq!(result.get(), Some(&42));
-        assert!(workers.0.lock().unwrap().handles.is_empty());
-        workers.start_with(17, || panic!("three attempts exhaust the key's budget"));
-        // A different key still compiles after one key exhausts its budget.
-        workers.start(18, || {});
-        workers.reap(true);
-        assert_eq!(workers.0.lock().unwrap().attempts[18].tries, 1);
-    }
-
-    #[test]
-    fn frames_reap_completed_workers_without_waiting_for_live_ones() {
-        let workers = Specializations::default();
-        let (release, wait) = std::sync::mpsc::channel();
-        workers.start(1, move || {
-            wait.recv().unwrap();
-        });
-        workers.start_with(1, || panic!("only one worker per key"));
-        workers.reap(false);
-        assert_eq!(workers.0.lock().unwrap().handles.len(), 1);
-        workers.start(2, || {});
-        let end = std::time::Instant::now() + std::time::Duration::from_secs(10);
-        while !workers.0.lock().unwrap().handles[1].1.is_finished() {
-            assert!(std::time::Instant::now() < end);
-            std::thread::yield_now();
-        }
-        workers.reap(false);
-        assert_eq!(workers.0.lock().unwrap().handles.len(), 1);
-        assert!(!workers.0.lock().unwrap().attempts[2].running);
-        release.send(()).unwrap();
-        drop(workers);
-    }
-}
+use specializations::Specializations;

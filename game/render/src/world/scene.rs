@@ -482,6 +482,9 @@ impl Scene {
                 .try_resource::<exact_game::AmbientOcclusion>()
                 .as_deref()
                 .copied(),
+            saturation: w
+                .try_resource::<exact_game::Saturation>()
+                .map_or(1.0, |s| s.0.clamp(0.0, 1.0)),
             water: w.try_resource::<exact_game::Water>().as_deref().copied(),
             timestamps: None,
             attachments: &self.attachments.output,

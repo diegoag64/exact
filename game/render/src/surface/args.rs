@@ -75,6 +75,21 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         if let Some(e) = &self.error {
             return Err(e.clone());
         }
+        // A native headset app's arguments, as the game adjusts them there
+        // (`Game::xr_args`).
+        let adjusted;
+        let values = if exact_gpu::headset() {
+            match <G::Args as exact_game::Args>::decode(values) {
+                Ok(mut args) => {
+                    G::xr_args(&mut args);
+                    adjusted = exact_game::Args::values(&args);
+                    &adjusted[..]
+                }
+                Err(_) => values,
+            }
+        } else {
+            values
+        };
         let mut resample = false;
         if let Some(sim) = &mut self.sim {
             let generation = sim.generation();
@@ -126,7 +141,12 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             }
             self.assets_dirty |= models != sim.world().model_revision();
             // New scene samples (`Game::samples`) make the renderer again.
-            let samples = crate::quality::samples(self.rung, G::samples(sim.args()));
+            let rung = super::render::frame_rung(
+                self.rung,
+                self.xr_format.is_some(),
+                G::quality(sim.args()),
+            );
+            let samples = crate::quality::samples(rung, G::samples(sim.args()));
             resample = self.samples.is_some_and(|made| made != samples);
             if generation != sim.generation() {
                 self.hook_clock.reset();

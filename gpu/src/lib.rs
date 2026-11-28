@@ -72,6 +72,10 @@ pub use tier::{set_thread_tier, set_tier, tier, GpuTier};
 #[cfg(not(target_arch = "wasm32"))]
 mod storage;
 mod uniform;
+mod xr;
+pub use xr::{XrEye, XrScratch, XrStereo, XrView};
+pub mod xr_input;
+pub use xr_input::{XrHand, XrInput, XrPose, XR_INPUT_FLOATS};
 mod wake;
 pub use wake::SurfaceWaker;
 #[cfg(windows)]
@@ -333,6 +337,58 @@ pub trait Surface {
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
     ) -> bool;
+    /// An immersive session draws this surface in `format` (Some), or ended
+    /// (None): until it ends, a surface preparing for the page's format
+    /// (asset delivery) prepares for the session's instead.
+    fn immersive(&mut self, _format: Option<wgpu::TextureFormat>) {}
+    /// One immersive (WebXR) frame: advance once, then draw each of `views`
+    /// from its eye into its target (of `format`). Unlike [`Surface::render`]
+    /// the surface records and submits its own commands, one submission per
+    /// eye, so that each eye's `queue` writes land between them; the
+    /// session's textures are lent only until the host's callback returns.
+    /// Whether another frame is wanted; None (the default) when this surface
+    /// draws no immersive frames.
+    fn render_xr(
+        &mut self,
+        _frame: &Frame,
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _views: &[XrView],
+        _format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        None
+    }
+    /// One stereo frame (a native headset): advance once, then draw both
+    /// eyes of `stereo` into its two-layer array target (of `format`). The
+    /// surface records and submits its own commands, as in
+    /// [`Surface::render_xr`]. The default draws each eye on its own through
+    /// `render_xr`, into a view of its layer; a surface that draws both in one
+    /// multiview pass (`wgpu::Features::MULTIVIEW`) overrides it. None when
+    /// this surface draws no immersive frames.
+    fn render_xr_stereo(
+        &mut self,
+        frame: &Frame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stereo: &XrStereo,
+        format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        let views = stereo.eye_views(format);
+        self.render_xr(frame, device, queue, &views, format)
+    }
+    /// How the last stereo frame was drawn, for a host's log: `multiview` (both
+    /// eyes in one pass) or `per-eye`, then `direct` (tonemapped straight into
+    /// the target) or `hdr`, then the scene's samples (`multiview-direct-4x`).
+    /// The default draws each eye on its own.
+    fn xr_stereo_mode(&self) -> &'static str {
+        "per-eye"
+    }
+    /// Where an immersive frame's subject stands in the session's reference
+    /// space (metres): what a host's debug capture looks at when nobody wears
+    /// the headset (`docs/quest.md`). None when the surface does not say.
+    fn xr_focus(&self) -> Option<[f32; 3]> {
+        None
+    }
     /// Whether the last render completed the current picture, qualifying its
     /// `presented` record. Native presentation follows [`Surface::frame_presentable`].
     fn frame_ready(&self) -> bool {
@@ -1399,52 +1455,10 @@ impl Module {
         self.release(id);
         self.instances.remove(&id);
     }
-
-    /// A canvas's picture as pixels, rendered again into a module-owned
-    /// texture (LLP 1014: a canvas nested under a canvas painted through its
-    /// surface paints this into its ancestor's capture), and whether the
-    /// surface wants another frame. Nothing before the first bind.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn readback(&mut self, id: u32, frame: &Frame) -> Option<(fixture::Pixels, bool)> {
-        let (width, height) = frame.pixels();
-        let len = (width as usize)
-            .checked_mul(height as usize)?
-            .checked_mul(4)?;
-        let mut data = vec![0; len];
-        let wants = self.readback_into(id, frame, &mut data)?;
-        Some((
-            fixture::Pixels {
-                width,
-                height,
-                data,
-            },
-            wants,
-        ))
-    }
 }
 
-/// Run a future to completion on this thread. wgpu's adapter and device
-/// requests are futures that complete synchronously on native backends;
-/// this is the whole executor they need.
-pub fn block_on<F: std::future::Future>(f: F) -> F::Output {
-    use std::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
-    fn noop(_: *const ()) {}
-    fn clone(p: *const ()) -> RawWaker {
-        RawWaker::new(p, &VTABLE)
-    }
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, noop, noop, noop);
-    // SAFETY: the vtable's functions do nothing and the data pointer is null and never read.
-    let waker = unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) };
-    let mut cx = Context::from_waker(&waker);
-    let mut f = std::pin::pin!(f);
-    loop {
-        if let Poll::Ready(v) = f.as_mut().poll(&mut cx) {
-            return v;
-        }
-        std::thread::yield_now();
-    }
-}
-
+mod block_on;
+pub use block_on::block_on;
 mod pipeline_cache;
 pub use pipeline_cache::PipelineCache;
 mod device;
@@ -1455,10 +1469,14 @@ pub use device::{
 };
 
 pub mod android;
+mod headset;
+pub use headset::{debug_applied, debug_switch, headset, set_debug_switches, set_headset};
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fixture;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod native;
+#[cfg(any(target_os = "android", windows))]
+pub mod vulkan;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
 

@@ -403,7 +403,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         }
         if self.format != Some(format) || self.render.is_none() {
             self.render = Some((
-                crate::renderer::RendererWithAssets::<ASSETS>::configured(
+                crate::renderer::RendererWithAssets::<ASSETS>::with_sample_count(
                     device,
                     queue,
                     format,

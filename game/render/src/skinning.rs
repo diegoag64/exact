@@ -474,9 +474,8 @@ impl Skinning {
             let (prev, curr) = p
                 .as_ref()
                 .filter(|p| p.local.len() == len && p.previous.len() == len)
-                .map_or((&t.rest[..], &t.rest[..]), |p| {
-                    (&p.previous[..], &p.local[..])
-                });
+                // A tick the animation did not step on holds its pose (`Pose::shown`).
+                .map_or((&t.rest[..], &t.rest[..]), |p| p.shown(w.tick()));
             let has_pose = p
                 .as_ref()
                 .is_some_and(|p| p.local.len() == len && p.previous.len() == len);
@@ -638,6 +637,7 @@ impl Skinning {
         if self.active == 0 {
             return false;
         }
+        crate::counters::pass();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("game skin local interpolation"),
             timestamp_writes: timestamps.map(|query_set| wgpu::ComputePassTimestampWrites {
@@ -646,8 +646,10 @@ impl Skinning {
                 end_of_pass_write_index: Some(33),
             }),
         });
+        crate::counters::pipeline();
         pass.set_pipeline(self.pipeline.as_ref().unwrap());
         pass.set_bind_group(0, self.bind.as_ref().unwrap(), &[]);
+        crate::counters::commands(1);
         pass.dispatch_workgroups(self.active, 1, 1);
         true
     }

@@ -145,7 +145,8 @@ fn memory_hints() -> wgpu::MemoryHints {
 /// forced early depth tests (a game's forward shaders, where nothing discards),
 /// half-precision shader arithmetic (a game's colour math, which a mobile GPU
 /// runs at twice the rate in half the registers) and a first instance in
-/// indirect draws (a game's culled draws then share one scene binding).
+/// indirect draws (a game's culled draws then share one scene binding), and
+/// unclipped depth (a headset frame's water plane, drawn past the far plane).
 /// @ref llp/1046.003-game-engine-as-built.explainer.md#compressed-textures-2026-09-23
 pub fn requested_features() -> wgpu::Features {
     wgpu::Features::TIMESTAMP_QUERY
@@ -157,6 +158,7 @@ pub fn requested_features() -> wgpu::Features {
         | wgpu::Features::PIPELINE_CACHE
         | wgpu::Features::SHADER_F16
         | wgpu::Features::INDIRECT_FIRST_INSTANCE
+        | wgpu::Features::DEPTH_CLIP_CONTROL
 }
 
 /// Request each optional capacity independently; a low inter-stage limit must

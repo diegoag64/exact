@@ -7,3 +7,6 @@
 
 # The verifier is called through JNI.
 -keep,includedescriptorclasses class org.rustls.platformverifier.** { *; }
+
+# A headset app's OpenXR artifact reads the activity by name over JNI (Immersive.kt, gpu/openxr/src/java.rs).
+-keep class dev.exact.canvas.Immersive { public static ** activity; }

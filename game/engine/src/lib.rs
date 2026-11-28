@@ -42,6 +42,8 @@ mod storage;
 mod tween;
 mod values;
 mod world;
+mod xr;
+pub use xr::XrStage;
 
 pub use animation::{Animation, Animator, Blend, Cmp, Condition, Ik, Play, SocketFollow, State};
 pub use args::{Args, ArgumentKind};
@@ -51,7 +53,7 @@ pub use data::{bin, hash, json, Data, DataError, Number, Reader, Writer};
 pub use emitter::Emitter;
 pub use environment::{
     AmbientOcclusion, AoQuality, Bloom, Caustics, Environment, EnvironmentMap, Fog, Quality,
-    SceneSamples, ShadowBox, ShadowFilter, Shadows, Shafts, ToneMapping, Water, Waves,
+    Saturation, SceneSamples, ShadowBox, ShadowFilter, Shadows, Shafts, ToneMapping, Water, Waves,
     AUTO_RENDER_SCALE,
 };
 pub use exact_game_derive::{Args, Component, Data, Event, Presentation, Resource};
@@ -61,7 +63,8 @@ pub use glam::{Affine3A, Mat4, Quat, Vec2, Vec3, Vec3Swizzles, Vec4};
 pub use input::{
     tilt_stick, Actions, Binding, Bindings, Curve, Input, InputContexts, InputEvent, InputState,
     Pad, PadState, PointerContact, PointerEdge, PointerPhase, PointerState, Region, SensorKind,
-    SensorSample, SensorState, Stick, Tilt, MAX_PADS, MOUSE_BUTTONS, PAD_BUTTONS,
+    SensorSample, SensorState, Stick, Tilt, XrButton, XrController, XrHand, XrInput, XrPose,
+    MAX_PADS, MOUSE_BUTTONS, PAD_BUTTONS,
 };
 pub use particle_look::ParticleLook;
 pub use placed::{CanvasChild, Facing, Placed, PlacedPlane};

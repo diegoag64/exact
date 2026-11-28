@@ -4,6 +4,7 @@ mod look;
 pub(crate) mod performance;
 mod render;
 mod textures;
+mod xr;
 
 use crate::{
     perf::{Perf, Stamp},
@@ -68,6 +69,10 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     hooks: H,
     hook_clock: crate::hooks::HookClock,
     hook_poses: crate::hooks::Poses,
+    /// The game's stage at the last two ticks seen (the tick, the one
+    /// before, and that tick's): a headset frame draws between them as the
+    /// world's transforms are drawn, so a stage the hands move is smooth.
+    xr_stages: Option<(u64, exact_game::XrStage, exact_game::XrStage)>,
     gpu_timing: Option<crate::hooks::gpu_timing::GpuTiming>,
     /// What the last `render` encoded, for timing once the module submits it.
     encoded: Option<u64>,
@@ -108,7 +113,7 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     /// The tick the world was first seen idle at, while it stays idle.
     idle_tick: Option<u64>,
     /// The scene samples the renderer was made with (`Game::samples`).
-    samples: Option<exact_game::SceneSamples>,
+    samples: Option<u32>,
     /// This frame's timing facts (`Surface::timing`), for the hooks' `FrameView.time`.
     timing: exact_gpu::FrameTiming,
     scheduled_cap: std::cell::Cell<u32>,
@@ -119,8 +124,22 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     /// Texture uploads off the presenting thread, under the live clock.
     #[cfg(not(target_arch = "wasm32"))]
     uploads: Option<crate::models::Uploads>,
+    /// The format an immersive session draws in, while one does (`xr`).
+    xr_format: Option<wgpu::TextureFormat>,
+    /// A session that drew in another format ended: the next renderer made
+    /// for a new format delivers its textures again.
+    xr_left: bool,
+    /// How the last stereo frame drew (`Surface::xr_stereo_mode`).
+    xr_mode: &'static str,
+    /// Stereo frames drawn, for the one-time state line (`xr_state_line`).
+    xr_frames: u64,
 }
 impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, P, ASSETS, H> {
+    /// The renderer's counts for the last frame drawn (draws, instances,
+    /// cumulative direct and stereo frames).
+    pub fn frame_stats(&self) -> crate::Stats {
+        self.perf.stats
+    }
     /// Bake-owned development capability; production modules refuse live edits.
     #[doc(hidden)]
     pub fn development_edits(mut self, allowed: bool) -> Self {
@@ -476,6 +495,12 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
     ) {
         // A host prepares before it renders: the renderer this makes is timed
         // under the host's clock, and its time counts in the next drawn frame.
+        // In an immersive session the renderer is the session's format's.
+        let format = self.xr_format.unwrap_or(format);
+        // Back from a session in another format: its renderer is made again.
+        if std::mem::take(&mut self.xr_left) && self.format.is_some_and(|f| f != format) {
+            self.redeliver_textures();
+        }
         if self.perf.rendering {
             return self.prepare_now(device, queue, format);
         }
@@ -576,7 +601,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         let timing = crate::perf::PipelineTiming::start(self.perf.measure_frame);
         self.perf.live = !frame.seekable;
         self.perf.rendering = true;
-        let wants = self.render_frame(frame, device, queue, encoder, target, format);
+        let wants = self.render_frame(frame, device, queue, encoder, target, format, None);
         // Natively the module draws an incomplete frame again (gpu/src/frame.rs);
         // the web's host draws only what the surface asks for.
         self.still = !wants && (cfg!(target_arch = "wasm32") || self.frame_ready);
@@ -591,7 +616,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         self.perf.rendering = false;
         if self.encoded.is_some() && self.perf.reporting.is_some() {
             let scale = self.raster_scale();
-            let samples = self.samples.map_or(1, exact_game::SceneSamples::count);
+            let samples = self.samples.unwrap_or(1);
             let cap = self.frame_cap();
             if let Some(report) = &mut self.perf.reporting {
                 report.encoded(frame, &self.timing, scale, samples, self.perf.stats, cap);
@@ -600,6 +625,116 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         drop(timing);
         self.perf.keep_pipeline_time(frame.seekable);
         wants
+    }
+    fn render_xr(
+        &mut self,
+        frame: &Frame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        views: &[exact_gpu::XrView],
+        format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        let first = &views.first()?.target;
+        // A host that draws only immersive frames need not announce them.
+        if self.xr_format.is_none() {
+            self.immersive_format(Some(format));
+        }
+        self.perf.measure_frame = false;
+        self.perf.live = !frame.seekable;
+        self.perf.rendering = true;
+        // Each eye records and submits its own commands (`xr::encode_eyes`).
+        let mut unused = device.create_command_encoder(&Default::default());
+        let wants = self.render_frame(
+            frame,
+            device,
+            queue,
+            &mut unused,
+            first,
+            format,
+            Some(xr::Immersive::Eyes(views)),
+        );
+        self.still = !wants;
+        self.perf.rendering = false;
+        Some(wants)
+    }
+    fn render_xr_stereo(
+        &mut self,
+        frame: &Frame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        stereo: &exact_gpu::XrStereo,
+        format: wgpu::TextureFormat,
+    ) -> Option<bool> {
+        if self.xr_format.is_none() {
+            self.immersive_format(Some(format));
+        }
+        let target = stereo.array_view(format);
+        self.perf.measure_frame = false;
+        self.perf.live = !frame.seekable;
+        self.perf.rendering = true;
+        // Both eyes in one multiview pass where the device has it, else each
+        // on its own (`xr::encode_stereo`); either submits its own commands.
+        let mut unused = device.create_command_encoder(&Default::default());
+        let before = (self.perf.stats.stereo_frames, self.perf.stats.direct_frames);
+        let wants = self.render_frame(
+            frame,
+            device,
+            queue,
+            &mut unused,
+            &target,
+            format,
+            Some(xr::Immersive::Stereo(stereo)),
+        );
+        let after = &self.perf.stats;
+        self.xr_mode = xr::stereo_mode(
+            after.stereo_frames > before.0,
+            after.direct_frames > before.1,
+            after.samples,
+        );
+        self.still = !wants;
+        self.perf.rendering = false;
+        self.xr_frames += 1;
+        // A second before the state line, read back what the GPU cull keeps.
+        if self.xr_frames + 72 <= xr::XR_STATE_FRAME && self.xr_frames < xr::XR_STATE_FRAME {
+            if let Some((renderer, _)) = &mut self.render {
+                if self.xr_frames + 72 == xr::XR_STATE_FRAME {
+                    renderer.count_culled(true);
+                }
+                // Finish a read the last frame started.
+                let _ = renderer.culled();
+            }
+        }
+        // Once, three seconds in (assets delivered, the world running): what
+        // the headset's world holds, so a state problem shows in the log
+        // without a picture.
+        if self.xr_frames == xr::XR_STATE_FRAME {
+            eprintln!("{}", self.xr_state_line());
+            #[cfg(not(target_arch = "wasm32"))]
+            if let Some((renderer, _)) = &self.render {
+                eprintln!(
+                    "xr cull: {}",
+                    renderer.cull.debug_read(
+                        &renderer.device,
+                        &renderer.queue,
+                        &renderer.slot_list
+                    )
+                );
+            }
+            if let Some((renderer, _)) = &mut self.render {
+                renderer.count_culled(false);
+            }
+        }
+        Some(wants)
+    }
+    fn xr_stereo_mode(&self) -> &'static str {
+        self.xr_mode
+    }
+    fn xr_focus(&self) -> Option<[f32; 3]> {
+        let sim = self.sim.as_ref()?;
+        Some(G::xr_stage(sim.world(), sim.args()).position.to_array())
+    }
+    fn immersive(&mut self, format: Option<wgpu::TextureFormat>) {
+        self.immersive_format(format);
     }
     fn frame_ready(&self) -> bool {
         self.frame_ready
@@ -863,7 +998,12 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
                 ",\"device\":false"
             });
             let scale = G::render_scale(sim.args());
-            crate::quality::row(self.rung, G::samples(sim.args()), scale, &mut reply);
+            let rung = self::render::frame_rung(
+                self.rung,
+                self.xr_format.is_some(),
+                G::quality(sim.args()),
+            );
+            crate::quality::row(rung, G::samples(sim.args()), scale, &mut reply);
             self.perf.append(&mut reply);
             reply.pop();
             reply.push_str(",\"tickSpans\":");
@@ -1012,488 +1152,5 @@ mod budget_tests {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-mod residency_tests {
-    use super::*;
-    struct Fox;
-    impl Game for Fox {
-        type Args = ();
-        const ID: &'static str = "residency-fox";
-        const ASSETS: &'static [&'static str] = &["fox.model"];
-        fn setup(w: &mut World, _: &()) {
-            w.spawn((
-                exact_game::Transform::default(),
-                exact_game::Mesh::asset("fox.model"),
-            ));
-        }
-        fn tick(_: &mut World, _: &exact_game::Input, _: &()) {}
-    }
-
-    struct Cosmetic;
-    impl Game for Cosmetic {
-        type Args = ();
-        const ID: &'static str = "residency-cosmetic";
-        fn setup(w: &mut World, _: &()) {
-            w.spawn_named(
-                "hero",
-                (
-                    exact_game::Transform::default(),
-                    exact_game::Mesh::asset("hero.model"),
-                ),
-            );
-            w.spawn((
-                exact_game::Transform::at(2.8, 2., 3.8)
-                    .looking_at(exact_game::Vec3::ZERO, exact_game::Vec3::Y),
-                exact_game::Camera::default(),
-            ));
-        }
-        fn tick(_: &mut World, _: &exact_game::Input, _: &()) {}
-    }
-    fn frame() -> Frame {
-        Frame {
-            width: 32.,
-            height: 32.,
-            scale: 1.,
-            now_ms: 0.,
-            seekable: true,
-            period_ms: 0.,
-            children_generation: 0,
-            shader_generation: 0,
-            headroom: 1.0,
-        }
-    }
-    fn model() -> exact_game::asset::Model {
-        exact_game::bin::from_slice(include_bytes!("../../bake/tests/fixtures/crate.model"))
-            .unwrap()
-    }
-    #[test]
-    #[ignore = "requires two real GPU devices; run explicitly on a GPU host"]
-    fn surface_lifecycle_rebuilds_textured_draws_after_prepared_retry_loss() {
-        let Some(gpu) = crate::test_device::device_or_skip(exact_gpu::fixture::device()) else {
-            return;
-        };
-        let mut s = WorldSurface::<Cosmetic, crate::ModelExecutor, true>::default();
-        s.device_ready(wgpu::Features::empty(), wgpu::Limits::downlevel_defaults());
-        s.bind(&[], None).unwrap();
-        let model = model();
-        let bytes = exact_game::asset::encode_model(&model);
-        let tex = include_bytes!("../../bake/tests/fixtures/crate/0-srgb-straight.tex");
-        s.assets();
-        s.asset("hero.model", Ok(&bytes));
-        s.asset(&model.textures[0], Ok(tex));
-        let (before, _) = exact_gpu::fixture::render(&gpu, &mut s, &frame()).unwrap();
-        let work = s.render.as_ref().unwrap().0.residency_work().json();
-        assert!(!s.render.as_ref().unwrap().0.models.records.is_empty());
-        s.device_lost();
-        // Failed adapter retries can finish redelivery before device_ready.
-        s.device_lost();
-        s.assets();
-        s.asset(&model.textures[0], Ok(tex));
-        s.device_lost(); // another failed retry must preserve delivered bytes too
-        let Some(replacement) = crate::test_device::device_or_skip(exact_gpu::fixture::device())
-        else {
-            return;
-        };
-        s.device_ready(wgpu::Features::empty(), wgpu::Limits::downlevel_defaults());
-        s.prepare_assets(
-            &replacement.device,
-            &replacement.queue,
-            wgpu::TextureFormat::Rgba8Unorm,
-        );
-        s.device_lost(); // A failed retry consumed CPU texture bytes into its renderer.
-        let changes = s.assets();
-        assert!(changes.retired.contains(&model.textures[0]));
-        assert!(changes.requests.contains(&model.textures[0]));
-        s.asset(&model.textures[0], Ok(tex));
-        s.device_ready(wgpu::Features::empty(), wgpu::Limits::downlevel_defaults());
-        s.prepare_assets(
-            &replacement.device,
-            &replacement.queue,
-            wgpu::TextureFormat::Rgba8Unorm,
-        );
-        let (after, _) = exact_gpu::fixture::render(&replacement, &mut s, &frame()).unwrap();
-        assert!(
-            before == after,
-            "replacement device must draw the same model pixels"
-        );
-        assert_eq!(work, s.render.as_ref().unwrap().0.residency_work().json());
-    }
-
-    #[test]
-    #[ignore = "requires a real GPU device; run cargo test -p exact-game-render retired_model_stays_hidden -- --ignored"]
-    fn retired_model_stays_hidden_until_changed_dependency_closure_is_prepared() {
-        let Some(gpu) = crate::test_device::device_or_skip(exact_gpu::fixture::device()) else {
-            return;
-        };
-        let mut s = WorldSurface::<Cosmetic, crate::ModelExecutor, true>::default();
-        s.device_ready(wgpu::Features::empty(), wgpu::Limits::downlevel_defaults());
-        s.bind(&[], None).unwrap();
-        let mut model = model();
-        let texture = include_bytes!("../../bake/tests/fixtures/crate/0-srgb-straight.tex");
-        s.assets();
-        s.asset("hero.model", Ok(&exact_game::asset::encode_model(&model)));
-        s.asset(&model.textures[0], Ok(texture));
-        let (before, _) = exact_gpu::fixture::render(&gpu, &mut s, &frame()).unwrap();
-        assert!(!s.render.as_ref().unwrap().0.models.records.is_empty());
-        // A model the renderer draws is held (`Sim::hold_assets`): it retires
-        // once a frame draws something else in its place.
-        *s.sim
-            .as_ref()
-            .unwrap()
-            .world()
-            .get_mut::<exact_game::Mesh>("hero")
-            .unwrap() = exact_game::Mesh::cube(1.);
-        s.dirty = true; // the write bypassed a tick, which would feed it
-        exact_gpu::fixture::render(&gpu, &mut s, &frame()).unwrap();
-        s.assets();
-        *s.sim
-            .as_ref()
-            .unwrap()
-            .world()
-            .get_mut::<exact_game::Mesh>("hero")
-            .unwrap() = exact_game::Mesh::asset("hero.model");
-        s.assets();
-        exact_gpu::fixture::render(&gpu, &mut s, &frame()).unwrap();
-        assert!(
-            s.render.as_ref().unwrap().0.models.records.is_empty(),
-            "retired geometry leaked before redelivery"
-        );
-        model.materials[0].base_color = [1., 0., 0., 1.];
-        s.asset("hero.model", Ok(&exact_game::asset::encode_model(&model)));
-        exact_gpu::fixture::render(&gpu, &mut s, &frame()).unwrap();
-        assert!(
-            s.render.as_ref().unwrap().0.models.records.is_empty(),
-            "model leaked before its texture arrived"
-        );
-        s.asset(&model.textures[0], Ok(texture));
-        let (after, _) = exact_gpu::fixture::render(&gpu, &mut s, &frame()).unwrap();
-        assert!(
-            before != after,
-            "first drawable frame must use changed material bytes"
-        );
-        assert_eq!(
-            s.render.as_ref().unwrap().0.models.materials.len(),
-            model.materials.len(),
-            "replacement reclaims old materials"
-        );
-    }
-
-    #[test]
-    fn identical_redelivery_survives_entry_and_post_acceptance_budget_compaction() {
-        let Some(gpu) = crate::test_device::device_or_skip(exact_gpu::fixture::device()) else {
-            return;
-        };
-        let mut s = WorldSurface::<Cosmetic, crate::ModelExecutor, true>::default();
-        s.device_ready(wgpu::Features::empty(), wgpu::Limits::downlevel_defaults());
-        s.bind(&[], None).unwrap();
-        let mut model = model();
-        // Character-sized resident, already retired when the oversized cache enters preparation.
-        model.meshes[0].positions.resize(80_000 * 3, 0.);
-        model.meshes[0].normals.resize(80_000 * 3, 0.);
-        model.meshes[0].uvs.resize(80_000 * 2, 0.);
-        let bytes = exact_game::asset::encode_model(&model);
-        let tex = include_bytes!("../../bake/tests/fixtures/crate/0-srgb-straight.tex");
-        s.assets();
-        s.asset("hero.model", Ok(&bytes));
-        s.asset(&model.textures[0], Ok(tex));
-        let (before, _) = exact_gpu::fixture::render(&gpu, &mut s, &frame()).unwrap();
-        let handles = s.render.as_ref().unwrap().0.models.loaded["hero.model"]
-            .nodes
-            .clone();
-        // A model the renderer draws is held (`Sim::hold_assets`): it retires
-        // once a frame draws something else in its place.
-        for (mesh, draw) in [
-            (exact_game::Mesh::cube(1.), true),
-            (exact_game::Mesh::asset("hero.model"), false),
-        ] {
-            *s.sim
-                .as_ref()
-                .unwrap()
-                .world()
-                .get_mut::<exact_game::Mesh>("hero")
-                .unwrap() = mesh;
-            if draw {
-                s.dirty = true; // the write bypassed a tick, which would feed it
-                exact_gpu::fixture::render(&gpu, &mut s, &frame()).unwrap();
-            }
-            s.assets();
-        }
-        let retired = exact_game::asset::TextureData {
-            width: 1024,
-            height: 1024,
-            mips: (0..11)
-                .map(|level| vec![255; (1024usize >> level).pow(2) * 4])
-                .collect(),
-            ..Default::default()
-        };
-        let r = &mut s.render.as_mut().unwrap().0;
-        for i in 0..13 {
-            let name = format!("retired-{i}.tex");
-            r.add_texture(&name, &retired).unwrap();
-            r.retire_texture(&name);
-        }
-        let work = r.residency_work();
-        // The new peer grows the mesh arena during this preparation pass. Its
-        // unused capacity plus retired textures crosses the real 64 MiB budget.
-        let mut peer = model.clone();
-        let m = &mut peer.meshes[0];
-        m.positions.resize(600_000 * 3, 0.);
-        m.normals.resize(600_000 * 3, 0.);
-        m.uvs.resize(600_000 * 2, 0.);
-        s.sim.as_mut().unwrap().world_mut().spawn((
-            exact_game::Transform::at(100., 0., 0.),
-            exact_game::Mesh::asset("peer.model"),
-        ));
-        s.assets();
-        s.asset("hero.model", Ok(&bytes));
-        s.asset("peer.model", Ok(&exact_game::asset::encode_model(&peer)));
-        let live = s
-            .sim
-            .as_ref()
-            .unwrap()
-            .presentation_assets()
-            .map(str::to_owned)
-            .collect();
-        assert!(s.render.as_ref().unwrap().0.retired_bytes(&live) > RETIRED_BUDGET);
-        s.prepare_assets(&gpu.device, &gpu.queue, wgpu::TextureFormat::Rgba8Unorm);
-        assert!(!s.sim.as_ref().unwrap().model_prepared("hero.model"));
-        let r = &s.render.as_ref().unwrap().0;
-        assert!(
-            r.retired_bytes(&live) <= RETIRED_BUDGET,
-            "post-preparation compaction ran"
-        );
-        assert!(
-            r.models.loaded.contains_key("hero.model"),
-            "accepted identical model was discarded"
-        );
-        assert_eq!(r.models.loaded["hero.model"].nodes, handles);
-        assert_eq!(r.residency_work().since(work).texture_uploads, 0);
-        assert_eq!(
-            r.residency_work().since(work).mesh_uploads,
-            peer.meshes.len() as u64
-        );
-        s.asset(&model.textures[0], Ok(tex));
-        let (after, _) = exact_gpu::fixture::render(&gpu, &mut s, &frame()).unwrap();
-        assert_eq!(
-            before, after,
-            "same hero is drawable without duplicate upload"
-        );
-        assert_eq!(
-            s.render
-                .as_ref()
-                .unwrap()
-                .0
-                .residency_work()
-                .since(work)
-                .mesh_uploads,
-            peer.meshes.len() as u64,
-            "closing the pending texture dependency must not upload the hero again"
-        );
-    }
-
-    #[test]
-    fn twenty_unique_models_bound_retirement_and_hash_only_at_delivery() {
-        let Some(gpu) = crate::test_device::device_or_skip(exact_gpu::fixture::device()) else {
-            return;
-        };
-        let mut s = WorldSurface::<Cosmetic, crate::ModelExecutor, true>::default();
-        s.device_ready(wgpu::Features::empty(), wgpu::Limits::downlevel_defaults());
-        s.bind(&[], None).unwrap();
-        let mut model = model();
-        let texture = exact_game::asset::TextureData {
-            width: 1024,
-            height: 1024,
-            mips: (0..11)
-                .map(|level| vec![255; (1024usize >> level).max(1).pow(2) * 4])
-                .collect(),
-            ..Default::default()
-        };
-        let bytes = exact_game::bin::to_vec(&texture);
-        let hashes_before = crate::models::model_hash_count();
-        for i in 0..20 {
-            let name = format!("unique-{i}.model");
-            model.textures[0] = format!("unique-{i}.tex");
-            *s.sim
-                .as_ref()
-                .unwrap()
-                .world()
-                .get_mut::<exact_game::Mesh>("hero")
-                .unwrap() = exact_game::Mesh::asset(&name);
-            s.assets();
-            s.asset(&name, Ok(&exact_game::asset::encode_model(&model)));
-            s.asset(&model.textures[0], Ok(&bytes));
-            s.prepare_assets(&gpu.device, &gpu.queue, wgpu::TextureFormat::Rgba8Unorm);
-            let live = s
-                .sim
-                .as_ref()
-                .unwrap()
-                .presentation_assets()
-                .map(str::to_owned)
-                .collect();
-            assert!(s.render.as_ref().unwrap().0.retired_bytes(&live) <= RETIRED_BUDGET);
-            assert_eq!(crate::models::model_hash_count(), hashes_before + i + 1);
-            // Dirty texture redelivery must never hash any resident model again.
-            s.asset(&model.textures[0], Ok(&bytes));
-            s.prepare_assets(&gpu.device, &gpu.queue, wgpu::TextureFormat::Rgba8Unorm);
-            assert_eq!(crate::models::model_hash_count(), hashes_before + i + 1);
-        }
-        assert!(s.render.as_ref().unwrap().0.models.loaded.len() < 20);
-        let json = s.agent(r#"{"op":"state"}"#).unwrap();
-        assert!(json.contains(r#""modelSkinBufferReallocations":"#));
-        assert!(!json.contains(r#""bufferReallocations":"#));
-    }
-    #[test]
-    fn ready_reasons_name_declaration_and_render_failures() {
-        let mut s = WorldSurface::<Fox, crate::ModelExecutor, true>::default();
-        s.device_ready(wgpu::Features::empty(), wgpu::Limits::downlevel_defaults());
-        s.bind(&[], None).unwrap();
-        s.asset("fox.model", Err(AssetError::Missing));
-        let state = s.agent(r#"{"op":"state"}"#).unwrap();
-        assert!(
-            state
-                .split("\"readyReasons\":")
-                .nth(1)
-                .unwrap()
-                .split(']')
-                .next()
-                .unwrap()
-                .contains("fox.model"),
-            "{state}"
-        );
-        s.error = Some(SurfaceError("named render failure".into()));
-        let state = s.agent(r#"{"op":"state"}"#).unwrap();
-        assert!(
-            state
-                .split("\"readyReasons\":")
-                .nth(1)
-                .unwrap()
-                .split(']')
-                .next()
-                .unwrap()
-                .contains("named render failure"),
-            "{state}"
-        );
-        assert!(state.contains("\"ready\":false"));
-    }
-    #[test]
-    fn fox_restore_and_paranoid_save_keep_assets_pipelines_and_palette_capacity() {
-        let Some(gpu) = crate::test_device::device_or_skip(exact_gpu::fixture::device()) else {
-            return;
-        };
-        let mut surface = WorldSurface::<Fox, crate::ModelExecutor, true>::default();
-        surface.device_ready(wgpu::Features::empty(), wgpu::Limits::downlevel_defaults());
-        surface.bind(&[], None).unwrap();
-        surface.asset(
-            "fox.model",
-            Ok(&exact_game::asset::encode_model(
-                &crate::test_model::skinned_model(),
-            )),
-        );
-        surface.asset(
-            "fox/0-srgb-straight.tex",
-            Ok(include_bytes!(
-                "../../bake/tests/fixtures/crate/0-srgb-straight.tex"
-            )),
-        );
-        let mut frame = Frame {
-            width: 16.,
-            height: 16.,
-            scale: 1.,
-            now_ms: 0.,
-            seekable: true,
-            period_ms: 0.,
-            children_generation: 0,
-            shader_generation: 0,
-            headroom: 1.0,
-        };
-        exact_gpu::fixture::render(&gpu, &mut surface, &frame).unwrap();
-        surface
-            .render
-            .as_ref()
-            .unwrap()
-            .0
-            .pipelines
-            .wait_specializations();
-        let ready_work = surface.render.as_ref().unwrap().0.residency_work();
-        let before = surface.render.as_ref().unwrap().0.residency_work().json();
-        let saved = surface.carry().unwrap().unwrap();
-        for mode in [Restore::Open, Restore::Carry] {
-            surface.restore(&saved, mode).unwrap();
-            exact_gpu::fixture::render(&gpu, &mut surface, &frame).unwrap();
-            assert_eq!(
-                before,
-                surface.render.as_ref().unwrap().0.residency_work().json()
-            );
-            assert_eq!(surface.carry().unwrap().unwrap(), saved);
-        }
-        let mut texture: exact_game::asset::TextureData = exact_game::bin::from_slice(
-            include_bytes!("../../bake/tests/fixtures/crate/0-srgb-straight.tex"),
-        )
-        .unwrap();
-        texture.mips[0][0] ^= 127;
-        let changed = exact_game::bin::to_vec(&texture);
-        surface.asset("fox/0-srgb-straight.tex", Ok(&changed));
-        surface.restore(&saved, Restore::Carry).unwrap();
-        exact_gpu::fixture::render(&gpu, &mut surface, &frame).unwrap();
-        let work = surface.render.as_ref().unwrap().0.residency_work();
-        let delta = work.since(ready_work);
-        assert_eq!(delta.texture_uploads, 1);
-        assert_eq!(delta.mesh_uploads, 0);
-        assert_eq!(delta.pipeline_creations, 0);
-        assert_eq!(delta.buffer_reallocations, 0);
-        surface.asset("fox/0-srgb-straight.tex", Ok(&changed));
-        exact_gpu::fixture::render(&gpu, &mut surface, &frame).unwrap();
-        assert_eq!(
-            work.json(),
-            surface.render.as_ref().unwrap().0.residency_work().json()
-        );
-        let before = work.json();
-        surface.sim = surface
-            .sim
-            .take()
-            .map(|s| s.paranoid(exact_game::Paranoid::Save));
-        for tick in 1..=4 {
-            frame.now_ms = tick as f64 * 1000. / 60.;
-            exact_gpu::fixture::render(&gpu, &mut surface, &frame).unwrap();
-            assert_eq!(
-                before,
-                surface.render.as_ref().unwrap().0.residency_work().json()
-            );
-        }
-        assert!(surface.render.as_ref().unwrap().0.models.skinning.is_some());
-        let mut model = surface
-            .sim
-            .as_ref()
-            .unwrap()
-            .presentation_models()
-            .next()
-            .unwrap()
-            .1
-            .clone();
-        let old = &surface.render.as_ref().unwrap().0;
-        let sizes = (old.meshes.len(), old.models.materials.len());
-        let skins: Vec<_> = old.models.loaded["fox.model"]
-            .nodes
-            .iter()
-            .map(|n| n.3)
-            .collect();
-        for _ in 0..3 {
-            model.meshes[0].positions[0] += 0.01;
-            surface.asset("fox.model", Ok(&exact_game::asset::encode_model(&model)));
-            exact_gpu::fixture::render(&gpu, &mut surface, &frame).unwrap();
-            let renderer = &surface.render.as_ref().unwrap().0;
-            assert_eq!(
-                (renderer.meshes.len(), renderer.models.materials.len()),
-                sizes
-            );
-            assert_eq!(
-                renderer.models.loaded["fox.model"]
-                    .nodes
-                    .iter()
-                    .map(|n| n.3)
-                    .collect::<Vec<_>>(),
-                skins,
-                "same-name replacement reclaims skin templates too"
-            );
-        }
-    }
-}
+#[path = "surface_tests/residency.rs"]
+mod residency_tests;

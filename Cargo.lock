@@ -287,7 +287,7 @@ version = "0.38.0+1.3.281"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -1553,7 +1553,7 @@ version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ab8ecd87370524b461f8557c119c405552c396ed91fc0a8eec68679eab26f94a"
 dependencies = [
- "libloading",
+ "libloading 0.8.9",
 ]
 
 [[package]]
@@ -2011,6 +2011,7 @@ dependencies = [
 name = "exact-gpu"
 version = "0.4.0"
 dependencies = [
+ "ash",
  "exact-color",
  "exact-gpu-reflect",
  "exact-plan",
@@ -2277,7 +2278,7 @@ dependencies = [
  "exact-logic-abi",
  "exact-plan",
  "exact-runner",
- "libloading",
+ "libloading 0.8.9",
  "serde_json",
  "sha2 0.10.9",
  "wasmi",
@@ -2332,6 +2333,14 @@ name = "exact-num"
 version = "0.1.0"
 
 [[package]]
+name = "exact-openxr"
+version = "0.1.0"
+dependencies = [
+ "jni-sys 0.3.1",
+ "openxr",
+]
+
+[[package]]
 name = "exact-painted"
 version = "0.1.0"
 dependencies = [
@@ -2374,7 +2383,7 @@ dependencies = [
  "jni-sys 0.3.1",
  "jpeg-encoder",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "material-colors",
  "memmap2",
  "messages-stress-data",
@@ -3811,6 +3820,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "libloading"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1832accd5a4ca2795ace4d05d15c4039be15b62d3b950eff99746a990e3cc10"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
+
+[[package]]
 name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5048,6 +5067,26 @@ name = "openssl-probe"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c87def4c32ab89d880effc9e097653c8da5d6ef28e6b539d313baaacfbafcbe"
+
+[[package]]
+name = "openxr"
+version = "0.22.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53770c8f7d3f185bcb577b78f2ed8e33bbf7cdf5cd57fb68b5ec0b4117b79de6"
+dependencies = [
+ "libc",
+ "libloading 0.9.1",
+ "openxr-sys",
+]
+
+[[package]]
+name = "openxr-sys"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "febb5d50cee7b964b69d5b7a810ed9620fc64f41382ffefe05434754c7a48877"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "orbclient"
@@ -8115,7 +8154,7 @@ dependencies = [
  "cfg_aliases",
  "hashbrown 0.16.1",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "log",
  "naga 29.0.4",
  "objc2 0.6.4",
@@ -8153,7 +8192,7 @@ dependencies = [
  "gpu-allocator",
  "hashbrown 0.17.1",
  "libc",
- "libloading",
+ "libloading 0.8.9",
  "log",
  "naga 30.0.1",
  "naga-types",

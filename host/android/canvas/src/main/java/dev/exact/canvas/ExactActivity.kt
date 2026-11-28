@@ -147,6 +147,8 @@ open class ExactActivity : Activity() {
     }
 
     override fun onCreate(state: Bundle?) {
+        // The activity a headset session runs in, read as the GPU module makes its device ([Immersive]).
+        Immersive.activity = this
         // An activity made again in a process whose host runs (LLP 1115.001 D15.1: a configuration change this
         // activity does not declare, or one the system destroyed in the background) starts no second host: its view
         // adopts the one that runs ([Owner.boot], [Native.start]). The environment below is read once, as the library
@@ -952,6 +954,7 @@ open class ExactActivity : Activity() {
     }
 
     override fun onDestroy() {
+        if (Immersive.activity === this) Immersive.activity = null
         picture.destroy()
         folds.stop()
         accessibility.removeAccessibilityStateChangeListener(accessWatch)
@@ -962,6 +965,10 @@ open class ExactActivity : Activity() {
         // A recreated activity can finish before mounting its first module view.
         if (moduleOwners == null && !isChangingConfigurations) retainedModules?.let { ModuleOwners.clear(it) }
         super.onDestroy()
+        // A headset app (docs/quest.md) quit from the headset: its OpenXR instance and session belong to the process,
+        // and the module makes them once, so a relaunch in the same process would find no session and hang on the
+        // runtime's loading screen. End the process with the activity, as native Quest apps do.
+        if (isFinishing && Immersive.headset(this)) android.os.Process.killProcess(android.os.Process.myPid())
     }
 
     /** This activity's view reads the host from now on. One that read it before and is not destroyed yet (it

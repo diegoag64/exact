@@ -128,6 +128,10 @@ pub fn load(
 fn create_gpu(
     requirements: &[crate::grants::Requirements],
 ) -> Result<crate::Gpu, crate::DeviceFailure> {
+    #[cfg(any(target_os = "android", windows))]
+    if let Some(made) = crate::vulkan::headset_gpu(requirements) {
+        return made;
+    }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
         flags: crate::device::instance_flags(),
@@ -848,6 +852,14 @@ pub fn error() -> String {
     with(|m| m.take_error()).unwrap_or_default()
 }
 
+/// The external Vulkan seams' exports are Android's and Windows' (`vulkan.rs`).
+#[cfg(not(any(target_os = "android", windows)))]
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __vulkan_exports {
+    () => {};
+}
+
 /// The exports for one app's registry, C ABI (see LLP 1009 D2).
 #[macro_export]
 macro_rules! module {
@@ -856,6 +868,8 @@ macro_rules! module {
         thread_local! {
             static EXACT_GPU_OUT: ::std::cell::RefCell<Vec<u8>> = const { ::std::cell::RefCell::new(Vec::new()) };
         }
+
+        $crate::__vulkan_exports!();
 
         /// Create the device. 0 on success.
         #[no_mangle]

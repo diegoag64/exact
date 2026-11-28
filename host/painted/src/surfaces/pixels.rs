@@ -22,12 +22,36 @@ impl Surfaces {
     pub(crate) fn has_rendered_canvas(&self) -> bool {
         self.canvases
             .values()
+            .filter(|c| !Self::in_headset(c))
             .any(|c| self.abis.get(&c.artifact).is_some_and(|a| a.rendered))
+    }
+
+    /// The canvas a headset session draws: the primary module's first.
+    #[cfg(windows)]
+    pub(crate) fn headset_canvas(&self) -> Option<u32> {
+        self.canvases
+            .values()
+            .find(|c| {
+                c.artifact.is_empty() && self.abis.get(&c.artifact).is_some_and(|a| a.rendered)
+            })
+            .map(|c| c.id)
+    }
+
+    /// The headset's session draws this canvas (`headset.rs`): the window
+    /// neither reads it back nor keeps drawing frames for it.
+    #[cfg(windows)]
+    pub(super) fn in_headset(canvas: &Canvas) -> bool {
+        canvas.artifact.is_empty() && super::headset::drawing()
+    }
+    #[cfg(not(windows))]
+    pub(super) fn in_headset(_: &Canvas) -> bool {
+        false
     }
 
     /// Whether any readback-composed GPU canvas has not settled to rest or has
     /// pending work (including an asynchronous `SurfaceWaker::wake`). Excludes
-    /// the full-window Windows canvas and zero-extent canvases that `pixels` skips.
+    /// the full-window Windows canvas, a canvas the headset draws and zero-extent
+    /// canvases that `pixels` skips.
     pub(crate) fn has_pending_readback(&self, kernel: &exact_kernel::Kernel) -> bool {
         #[cfg(windows)]
         let window_canvas = self.window_canvas();
@@ -35,6 +59,7 @@ impl Surfaces {
         let window_canvas: Option<u32> = None;
         self.canvases.iter().any(|(&view, c)| {
             window_canvas != Some(view)
+                && !Self::in_headset(c)
                 && kernel
                     .node(view)
                     .is_some_and(|n| n.frame.width > 0.0 && n.frame.height > 0.0)
@@ -55,7 +80,7 @@ impl Surfaces {
                 .node(view)
                 .is_some_and(|n| n.frame.width > 0.0 && n.frame.height > 0.0)
             {
-                if let Some(c) = self.canvases.get(&view) {
+                if let Some(c) = self.canvases.get(&view).filter(|c| !Self::in_headset(c)) {
                     if self
                         .abis
                         .get(&c.artifact)
@@ -78,7 +103,7 @@ impl Surfaces {
         let mut result = BTreeMap::new();
         let mut shown = Vec::new();
         for (&view, canvas) in &self.canvases {
-            if skip == Some(view) {
+            if skip == Some(view) || Self::in_headset(canvas) {
                 continue;
             }
             let Some(abi) = self.abis.get(&canvas.artifact).filter(|a| a.rendered) else {

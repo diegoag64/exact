@@ -77,6 +77,7 @@ pub(super) fn frame() -> FrameInput<'static> {
         },
         environment_map: None,
         ambient_occlusion: None,
+        saturation: 1.0,
         water: None,
         timestamps: None,
         attachments: &[],

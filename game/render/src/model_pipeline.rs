@@ -59,6 +59,7 @@ pub(crate) fn pipeline(
     shadow: bool,
     (samples, format): (u32, wgpu::TextureFormat),
     (early, depth_prepass, camera_depth, matte): (bool, bool, bool, bool),
+    multiview: Option<std::num::NonZeroU32>,
 ) -> wgpu::RenderPipeline {
     use crate::pipeline::{MODEL_DIRECT, MODEL_GENERAL};
     let attributes = wgpu::vertex_attr_array![0=>Float32x3,1=>Float32x3,2=>Float32x2,3=>Float32x4];
@@ -200,7 +201,7 @@ pub(crate) fn pipeline(
                 count: if shadow { 1 } else { samples },
                 ..Default::default()
             },
-            multiview_mask: None,
+            multiview_mask: multiview,
             cache,
         })
     })

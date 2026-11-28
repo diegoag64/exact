@@ -356,9 +356,12 @@ impl EnvironmentLight {
         timestamps: Option<&wgpu::QuerySet>,
     ) -> bool {
         if std::mem::take(&mut self.sh_pending) {
+            crate::counters::pass();
             let mut pass = encoder.begin_compute_pass(&Default::default());
+            crate::counters::pipeline();
             pass.set_pipeline(self.sh_pipeline.as_ref().unwrap());
             pass.set_bind_group(0, &self.bind, &[0]);
+            crate::counters::commands(1);
             pass.dispatch_workgroups(1, 1, 1);
         }
         if !std::mem::take(&mut self.pending) {
@@ -368,6 +371,7 @@ impl EnvironmentLight {
         for (i, face) in self.faces.iter().enumerate() {
             let timestamp_writes =
                 crate::timing::span(timestamps, crate::timing::ENVIRONMENT, i == 0, i == last);
+            crate::counters::pass();
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("game environment prefilter"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -384,8 +388,10 @@ impl EnvironmentLight {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            crate::counters::pipeline();
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind, &[(i as u64 * STRIDE) as u32]);
+            crate::counters::commands(1);
             pass.draw(0..3, 0..1);
         }
         self.updates += 1;

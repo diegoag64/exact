@@ -2,6 +2,17 @@
 use super::*;
 
 impl<D: DataSource + Default + 'static> App<D> {
+    pub(super) fn pause_desktop_in_vr(&self) -> bool {
+        // Desktop paint competes with headset frames on the window thread.
+        self.headset_frame_active
+            && self.frames > 0
+            && self.pending_show.is_none()
+            && self
+                .presenter
+                .as_ref()
+                .is_some_and(Presenter::headset_focused)
+    }
+
     /// The loop's turn before it waits. An app that has started to end, by
     /// a close or the status menu's Exit earlier in the turn, is served no
     /// more: its timers and commands would run against ended packages.
@@ -32,6 +43,11 @@ impl<D: DataSource + Default + 'static> App<D> {
         events: &ActiveEventLoop,
         deadlines: impl FnOnce(&Presenter<D>) -> (Option<Instant>, Option<Instant>),
     ) {
+        // A headset session's frame (`--vr`, docs/quest.md "PC VR on
+        // Windows"): drawn here, each turn of the loop, as xrWaitFrame paces
+        // it, whether or not the window shows.
+        let headset = self.presenter.as_mut().and_then(|p| p.headset_frame());
+        self.headset_frame_active = headset.is_some();
         let causes = if counters::enabled() {
             std::mem::take(&mut self.service_causes)
         } else {
@@ -93,6 +109,7 @@ impl<D: DataSource + Default + 'static> App<D> {
             self.fail(events, error);
             return;
         }
+        let desktop_paused = self.pause_desktop_in_vr();
         let Some(p) = &mut self.presenter else { return };
         let wake = self.presents.poll(p, self.started);
         let retirement = presents::sooner(p.collect_painter_retirement(Instant::now()), wake);
@@ -146,7 +163,7 @@ impl<D: DataSource + Default + 'static> App<D> {
             present,
         };
         let now = Instant::now();
-        let redraw = (!self.minimized && !self.occluded && !self.hidden)
+        let redraw = (!desktop_paused && !self.minimized && !self.occluded && !self.hidden)
             .then(|| schedule.redraw(now, p.dirty() || continuous || self.redraw_pending))
             .flatten();
         if let Some(due) = redraw {
@@ -190,6 +207,13 @@ impl<D: DataSource + Default + 'static> App<D> {
                     events.set_control_flow(ControlFlow::WaitUntil(soon));
                 }
             }
+        }
+        if headset.is_some() {
+            // The headset waits in its own frame call; a native modal loop
+            // (a drag of the window) keeps the frames coming on its timer.
+            events.set_control_flow(ControlFlow::Poll);
+            self.modal.wait_until(Some(Instant::now()));
+            return;
         }
         self.modal.wait_until(match events.control_flow() {
             ControlFlow::WaitUntil(deadline) => Some(deadline),

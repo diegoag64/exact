@@ -143,8 +143,10 @@ pub(crate) fn from_above(frame: &FrameInput<'_>) -> bool {
 /// The water's pipelines, made on a frame that first needs each.
 #[derive(Default)]
 pub(crate) struct Passes {
-    /// The surface seen from below (writing depth) and from above (not).
-    surface: [Option<wgpu::RenderPipeline>; 2],
+    /// The surface seen from below (writing depth) and from above (not);
+    /// into the HDR image, then tonemapped into a direct frame's target;
+    /// full-screen, then drawn as the plane's geometry ([`Passes::raster`]).
+    surface: [[[Option<wgpu::RenderPipeline>; 2]; 2]; 2],
     shafts: Option<Shafts>,
 }
 
@@ -167,10 +169,12 @@ impl Passes {
         targets: &Targets,
         side: Option<bool>,
         shafts: bool,
+        direct: bool,
+        raster: bool,
     ) {
         if let Some(above) = side {
-            self.surface[usize::from(above)]
-                .get_or_insert_with(|| surface_pipeline(device, pipelines, !above));
+            self.surface[usize::from(raster)][usize::from(direct)][usize::from(above)]
+                .get_or_insert_with(|| surface_pipeline(device, pipelines, !above, direct, raster));
         }
         if !shafts {
             return;
@@ -209,11 +213,31 @@ impl Passes {
         pass: &mut wgpu::RenderPass<'_>,
         scene: &wgpu::BindGroup,
         above: bool,
+        direct: bool,
+        raster: bool,
     ) {
-        let pipeline = self.surface[usize::from(above)].as_ref();
+        let pipeline =
+            self.surface[usize::from(raster)][usize::from(direct)][usize::from(above)].as_ref();
+        crate::counters::pipeline();
         pass.set_pipeline(pipeline.expect("prepared from this side"));
         pass.set_bind_group(0, scene, &[0]);
-        pass.draw(0..3, 0..1);
+        crate::counters::commands(1);
+        pass.draw(0..if raster { 6 } else { 3 }, 0..1);
+    }
+
+    /// Whether `device` draws the surface as the plane's geometry rather
+    /// than a full-screen triangle that writes its depth: an immersive frame
+    /// (a headset's), where unclipped depth carries the plane past the far
+    /// plane. The rasterizer then gives each sample its depth and early
+    /// depth tests skip the water under the scene; the full-screen form
+    /// shades every pixel of both eyes, which a tiling GPU pays for in full.
+    /// `water-fullscreen` (`xr-debug`) keeps the full-screen form to compare.
+    pub fn raster(device: &wgpu::Device, immersive: bool) -> bool {
+        immersive
+            && device
+                .features()
+                .contains(wgpu::Features::DEPTH_CLIP_CONTROL)
+            && !exact_gpu::debug_switch("water-fullscreen")
     }
 
     /// Add the shafts to the resolved HDR colour.
@@ -225,6 +249,7 @@ impl Passes {
         timestamps: Option<&wgpu::QuerySet>,
     ) {
         let shafts = self.shafts.as_ref().expect("prepared with shafts");
+        crate::counters::pass();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("game water shafts"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -242,22 +267,31 @@ impl Passes {
             multiview_mask: None,
         });
         crate::renderer::viewport(&mut pass, size);
+        crate::counters::pipeline();
         pass.set_pipeline(&shafts.pipeline);
         pass.set_bind_group(0, shafts.bind.as_ref().unwrap(), &[]);
+        crate::counters::commands(1);
         pass.draw(0..3, 0..1);
     }
 }
 
 /// From below the surface is opaque and writes its depth, hiding what is over
 /// it; from above it is a blend over what lies beneath and writes none.
+/// `direct`: tonemapped into the target's format, for a direct frame.
 fn surface_pipeline(
     device: &wgpu::Device,
     pipelines: &crate::pipeline::Pipelines,
     write_depth: bool,
+    direct: bool,
+    raster: bool,
 ) -> wgpu::RenderPipeline {
+    let format = pipelines.format();
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("game water surface"),
-        source: wgpu::ShaderSource::Wgsl(crate::pipeline::water_source().into()),
+        source: wgpu::ShaderSource::Wgsl(match pipelines.multiview {
+            Some(_) => crate::stereo::multiview_source(&crate::pipeline::water_source()).into(),
+            None => crate::pipeline::water_source().into(),
+        }),
     });
     // Premultiplied: opaque from below, the sky's reflection over the floor from above.
     let over = wgpu::BlendComponent {
@@ -270,7 +304,74 @@ fn surface_pipeline(
         dst_factor: wgpu::BlendFactor::One,
         operation: wgpu::BlendOperation::Add,
     };
-    crate::pipeline::make_pipeline(
+    let constants = if direct {
+        vec![
+            ("DIRECT", 1.0),
+            ("ENCODE_SRGB", if format.is_srgb() { 0.0 } else { 1.0 }),
+        ]
+    } else {
+        vec![]
+    };
+    if raster {
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("game water plane"),
+            bind_group_layouts: &[Some(&pipelines.scene_layout)],
+            immediate_size: 0,
+        });
+        let targets = [Some(wgpu::ColorTargetState {
+            format: if direct {
+                format
+            } else {
+                wgpu::TextureFormat::Rgba16Float
+            },
+            blend: Some(wgpu::BlendState {
+                color: over,
+                alpha: keep,
+            }),
+            write_mask: wgpu::ColorWrites::ALL,
+        })];
+        return crate::perf::pipeline(|| {
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("game water plane"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("water_plane_vs"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("water_plane_fs"),
+                    targets: &targets,
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &constants,
+                        ..Default::default()
+                    },
+                }),
+                primitive: wgpu::PrimitiveState {
+                    // Beyond the far plane the plane lies at the far depth, as
+                    // the full-screen form clamps it; less-or-equal keeps it
+                    // in front of the sky's cleared depth there.
+                    unclipped_depth: true,
+                    ..Default::default()
+                },
+                depth_stencil: crate::pipeline::scene_depth(
+                    write_depth,
+                    wgpu::CompareFunction::LessEqual,
+                    Default::default(),
+                ),
+                multisample: wgpu::MultisampleState {
+                    count: pipelines.samples,
+                    ..Default::default()
+                },
+                multiview_mask: pipelines.multiview,
+                cache: pipelines.cache.handle.as_ref(),
+            })
+        });
+    }
+    crate::pipeline::make_pipeline_views(
+        pipelines.multiview,
         device,
         pipelines.cache.handle.as_ref(),
         &shader,
@@ -281,12 +382,16 @@ fn surface_pipeline(
         &[],
         crate::pipeline::scene_depth(write_depth, wgpu::CompareFunction::Less, Default::default()),
         pipelines.samples,
-        wgpu::TextureFormat::Rgba16Float,
+        if direct {
+            format
+        } else {
+            wgpu::TextureFormat::Rgba16Float
+        },
         Some(wgpu::BlendState {
             color: over,
             alpha: keep,
         }),
-        &[],
+        &constants,
         false,
         true,
     )

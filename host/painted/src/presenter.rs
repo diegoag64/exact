@@ -159,6 +159,8 @@ struct TestWork;
 #[cfg(all(test, not(windows)))]
 impl exact_runner::HostWork for TestWork {}
 mod folding;
+#[cfg(windows)]
+mod headset;
 mod shortcuts;
 mod status_bar;
 #[cfg(any(target_os = "android", test))]

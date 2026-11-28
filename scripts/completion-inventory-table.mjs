@@ -121,8 +121,7 @@ export const classifications = [
     ["painted:host/painted/src/canvas/jni_drop.rs",
       "Java_dev_exact_canvas_Native_dragDropped Java_dev_exact_canvas_Native_dragLeft Java_dev_exact_canvas_Native_dragOver " +
       "Java_dev_exact_canvas_Native_dropLanded Java_dev_exact_canvas_Native_dropReleased Java_dev_exact_canvas_Native_fieldDrop Java_dev_exact_canvas_Native_liftBegan Java_dev_exact_canvas_Native_liftEnded"],
-    ["painted:host/painted/src/canvas/jni.rs",
-      "Java_dev_exact_canvas_Native_readerSelection " +
+    ["painted:host/painted/src/canvas/jni.rs", "Java_dev_exact_canvas_Native_readerSelection " +
       "Java_dev_exact_canvas_Native_accessAct Java_dev_exact_canvas_Native_fieldAction Java_dev_exact_canvas_Native_fieldComposing " +
       "Java_dev_exact_canvas_Native_fieldEdited Java_dev_exact_canvas_Native_fieldFocused Java_dev_exact_canvas_Native_fieldInput " +
       "Java_dev_exact_canvas_Native_fieldScrolled Java_dev_exact_canvas_Native_fieldSelected Java_dev_exact_canvas_Native_finger Java_dev_exact_canvas_Native_scroll Java_dev_exact_canvas_Native_touch " +
@@ -233,6 +232,7 @@ export const classifications = [
     ["apple:host/apple/src/canvas_exports.rs", "exact_canvas_defer exact_canvas_display exact_canvas_draw exact_canvas_held exact_canvas_performance_record exact_canvas_performance_requested exact_canvas_snapshotted exact_set_canvas_text"],
     ["painted:host/painted/src/canvas/jni.rs", "Java_dev_exact_canvas_Native_canvasBuffer Java_dev_exact_canvas_Native_canvasFrame"],
     ["painted:host/painted/src/host_canvas.rs", "Host::canvas_wants_frame"],
+    ["painted:host/painted/src/presenter/headset.rs", "Presenter::headset_focused Presenter::headset_frame"],
     ["painted:host/painted/src/scale.rs", "Host::canvas_performance_record"],
     ["painted:host/painted/src/surfaces/capture.rs", "Presenter::draw_and_capture_canvases"],
     ["runner:runner/src/runner.rs", "Runner::take_surface_updates"],

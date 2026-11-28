@@ -4,7 +4,11 @@ use super::*;
 // game first spawns one. Registration is not state; executor-linked
 // components (animation, sockets, audio) still register where they install.
 pub(crate) fn register(world: &mut World) {
-    crate::input::register_resources(world.register_resource::<crate::Shadows>());
+    crate::input::register_resources(
+        world
+            .register_resource::<crate::Shadows>()
+            .register_resource::<crate::Saturation>(),
+    );
     world
         .register::<Transform>()
         .register::<Parent>()

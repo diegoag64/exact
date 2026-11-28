@@ -255,6 +255,41 @@ impl<G: Game> Sim<G> {
                 && (assets.dependencies.get(n)).is_none_or(|deps| deps.iter().all(|t| resident(t)))
         })
     }
+    /// One line for a host's log: how many named assets are loaded, pending,
+    /// failed and prepared for the device, with the first few names that are
+    /// not loaded (and why each failed).
+    pub fn asset_summary(&self) -> String {
+        use crate::asset::AssetState;
+        let assets = &*self.world.assets;
+        let (mut loaded, mut pending, mut failed) = (0, 0, 0);
+        let mut missing = Vec::new();
+        for (name, state) in &assets.states {
+            match state {
+                AssetState::Loaded => loaded += 1,
+                AssetState::Pending => {
+                    pending += 1;
+                    if missing.len() < 6 {
+                        missing.push(format!("{name} pending"));
+                    }
+                }
+                AssetState::Failed(why) => {
+                    failed += 1;
+                    if missing.len() < 6 {
+                        missing.push(why.clone());
+                    }
+                }
+            }
+        }
+        let mut line = format!(
+            "assets loaded={loaded} pending={pending} failed={failed} prepared={} models={}",
+            assets.prepared.len(),
+            self.presentation_models().count()
+        );
+        if !missing.is_empty() {
+            line.push_str(&format!(" [{}]", missing.join("; ")));
+        }
+        line
+    }
     /// Whether `name` is prepared for the current device.
     pub fn is_prepared(&self, name: &str) -> bool {
         self.world.assets.prepared.contains(name)

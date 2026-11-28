@@ -30,6 +30,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Default
             hooks: H::default(),
             hook_clock: Default::default(),
             hook_poses: Default::default(),
+            xr_stages: None,
             gpu_timing: None,
             encoded: None,
             render: None,
@@ -71,6 +72,10 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Default
             held_back: false,
             #[cfg(not(target_arch = "wasm32"))]
             uploads: None,
+            xr_format: None,
+            xr_left: false,
+            xr_mode: "none",
+            xr_frames: 0,
         }
     }
 }
@@ -208,6 +213,11 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
     pub fn sim(&self) -> Option<&Sim<G>> {
         self.sim.as_ref()
     }
+    /// The last drawn frame's renderer work; an immersive frame's is both
+    /// eyes' together (`Stats::add`).
+    pub fn stats(&self) -> crate::Stats {
+        self.perf.stats
+    }
     /// Read presentation diagnostics owned by this canvas's render hooks.
     pub fn render_hooks(&self) -> &H {
         &self.hooks
@@ -219,6 +229,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         format: wgpu::TextureFormat,
         seekable: bool,
         already_released: bool,
+        immersive: bool,
     ) {
         if self.format == Some(format) && self.render.is_some() {
             return;
@@ -231,20 +242,23 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             self.hooks.device_lost();
             self.ready_work = None;
         }
-        let samples = self
-            .sim
-            .as_ref()
-            .map_or(exact_game::SceneSamples::One, |sim| G::samples(sim.args()));
+        let (rung, samples) =
+            self.sim
+                .as_ref()
+                .map_or((self.rung, exact_game::SceneSamples::One), |sim| {
+                    (
+                        frame_rung(self.rung, immersive, G::quality(sim.args())),
+                        G::samples(sim.args()),
+                    )
+                });
         self.perf.pipeline_ready = crate::perf::timing().then_some(0.);
         self.perf.pipeline_ready_seekable = seekable;
         self.render = Some((
-            crate::renderer::RendererWithAssets::<ASSETS>::configured(
+            crate::renderer::RendererWithAssets::<ASSETS>::with_sample_count(
                 device,
                 queue,
                 format,
-                *self
-                    .samples
-                    .insert(crate::quality::samples(self.rung, samples)),
+                *self.samples.insert(crate::quality::samples(rung, samples)),
                 G::DEPTH_PREPASS,
             )
             .with_matte_models(G::MATTE_MODELS),
@@ -296,7 +310,14 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             } else {
                 self.seekable
             };
-            self.ensure_renderer(device, queue, format, seekable, released);
+            self.ensure_renderer(
+                device,
+                queue,
+                format,
+                seekable,
+                released,
+                self.xr_format.is_some(),
+            );
         }
         let sim = self.sim.as_mut().unwrap();
         let (renderer, _feed) = self.render.as_mut().unwrap();
@@ -418,6 +439,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         encoder: &mut wgpu::CommandEncoder,
         target: &wgpu::TextureView,
         format: wgpu::TextureFormat,
+        xr: Option<super::xr::Immersive<'_>>,
     ) -> bool {
         let period = if H::ENABLED && H::ALLOWANCE > 0 && !frame.seekable {
             FramePeriod::new(
@@ -535,7 +557,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         self.look.points = (frame.width, frame.height);
         self.look.held = Some(*frame);
         if self.format != Some(format) {
-            self.ensure_renderer(device, queue, format, frame.seekable, false);
+            self.ensure_renderer(device, queue, format, frame.seekable, false, xr.is_some());
         }
         let sim = self.sim.as_mut().unwrap();
         if ASSETS {
@@ -676,10 +698,30 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             trace.pointer = pointer;
         }
         let mut input = feed.frame_pixels(sim.world(), sim.alpha(), (frame.width, frame.height));
-        if let Some(rung) = self.rung {
+        // The game's stage between its last two ticks, as the world's
+        // transforms are drawn (`sim.alpha()`): drawn at the latest tick's
+        // instead, a stage the hands move steps at the tick rate while the
+        // headset draws faster, and what the reference space carries (the
+        // hands' panels, under an entity at the stage's inverse, drawn a
+        // tick late) shakes against it.
+        let xr_stage = xr.is_some().then(|| {
+            blend_stage(
+                &mut self.xr_stages,
+                G::xr_stage(sim.world(), sim.args()),
+                sim.world().tick(),
+                sim.alpha(),
+            )
+        });
+        if let Some(rung) = frame_rung(self.rung, xr.is_some(), G::quality(sim.args())) {
             let authored = sim.world().try_resource::<exact_game::Shadows>().is_some();
-            rung.clamp(&mut input, authored);
+            // The immersive profile fits the sun's shadow to the game's stage.
+            let stage = rung
+                .xr
+                .then(|| xr_stage.unwrap_or_else(|| G::xr_stage(sim.world(), sim.args())));
+            rung.clamp_staged(&mut input, authored, stage.as_ref());
             renderer.set_water_effects(rung.water_effects());
+            renderer.set_immersive(rung.xr);
+            renderer.xr_model_outlines = G::XR_MODEL_OUTLINES;
         }
         // Every pixel the renderer stores has alpha one: each clear of the
         // output stores one, opaque draws write one, and every blend composes
@@ -737,17 +779,46 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             }
         }
         let direct_frames = renderer.direct_frames;
-        let encoded = renderer.encode_hooked(
-            encoder,
-            target,
-            frame.pixels(),
-            &input,
-            &mut self.hooks,
-            Some(sim.world()),
-            hook_time,
-            &self.hook_poses,
-            measure.then_some((&mut self.perf, frame.seekable)),
-        );
+        let encoded = if let Some(xr) = xr {
+            // Immersive: each eye from the headset, placed by the game's
+            // stage (between its last two ticks).
+            let stage = xr_stage.unwrap_or_else(|| G::xr_stage(sim.world(), sim.args()));
+            match xr {
+                super::xr::Immersive::Eyes(views) => super::xr::encode_eyes(
+                    renderer,
+                    device,
+                    queue,
+                    &mut input,
+                    stage,
+                    views,
+                    sim.world(),
+                    &self.hook_poses,
+                ),
+                super::xr::Immersive::Stereo(stereo) => super::xr::encode_stereo(
+                    renderer,
+                    device,
+                    queue,
+                    &mut input,
+                    stage,
+                    stereo,
+                    format,
+                    sim.world(),
+                    &self.hook_poses,
+                ),
+            }
+        } else {
+            renderer.encode_hooked(
+                encoder,
+                target,
+                frame.pixels(),
+                &input,
+                &mut self.hooks,
+                Some(sim.world()),
+                hook_time,
+                &self.hook_poses,
+                measure.then_some((&mut self.perf, frame.seekable)),
+            )
+        };
         if let Some(end) = hook_time.deadline.map(|_| Stamp::now()) {
             if let Some(prepare) = renderer
                 .hook_metrics
@@ -1095,4 +1166,95 @@ pub(super) fn append_trace(
     events.push(']');
     out.push_str(",\"traceEvents\":");
     out.push_str(&events);
+}
+
+/// The rung a frame draws at: the resolved one, the immersive profile's for
+/// an immersive frame (resolved here if no binding did yet).
+pub(super) fn frame_rung(
+    rung: Option<crate::quality::Rung>,
+    immersive: bool,
+    asked: exact_game::Quality,
+) -> Option<crate::quality::Rung> {
+    if !immersive {
+        return rung;
+    }
+    Some(
+        rung.unwrap_or_else(|| crate::quality::Rung::resolve(asked, exact_gpu::tier()))
+            .immersive(),
+    )
+}
+
+/// The stage a headset frame draws at: `now` is the game's at `tick`;
+/// `seen` keeps the tick before's and this one's, and the frame draws
+/// `alpha` of the way from the one to the other, as `Sim::alpha` places the
+/// world's transforms. A tick skipped, or none seen yet, starts again at
+/// `now`.
+fn blend_stage(
+    seen: &mut Option<(u64, exact_game::XrStage, exact_game::XrStage)>,
+    now: exact_game::XrStage,
+    tick: u64,
+    alpha: f32,
+) -> exact_game::XrStage {
+    let (before, at) = match *seen {
+        Some((t, before, at)) if t == tick => (before, at),
+        Some((t, _, at)) if t + 1 == tick => (at, now),
+        _ => (now, now),
+    };
+    // The game's answer this frame is its latest: one asked again in the
+    // same tick may differ only if the game changed it outside a tick.
+    let at = if seen.is_some_and(|(t, _, _)| t == tick) {
+        now
+    } else {
+        at
+    };
+    *seen = Some((tick, before, at));
+    before.lerp(&at, alpha)
+}
+
+#[cfg(test)]
+mod stage_tests {
+    use super::blend_stage;
+    use exact_game::{Vec3, XrStage};
+
+    fn at(x: f32, yaw: f32) -> XrStage {
+        XrStage {
+            position: Vec3::new(x, 1.0, 0.0),
+            yaw,
+            scale: 0.05,
+            ..XrStage::default()
+        }
+    }
+
+    #[test]
+    fn a_frame_draws_the_stage_between_its_last_two_ticks() {
+        let mut seen = None;
+        // The first seen is drawn as it is.
+        assert_eq!(blend_stage(&mut seen, at(0.0, 0.0), 10, 0.5), at(0.0, 0.0));
+        // The next tick: from the one before toward it, by the frame's alpha.
+        let half = blend_stage(&mut seen, at(1.0, 0.0), 11, 0.5);
+        assert!((half.position.x - 0.5).abs() < 1e-6, "{half:?}");
+        assert_eq!(
+            blend_stage(&mut seen, at(1.0, 0.0), 11, 0.0).position.x,
+            0.0
+        );
+        assert_eq!(
+            blend_stage(&mut seen, at(1.0, 0.0), 11, 1.0).position.x,
+            1.0
+        );
+        // A tick skipped starts again where the game is.
+        assert_eq!(blend_stage(&mut seen, at(5.0, 0.0), 14, 0.3), at(5.0, 0.0));
+    }
+
+    #[test]
+    fn a_stage_turns_the_short_way_round() {
+        let a = at(0.0, 3.0);
+        let b = at(0.0, -3.0);
+        let mid = a.lerp(&b, 0.5);
+        assert!(
+            (mid.yaw.abs() - core::f32::consts::PI).abs() < 0.02,
+            "{}",
+            mid.yaw
+        );
+        assert_eq!(a.lerp(&b, 0.0), a);
+    }
 }

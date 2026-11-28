@@ -87,24 +87,43 @@ fn cascade_sample(world: vec3<f32>, normal: vec3<f32>, index: u32) -> f32 {
     let axis = light_normal / max(sine, 0.000001);
     let uv = clip.xy * vec2(0.5, -0.5) + 0.5;
     if any(uv < vec2(0.0)) || any(uv > vec2(1.0)) || clip.z < 0.0 || clip.z > 1.0 { return 1.0; }
-    var sum = 0.0;
+    // The nine taps of a 3x3 grid `softness` texels apart, squeezed along the
+    // receiver's tilt: tap = A * grid with A = I - (1 - N.L) axis axisᵀ, linear in
+    // the grid, so each tap is the centre plus whole steps of two offsets (in uv
+    // and in receiver-plane depth) worked out once rather than per tap.
+    let size = f32(textureDimensions(shadow_map).x);
+    let squeeze = 1.0 - cosine;
+    let step_x = (vec2(1.0, 0.0) - axis * (axis.x * squeeze)) * frame.texels_softness.w;
+    let step_y = (vec2(0.0, 1.0) - axis * (axis.y * squeeze)) * frame.texels_softness.w;
+    let du = step_x / size;
+    let dv = step_y / size;
+    let dz = vec2(dot(slope, step_x), dot(slope, step_y));
     // The receiver chooses one filter for all nine taps. Each tap branches on it,
     // rather than a loop of each filter: a wave with receivers of both kinds then
     // runs one loop, not both in turn.
     let steep = footprint > budget;
-    for (var y = -1; y <= 1; y++) {
-        for (var x = -1; x <= 1; x++) {
-            let grid = vec2(f32(x), f32(y)) * frame.texels_softness.w;
-            let tap = grid - axis * dot(grid, axis) * (1.0 - cosine);
-            if steep {
-                sum += plane_sample(uv + tap / f32(textureDimensions(shadow_map).x), clip.z + dot(slope, tap), slope, index);
-            } else {
-                sum += textureSampleCompareLevel(shadow_map, shadow_sampler,
-                    uv + tap / f32(textureDimensions(shadow_map).x), i32(index), clip.z + dot(slope, tap) - bias);
-            }
-        }
-    }
+    // The centre and the four corners first: where all five agree that the
+    // fragment is wholly lit or wholly shadowed, the other four would too unless
+    // a caster or a gap smaller than a tap's 2x2 texels lies between them.
+    var sum = receiver_tap(uv, clip.z, du, dv, dz, 0.0, 0.0, slope, steep, bias, index)
+        + receiver_tap(uv, clip.z, du, dv, dz, -1.0, -1.0, slope, steep, bias, index)
+        + receiver_tap(uv, clip.z, du, dv, dz, 1.0, -1.0, slope, steep, bias, index)
+        + receiver_tap(uv, clip.z, du, dv, dz, -1.0, 1.0, slope, steep, bias, index)
+        + receiver_tap(uv, clip.z, du, dv, dz, 1.0, 1.0, slope, steep, bias, index);
+    if frame.shadow_near.y > 0.5 && (sum == 0.0 || sum == 5.0) { return sum * 0.2; }
+    sum += receiver_tap(uv, clip.z, du, dv, dz, 0.0, -1.0, slope, steep, bias, index)
+        + receiver_tap(uv, clip.z, du, dv, dz, -1.0, 0.0, slope, steep, bias, index)
+        + receiver_tap(uv, clip.z, du, dv, dz, 1.0, 0.0, slope, steep, bias, index)
+        + receiver_tap(uv, clip.z, du, dv, dz, 0.0, 1.0, slope, steep, bias, index);
     return sum / 9.0;
+}
+// One of `cascade_sample`'s taps, `x` and `y` grid steps from the centre.
+fn receiver_tap(uv: vec2<f32>, z: f32, du: vec2<f32>, dv: vec2<f32>, dz: vec2<f32>, x: f32, y: f32,
+    slope: vec2<f32>, steep: bool, bias: f32, index: u32) -> f32 {
+    let at = uv + du * x + dv * y;
+    let depth = z + dz.x * x + dz.y * y;
+    if steep { return plane_sample(at, depth, slope, index); }
+    return textureSampleCompareLevel(shadow_map, shadow_sampler, at, i32(index), depth - bias);
 }
 fn sun_visibility_filtered(world: vec3<f32>, normal: vec3<f32>) -> f32 {
     if frame.splits_count.w < 1.0 { return 1.0; }

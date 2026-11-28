@@ -16,22 +16,43 @@ pub struct Rung {
     pub tier: GpuTier,
     /// The rung itself: `Auto` resolved by the tier.
     pub level: GpuTier,
+    /// The immersive profile (`crate::profile`) replaces the rung's clamps:
+    /// asked for with `Quality::Xr`, and taken by every immersive frame.
+    pub xr: bool,
 }
 
 impl Rung {
     /// `asked` under `tier`: `Auto` takes the tier's rung.
     pub fn resolve(asked: Quality, tier: GpuTier) -> Self {
         let level = match asked {
-            Quality::Auto => tier,
+            Quality::Auto | Quality::Xr => tier,
             Quality::Low => GpuTier::Low,
             Quality::Mid => GpuTier::Mid,
             Quality::High => GpuTier::High,
         };
-        Self { asked, tier, level }
+        Self {
+            asked,
+            tier,
+            level,
+            xr: asked == Quality::Xr,
+        }
+    }
+
+    /// This rung for an immersive frame: the profile's.
+    pub fn immersive(self) -> Self {
+        Self { xr: true, ..self }
     }
 
     /// Scene samples: one under `Low`; the game's own as the ceiling.
     pub fn samples(self, game: SceneSamples) -> SceneSamples {
+        // The immersive profile keeps the game's sample request.
+        if self.xr {
+            // `msaa-1`: a measuring switch (docs/quest.md), never a setting.
+            if exact_gpu::debug_switch("msaa-1") {
+                return SceneSamples::One;
+            }
+            return game;
+        }
         if self.level == GpuTier::Low {
             SceneSamples::One
         } else {
@@ -46,6 +67,9 @@ impl Rung {
         if game != AUTO_RENDER_SCALE {
             return game;
         }
+        if self.xr {
+            return 1.0;
+        }
         match self.level {
             GpuTier::Low => 0.5,
             GpuTier::Mid => 0.75,
@@ -56,6 +80,20 @@ impl Rung {
     /// Clamp one frame's input. `authored_shadows`: the game inserted a
     /// `Shadows` resource, which is its own and stands.
     pub fn clamp(self, input: &mut crate::FrameInput<'_>, authored_shadows: bool) {
+        self.clamp_staged(input, authored_shadows, None);
+    }
+
+    /// `clamp`, with where the game places its world in a headset, which
+    /// the profile fits the sun's shadow to.
+    pub fn clamp_staged(
+        self,
+        input: &mut crate::FrameInput<'_>,
+        authored_shadows: bool,
+        stage: Option<&exact_game::XrStage>,
+    ) {
+        if self.xr {
+            return crate::profile::clamp(input, authored_shadows, stage);
+        }
         if self.level == GpuTier::High {
             return;
         }
@@ -87,6 +125,9 @@ impl Rung {
     /// `Low`, both elsewhere. A present-time choice (`Renderer::set_water_effects`):
     /// the saved resource keeps the game's caustics and shafts.
     pub fn water_effects(self) -> WaterEffects {
+        if self.xr {
+            return crate::profile::water_effects();
+        }
         let on = self.level != GpuTier::Low;
         WaterEffects {
             caustics: on,
@@ -94,18 +135,19 @@ impl Rung {
         }
     }
 
-    fn json(self, samples: SceneSamples, scale: f32) -> String {
+    fn json(self, samples: u32, scale: f32) -> String {
         let asked = match self.asked {
             Quality::Auto => "auto",
             Quality::Low => "low",
             Quality::Mid => "mid",
             Quality::High => "high",
+            Quality::Xr => "xr",
         };
         format!(
             r#"{{"asked":"{asked}","tier":"{}","rung":"{}","samples":{},"scale":{scale}}}"#,
             self.tier.keyword(),
-            self.level.keyword(),
-            samples.count()
+            if self.xr { "xr" } else { self.level.keyword() },
+            samples
         )
     }
 }
@@ -122,15 +164,26 @@ pub(crate) fn unresolved_scale(game: f32) -> f32 {
 
 /// A renderer's scene samples: the rung's, under the game's; the game's
 /// before a binding resolved the rung.
-pub(crate) fn samples(rung: Option<Rung>, game: SceneSamples) -> SceneSamples {
-    rung.map_or(game, |rung| rung.samples(game))
+pub(crate) fn samples(rung: Option<Rung>, game: SceneSamples) -> u32 {
+    let wanted = rung.map_or(game, |rung| rung.samples(game));
+    #[cfg(any(target_os = "android", windows))]
+    if rung.is_some_and(|r| r.xr)
+        && exact_gpu::vulkan::stereo_msaa_two()
+        && (wanted == SceneSamples::Two || exact_gpu::debug_switch("msaa-2"))
+    {
+        return wanted.count().min(2);
+    }
+    match wanted {
+        SceneSamples::Two => SceneSamples::Four.count(),
+        _ => wanted.count(),
+    }
 }
 
 /// The world state's `quality` row, once a binding resolved the rung.
 pub(crate) fn row(rung: Option<Rung>, game: SceneSamples, scale: f32, reply: &mut String) {
     if let Some(rung) = rung {
         reply.push_str(",\"quality\":");
-        reply.push_str(&rung.json(rung.samples(game), rung.scale(scale)));
+        reply.push_str(&rung.json(samples(Some(rung), game), rung.scale(scale)));
     }
 }
 
@@ -167,6 +220,8 @@ mod tests {
         let high = Rung::resolve(Quality::High, GpuTier::Low);
         assert_eq!(low.samples(SceneSamples::Four), SceneSamples::One);
         assert_eq!(mid.samples(SceneSamples::Four), SceneSamples::Four);
+        assert_eq!(super::samples(Some(low), SceneSamples::Two), 1);
+        assert_eq!(super::samples(Some(mid), SceneSamples::Two), 4);
         assert_eq!(
             mid.samples(SceneSamples::One),
             SceneSamples::One,

@@ -115,6 +115,8 @@ function flushRecoveryWaiters() {
 }
 let tierCode = 0; // the GPU tier this page told its modules (gpu-tier.js `TIERS`)
 let raf = null;
+// xr-glue.js when the page offers immersive sessions; its session state is `api.immersive`.
+let xr = null;
 let finishReady;
 const ready = new Promise((resolve) => { finishReady = resolve; });
 
@@ -216,6 +218,8 @@ const clockFor = (frameNow) => exact.now?.() ?? frameNow;
 let hidden = document.hidden;
 function lifecycle(code) {
   if (trapped()) return;
+  // An immersive session may hide the page; its world keeps drawing in the headset.
+  if (code === 0 && exact.gpu?.immersive?.active) return;
   if (code === 0 || code === 1) hidden = code === 0;
   const gen = moduleGen;
   const deliver = () => { if (moduleGen !== gen || trapped()) return; for (const entry of surfaces.values()) if (entry.id) gpu?.gpu_lifecycle(entry.id, code); };
@@ -502,6 +506,8 @@ let sentPeriod = 0, frameGeneration = 0, frameRaw = 0;
 function frame(now) {
   raf = null;
   if (trapped() || recoveryBusy() || terminalDevice) return;
+  // In an immersive session the session's frames draw the world (xr-glue.js).
+  if (exact.gpu?.immersive?.active) return;
   if (hidden && !exact.now) return;
   const at = frameAt = pace(now);
   frameRaw = now; frameGeneration++;
@@ -1471,6 +1477,11 @@ async function swap(version) {
   if (lost) recoverDevice();
   return { ms: performance.now() - start, errors };
 }
+// A game that opted in to immersive sessions (app.json `game.xr`): its adapter
+// must be XR compatible before the module asks for one (xr-glue.js).
+if (artifact === null && document.documentElement?.hasAttribute?.("data-exact-xr")) {
+  xr = await import("./xr-glue.js").then(m => (m.shimAdapter(), m), error => (console.error("exact xr:", error), null));
+}
 const t0 = performance.now();
 try {
   const version = (stem === "gpu" ? exact.gpuVersion : exact.gpuVersions?.[stem]) ?? 0;
@@ -1507,3 +1518,7 @@ try {
   // A refused initial surface must not prevent independent canvases from loading.
   for (const entry of waiting) { try { ensure(entry); } catch (error) { reportError(error); } }
 } finally { finishReady(loaded); }
+// The session's frames draw the world in its place (xr-glue.js `connect`).
+if (xr && loaded) xr.connect({ api, gpu: () => gpu, surfaces, live, clockFor, trapped, messages, flush, lifecycle, schedule, recoverDevice,
+  pause: () => { if (raf !== null) { cancelAnimationFrame(raf); raf = null; } },
+  period: ms => { if (!ms) sentPeriod = 0; else if (gpu) gpu.gpu_period(sentPeriod = ms); } });

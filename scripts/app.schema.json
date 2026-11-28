@@ -129,6 +129,7 @@
       "properties": {
         "audio": { "type": "boolean" },
         "assets": { "type": "boolean" },
+        "xr": { "type": "boolean", "description": "Offer an immersive WebXR session on the web (an Enter VR button where the browser has WebXR on WebGPU): the headset's eyes draw the world, placed by Game::xr_stage." },
         "crate": { "type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*-logic$" },
         "look": {
           "type": "object",
@@ -979,13 +980,17 @@
           "additionalProperties": false
         },
         "android": {
-          "description": "Android: the package `id` (default app.id), the painter, `minimumOS` (default 12), `notificationChannels`, `certificates` for the origin's `assetlinks.json`, and `maven` libraries for the app's Kotlin.",
+          "description": "Android: the package `id` (default app.id), the painter, `xr` (a headset app), `minimumOS` (default 12), `notificationChannels`, `certificates` for the origin's `assetlinks.json`, and `maven` libraries for the app's Kotlin.",
           "type": "object",
           "properties": {
             "id": {
               "description": "The Android package name (Gradle applicationId), independent of the Apple bundle identifier. Defaults to app.id with hyphens replaced by underscores. Set it before publishing; a store package name is permanent.",
               "type": "string",
               "pattern": "^[a-zA-Z][a-zA-Z0-9_]*(\\.[a-zA-Z][a-zA-Z0-9_]*)+$"
+            },
+            "xr": {
+              "enum": ["quest"],
+              "description": "The Android build is a headset app (docs/quest.md): `quest` makes the APK a Meta Quest 3/3S/Pro app that the headset starts immersive. The APK packages the OpenXR artifact (gpu/openxr), which opens an OpenXR session (Khronos loader, Meta's runtime) whose Vulkan device the GPU module renders with, and the game's canvas draws into the headset each frame, placed by Game::xr_stage; the HUD and menus are not drawn there. The APK then requires head tracking, so a phone cannot install it; without a runtime the app draws to its window as usual."
             },
             "urlSchemes": {"type": "array", "description": "Custom schemes whose URLs open as app locations. Use protocol_handlers for a template.", "items": {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9+.-]*$"}},
             "painter": {"enum": ["ink"], "description": "Opt into ink (LLP 1149 D12); absent: the current painter, with `EXACT_PAINTER` overriding the choice, and ink refused until its Vulkan presenter is implemented."},
@@ -1049,6 +1054,10 @@
           "description": "Windows: the painter and the `window` it opens in.",
           "type": "object",
           "properties": {
+            "xr": {
+              "enum": ["openxr"],
+              "description": "Early PC VR preview for x64 Windows. `openxr` packages the OpenXR host, the Khronos OpenXR loader, and a `<name> VR.cmd` launcher. Use `--vr` or EXACT_XR=1 to start a session through the active Vulkan-capable OpenXR runtime. Tested with Virtual Desktop's VDXR runtime and a Meta Quest 3. See docs/quest.md."
+            },
             "painter": {
               "enum": ["ink", "cpu"],
               "description": "Absent: CPU for an app declaring game, otherwise ink on the DirectX 11 composition swap chain (LLP 1149 D12); explicit ink or cpu selects that painter, cpu keeps the softbuffer window, and EXACT_PAINTER overrides the choice."

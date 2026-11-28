@@ -216,7 +216,7 @@ pub(crate) fn wrong_normals(q: &mut super::Quads, d: &exact_gpu::wgpu::Device) {
             &shader,
             &[&q.layout],
             i + 2,
-            (q.samples, None),
+            (q.samples, None, None),
         )
     }));
 }

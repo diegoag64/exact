@@ -11,7 +11,7 @@ use std::{collections::BTreeMap, ffi::c_void, path::Path, sync::Mutex};
 
 /// `gpu_android_init(JavaVM*, JNIEnv*, jobject)` (`gpu/src/android.rs`): 0,
 /// or a failure `gpu_error` describes on the same thread.
-type Entry = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> u32;
+pub(super) type Entry = unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> u32;
 
 /// What each image's entry answered, by the entry's address, which names one
 /// image for the process because an image whose entry ran is never unloaded.
@@ -37,26 +37,43 @@ pub(super) fn run(abi: &Abi, path: &Path) -> Result<(), String> {
     if let Some(answer) = answers.get(&(entry as usize)) {
         return answer.clone();
     }
-    // An entry that could not be called has not run: a later open calls it.
-    let jvm = jvm::attach().map_err(|e| refuse(&e))?;
     // The image keeps what the entry gave it (global references, native
     // methods a class was registered with), so it stays loaded for the
     // process, as a library the VM loaded does: one more reference, kept.
     // SAFETY: the module `abi` holds open, verified before it was opened.
-    std::mem::forget(unsafe { Library::new(path) }.map_err(|e| refuse(&e.to_string()))?);
-    // SAFETY: the entry's contract: the VM, this thread's environment and a
-    // global reference to the application.
-    let code = unsafe { entry(jvm.vm, jvm.env, jvm.context) };
-    let answer = if jvm.threw() {
-        Err(refuse("it left a Java exception pending"))
-    } else if code != 0 {
-        let why = abi.error().unwrap_or("it gave no reason".into());
-        Err(refuse(&why))
-    } else {
-        Ok(())
+    let keep = || {
+        unsafe { Library::new(path) }
+            .map(std::mem::forget)
+            .map_err(|e| e.to_string())
+    };
+    // An entry that could not be called has not run: a later open calls it.
+    let answer = match call(entry, keep).map_err(|why| refuse(&why))? {
+        Err(threw) => Err(refuse(&threw)),
+        Ok(0) => Ok(()),
+        Ok(_) => Err(refuse(&abi.error().unwrap_or("it gave no reason".into()))),
     };
     answers.insert(entry as usize, answer.clone());
     answer
+}
+
+/// Call an initialization entry with the Java VM, this thread's environment
+/// and the application `Context`, once `keep` has kept its image loaded.
+/// Err when it could not be called; else its code, or that it left a Java
+/// exception pending.
+pub(super) fn call(
+    entry: Entry,
+    keep: impl FnOnce() -> Result<(), String>,
+) -> Result<Result<u32, String>, String> {
+    let jvm = jvm::attach()?;
+    keep()?;
+    // SAFETY: the entry's contract: the VM, this thread's environment and a
+    // global reference to the application.
+    let code = unsafe { entry(jvm.vm, jvm.env, jvm.context) };
+    Ok(if jvm.threw() {
+        Err("it left a Java exception pending".into())
+    } else {
+        Ok(code)
+    })
 }
 
 #[cfg(target_os = "android")]

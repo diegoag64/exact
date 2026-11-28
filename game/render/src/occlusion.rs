@@ -213,13 +213,16 @@ impl Occlusion {
     /// Build the pyramid from the depth pass.
     pub fn reduce(&self, encoder: &mut wgpu::CommandEncoder) {
         let targets = self.targets.as_ref().expect("prepared");
+        crate::counters::pass();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("game occlusion pyramid"),
             timestamp_writes: None,
         });
+        crate::counters::pipeline();
         pass.set_pipeline(&self.reduce);
         for (bind, size) in &targets.levels {
             pass.set_bind_group(0, bind, &[]);
+            crate::counters::commands(1);
             pass.dispatch_workgroups(size.0.div_ceil(8), size.1.div_ceil(8), 1);
         }
     }

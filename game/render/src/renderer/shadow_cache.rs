@@ -32,8 +32,10 @@ impl StaticShadowCache {
         let Some((pipeline, bindings)) = &self.seed else {
             return false;
         };
+        crate::counters::pipeline();
         pass.set_pipeline(pipeline);
         pass.set_bind_group(0, &bindings[layer], &[]);
+        crate::counters::commands(1);
         pass.draw(0..3, 0..1);
         true
     }
