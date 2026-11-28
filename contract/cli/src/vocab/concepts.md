@@ -269,7 +269,7 @@ component App
     main navigationKey=`${top(nav).id}` navigationBack="back" navigate=follow width="100%" height="100%"
       for e in stack(nav) key=e.id
         if e.name == "recipes"
-          column navigationKey=`${e.id}` navigationScroll="list" position="absolute" inset=0 display="flex" flex-direction="column"
+          column navigationKey=`${e.id}` navigationSplit="split" navigationScroll="list" position="absolute" inset=0 display="flex" flex-direction="column"
             header padding="8px 16px"
               text "Recipes" role="heading" aria-level=1
             list id="list" appearance="auto" listStyle="inset-grouped" flex=1 min-height=0
@@ -285,13 +285,16 @@ component App
             text "Two eggs, a cup of flour, a cup of milk." padding=16 testId="recipe-body"
 ```
 
-- A wide window shows the list beside its detail, as a split view does, with nothing to write:
-  900 px and up on the web, and on iOS UIKit's split view where UIKit shows both columns (an iPad,
-  the iPhone Duo open), outside a tab (LLP 1127). The first route's rows push (a `link`, or a
-  `press` that writes the router) and draw the `forward-chevron`; a chevron on a row that only
-  selects is decoration. A narrow window pushes. A row pressed while a detail shows pushes
-  another; to swap the detail instead, `open` replaces when one shows: `nav = top(nav).name ==
-  "recipe" ? replace(nav, path("recipe", name)) : push(nav, path("recipe", name))`.
+- A wide window shows the list beside its detail, as a split view does, where the first route asks
+  with `navigationSplit="split"`: 900 px and up or across a hinge on the web, and on iOS UIKit's
+  split view where UIKit shows both columns: an iPad, in a tab too, and the iPhone Duo open, outside
+  a tab (LLP 1127); the Mac, the painted hosts and an iPad outside a tab split such a list unasked,
+  and `"none"` pushes everywhere. The first route's rows push (a `link`, or a `press` that writes
+  the router) and draw the `forward-chevron`; a chevron on a row that only selects is decoration. On
+  iOS and the web a narrow window pushes, unless a hinge divides it on the web; the Mac splits at any
+  width. A row pressed while a detail shows pushes another; to swap the detail instead, `open`
+  replaces when one shows: `nav = top(nav).name == "recipe" ? replace(nav, path("recipe", name)) :
+  push(nav, path("recipe", name))`.
 - The chevron is the row's last child with no colour or size of yours: UIKit's grey
   disclosure. A row that wraps (`flex-wrap`) at large text sizes wraps its parts in a `row
   flex=1 min-width=0 flex-wrap="wrap"` and leaves the chevron after it, at the trailing edge.
@@ -1009,7 +1012,7 @@ along the gradient line. `background-attachment` takes `scroll` or `fixed`;
 hatch on separate rows does not establish one pattern across the list.
 
 ## menu: a pull-down menu of actions, and a long-press one
-names: menus, popover, dropdown, pulldown, pull-down, popupmenu, menu at the click, popup at point, contextPopover, UIMenu, context menu, context-menu, contextMenu, UIContextMenuInteraction, menuitemradio, menuitemcheckbox, checkmark, menuOrder, preferredMenuElementOrder, menu order, reversed menu, menu section, section title, displayInline, sectionHeader
+names: menus, popover, dropdown, pulldown, pull-down, popupmenu, menu at the click, popup at point, contextPopover, UIMenu, context menu, context-menu, contextMenu, UIContextMenuInteraction, menuitemradio, menuitemcheckbox, checkmark, menuOrder, preferredMenuElementOrder, menu order, reversed menu, menu section, section title, displayInline, sectionHeader, keepsMenuPresented, keep menu open, multi-select menu, menuActionDismissBehavior
 
 A menu is HTML's: a `column popover="auto" role="menu"` of `button`s, opened by a button's
 `popovertarget` (on iOS a `UIMenu`; in a `header`, the bar item's pull-down). A long-press
@@ -1058,6 +1061,14 @@ component App
 - iOS puts the first row nearest the finger, so a menu opening upward from near the bottom
   of the screen shows its rows last first. `menuOrder="fixed"` on the trigger keeps them as
   written; `"priority"` always puts the first row nearest the finger.
+- Several picks in one open menu (a filter's tags): `keepsMenuPresented=true` on the menu
+  or submenu column, or on one row (`false` on a row closes it again), and no
+  `popovertargetaction="hide"` on those rows. A row that hides its menu, follows a link or
+  opens something still closes it. iOS keeps the menu open and redraws its checks after
+  each pick, as the web does; the other hosts close it, and its next open shows the checks.
+  On iOS a row that hides only its submenu closes the whole menu, and so does a change to
+  the image of the bar button that opened it; a long-press menu that a keyboard's menu
+  key opened closes at every pick.
 - At the click, as Electron's `Menu.popup({x, y})`: the button's `press` action takes
   `e: MouseEvent`, keeps `e.clientX`, `e.clientY` (both 0 from a key; then leave the insets
   `auto`), and calls `showPopover("menu", source="button")`; the popover writes them as `left`
@@ -1360,7 +1371,7 @@ component App
   literal or a choice of literals (`still ? "none" : "fade-in 180ms"`).
 - A sheet (`navigationPresentation="modal"`), a route with `navigationSource` (the zoom), and
   any element that is no route refuse the parts; an element that moves between states takes
-  `sharedElement` instead. A tab switch keeps the platform's.
+  `sharedElement` (paired with `-exact-layout-transition`) instead. A tab switch keeps the platform's.
 - Under reduce motion the change cuts. On iOS the edge swipe keeps UIKit's interactive pop;
   Android's predictive Back scrubs the authored exit.
 
@@ -1798,7 +1809,7 @@ for the launch.
 
 More: docs/reference.md ("A setting a launch gives")
 
-## edges: insets, scroll bars, the keyboard and folds
+## edges: insets, scroll bars, the keyboard and the hinge
 names: insets, content inset, contentInset, scrollIndicatorInsets, scroll indicator, scroll bar, scrollbar, KeyboardAvoidingView, keyboard avoidance, keyboardVerticalOffset, keyboardLayoutGuide, iPhone Duo, Duo, fold, hinge, floating action button, FAB, bottom bar
 
 On a phone, measure none of these. Say what each part is, and the host keeps it clear of the bars, the home indicator and the docked keyboard:
@@ -1808,8 +1819,8 @@ On a phone, measure none of these. Say what each part is, and the host keeps it 
 - **A floating button** over a scroller that ends the route: placed by the safe area, as `add` is below.
 - **A field:** nothing. The focused one is shown above the keyboard (`contract vocab keyboard-and-focus`).
 - **A list beside its detail:** `contract vocab navigationSplit`.
-- **Two parts that stand together** (lyrics and their player, a map and its list), either side of a fold: `contract vocab arrangement`.
-- **One thing a fold must not cross** (a timer, a dial): a box that starts at the viewport's left edge, padded there as `Timer` is below, whose fallback is its padding with no fold; for a fold across, a box at its top and `env(viewport-segment-top 0 1, 24px)`. Panes on either side: `contract vocab foldables`.
+- **Two parts that stand together** (lyrics and their player, a map and its list), either side of the hinge while the phone is open: `contract vocab arrangement`.
+- **One thing the hinge must not run through** (a timer, a dial): a box that starts at the viewport's left edge, padded there as `Timer` is below, which falls back to its padding where there is no hinge; for a hinge across the screen, a box at its top and `env(viewport-segment-top 0 1, 24px)`. Panes on either side: `contract vocab foldables`.
 - **A colour behind the bars:** the route's `background-color`. A picture there: `contract vocab safe-area`.
 
 ```contract
@@ -1840,7 +1851,7 @@ component Timer
         text (running ? "Pause" : "Start")
 ```
 
-A keyboard's height, a bar's, a device's name or its size is none of the layout's. Where there is an iPhone Duo simulator, `verify ios` also reads an iPhone app's first screen and the screens its passing tests end on in its poses, and with the keyboard up where a field raises one: `edge` is what lies outside the safe area, `fold` what a fold crosses, `covered` what lies under a bar or the keys.
+A keyboard's height, a bar's, a device's name or its size is none of the layout's. Where there is an iPhone Duo simulator, `verify ios` also reads an iPhone app's first screen and the screens its passing tests end on in its poses, and with the keyboard up where a field raises one: `edge` is what lies outside the safe area, `hinge` what the hinge runs through while the phone is half open, `covered` what lies under a bar or the keys.
 
 More: `contract vocab safe-area`, docs/recipes/foldables.md, docs/recipes/keyboard-and-focus.md
 

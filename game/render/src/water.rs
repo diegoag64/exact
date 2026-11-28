@@ -216,7 +216,8 @@ impl Passes {
         direct: bool,
         raster: bool,
     ) {
-        let pipeline = self.surface[usize::from(raster)][usize::from(direct)][usize::from(above)].as_ref();
+        let pipeline =
+            self.surface[usize::from(raster)][usize::from(direct)][usize::from(above)].as_ref();
         crate::counters::pipeline();
         pass.set_pipeline(pipeline.expect("prepared from this side"));
         pass.set_bind_group(0, scene, &[0]);
@@ -233,7 +234,9 @@ impl Passes {
     /// `water-fullscreen` (`xr-debug`) keeps the full-screen form to compare.
     pub fn raster(device: &wgpu::Device, immersive: bool) -> bool {
         immersive
-            && device.features().contains(wgpu::Features::DEPTH_CLIP_CONTROL)
+            && device
+                .features()
+                .contains(wgpu::Features::DEPTH_CLIP_CONTROL)
             && !exact_gpu::debug_switch("water-fullscreen")
     }
 
@@ -316,8 +319,15 @@ fn surface_pipeline(
             immediate_size: 0,
         });
         let targets = [Some(wgpu::ColorTargetState {
-            format: if direct { format } else { wgpu::TextureFormat::Rgba16Float },
-            blend: Some(wgpu::BlendState { color: over, alpha: keep }),
+            format: if direct {
+                format
+            } else {
+                wgpu::TextureFormat::Rgba16Float
+            },
+            blend: Some(wgpu::BlendState {
+                color: over,
+                alpha: keep,
+            }),
             write_mask: wgpu::ColorWrites::ALL,
         })];
         return crate::perf::pipeline(|| {

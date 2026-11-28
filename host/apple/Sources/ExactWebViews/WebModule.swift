@@ -372,6 +372,7 @@ final class WebViews: WebHosting {
     static let appleWords = [
         ("appleAllowsBackForwardNavigationGestures", "allowsBackForwardNavigationGestures"),
         ("appleAllowsMagnification", "allowsMagnification"),
+        ("appleMagnification", "magnification"),
         ("appleInactiveSchedulingPolicy", "inactiveSchedulingPolicy"),
     ]
 

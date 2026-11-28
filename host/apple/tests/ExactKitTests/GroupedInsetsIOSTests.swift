@@ -46,6 +46,63 @@ final class GroupedInsetsIOSTests: GroupedListFixture {
         XCTAssertEqual(l.collection.horizontalScrollIndicatorInsets, horizontal, "and gone with it")
     }
 
+    /// LLP 1123 D13: the side safe area a list reaches over insets its cards through its sections, as UIKit insets a
+    /// hand-built list's under that safe area, while its own safe area stays UIKit's: a reported one UIKit did not give
+    /// lays the list out again on each frame its bars move, against a person's pan.
+    func testTheSidesAListReachesOverInsetItsCardsAndLeaveItsSafeAreaUIKits() throws {
+        let p = presenter { self.model() }
+        defer { window.isHidden = true }
+        let l = try list(p)
+        let safe = l.collection.safeAreaInsets, card = try cell(p, 10).frame
+        l.collection.sideSafeArea = (0, 84)
+        l.collection.layoutIfNeeded()
+        XCTAssertEqual(l.collection.safeAreaInsets, safe, "UIKit's own")
+        XCTAssertEqual(try cell(p, 10).frame.maxX, card.maxX - max(0, 84 - safe.right), accuracy: 0.5, "the card clears the side")
+        XCTAssertEqual(l.collection.consumedBand[1], max(84, safe.right), "the depth the cards are inset from")
+        l.collection.sideSafeArea = (0, 0)
+        l.collection.layoutIfNeeded()
+        XCTAssertEqual(try cell(p, 10).frame.maxX, card.maxX, accuracy: 0.5, "and back")
+    }
+
+    func testSideReachOnlyRecomputesSectionsWhenItChangesTheEffectiveInset() {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 400))
+        let root = UIViewController()
+        window.rootViewController = root
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        root.additionalSafeAreaInsets.right = 84
+        var sectionLayouts = 0
+        let layout = UICollectionViewCompositionalLayout { _, environment in
+            sectionLayouts += 1
+            return .list(using: UICollectionLayoutListConfiguration(appearance: .insetGrouped), layoutEnvironment: environment)
+        }
+        let collection = GroupedCollectionView(frame: root.view.bounds, collectionViewLayout: layout)
+        let cell = UICollectionView.CellRegistration<UICollectionViewListCell, Int> { _, _, _ in }
+        let source = UICollectionViewDiffableDataSource<Int, Int>(collectionView: collection) { view, path, item in
+            view.dequeueConfiguredReusableCell(using: cell, for: path, item: item)
+        }
+        root.view.addSubview(collection)
+        var snapshot = NSDiffableDataSourceSnapshot<Int, Int>()
+        snapshot.appendSections([0])
+        snapshot.appendItems([1])
+        source.applySnapshotUsingReloadData(snapshot)
+        window.layoutIfNeeded()
+        let safe = collection.safeAreaInsets.right
+        XCTAssertGreaterThanOrEqual(safe, 84)
+        let initialLayouts = sectionLayouts
+        XCTAssertGreaterThan(initialLayouts, 0, "UIKit laid out the section")
+        collection.sideSafeArea = (0, safe - 1)
+        collection.layoutIfNeeded()
+        XCTAssertEqual(sectionLayouts, initialLayouts, "UIKit's own inset already clears the side")
+        collection.sideSafeArea = (0, safe + 1)
+        collection.layoutIfNeeded()
+        let extendedLayouts = sectionLayouts
+        XCTAssertGreaterThan(extendedLayouts, initialLayouts, "the extra point needs a section layout")
+        collection.sideSafeArea = (0, 0)
+        collection.layoutIfNeeded()
+        XCTAssertGreaterThan(sectionLayouts, extendedLayouts, "clearing the extra point also needs a layout")
+    }
+
     func testARowsMarginsAndBackgroundInsetsReachItsCellThroughItsUpdates() throws {
         let p = presenter { self.model() }
         defer { window.isHidden = true }

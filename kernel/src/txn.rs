@@ -16,7 +16,7 @@ use crate::sorted::SortedSet;
 
 use crate::arena::NodeArena;
 use crate::error::{ApplyError, StyleDomainError};
-use crate::generated::{InheritedStyle, NodeType, PropId, StyleMask};
+use crate::generated::{Display, InheritedStyle, NodeType, PropId, StyleMask};
 use crate::id::{NodeFlags, NodeKey, ViewId};
 use crate::layout::LayoutMirror;
 use crate::segmented;
@@ -26,7 +26,10 @@ mod animation;
 mod capacity;
 mod defaults;
 mod inherited;
+mod receipt;
 use inherited::{inherited_changed, propagate_inherited, written_direction};
+use receipt::rendered;
+pub use receipt::{CommitReceipt, Exit};
 mod text_style;
 
 /// The deepest a node may sit below the top of its tree (a root is 0). Layout
@@ -37,65 +40,6 @@ mod text_style;
 /// batch is refused with [`ApplyError::TooDeep`] instead of aborting the
 /// process on a stack overflow (20,000 levels did).
 pub const MAX_DEPTH: u32 = 128;
-
-/// A destroyed node that leaves with its `-exact-exit-animation` (LLP 1063): the
-/// root of a destroyed subtree whose parent survived the batch and that no
-/// batch-local creation owns, or a virtualized list's row whose item left the
-/// data. Its descendants go with it; their own exit rows never play.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Exit {
-    /// The destroyed node; it resolves to nothing after the commit.
-    pub key: NodeKey,
-    /// The surviving parent it leaves from.
-    pub parent: NodeKey,
-    /// Its `-exact-exit-animation` row as it was when destroyed.
-    pub animations: exact_motion::Animations,
-}
-
-/// What a committed batch changed. Every key is generation-checked; a
-/// `destroyed` key resolves to nothing after the commit by construction.
-#[derive(Debug, Clone, PartialEq, Default)]
-pub struct CommitReceipt {
-    /// Producer batch number from the frame (0 for structured apply without one).
-    pub batch: u64,
-    /// Root scope from the frame (0 = whole kernel).
-    pub root_id: u32,
-    /// The kernel epoch after this commit.
-    pub epoch: u64,
-    /// Nodes allocated by this batch and still live at its end, in allocation order.
-    pub created: Vec<NodeKey>,
-    /// Nodes destroyed by this batch (subtrees included), in destruction order.
-    pub destroyed: Vec<NodeKey>,
-    /// Live nodes whose props, style, or children changed (created nodes excluded).
-    pub touched: Vec<NodeKey>,
-    /// Whether any change can move geometry; a host that only paints may skip layout otherwise.
-    pub layout_invalidated: bool,
-    /// The destroyed nodes that play an exit before a host removes them.
-    pub exits: Vec<Exit>,
-    /// Shared-element names handed from a destroyed node to a created one
-    /// (LLP 1013.000 D3).
-    pub handoffs: Vec<crate::Handoff>,
-    /// Live nodes whose `display` changed: their descendants' animations
-    /// are cancelled or restarted (LLP 1055.000 D15; CSS Animations 1 §3).
-    pub display_changed: Vec<NodeKey>,
-    /// Consumers whose `animation-timeline` name resolves to another
-    /// timeline after this commit, beyond those it created or touched (LLP
-    /// 1057.003 D4): a node inserted, removed or moved, or a row set on
-    /// another node, can change what a name finds.
-    pub timelines: Vec<NodeKey>,
-    /// Live nodes a producer reused for a new mount (LLP 1078: a list row
-    /// rebound to another item), whatever else the batch did to them: to
-    /// motion and to a host's per-node state each is a node destroyed and
-    /// created by this commit (no transition from what it showed, its
-    /// animations from their start). The kernel never fills it; the producer
-    /// that rebinds does.
-    pub renewed: Vec<NodeKey>,
-    /// List rows that showed in their port for the first time since they
-    /// were mounted out of it ([`crate::Kernel::reveal`]; LLP 1055 D13):
-    /// the animations below them that waited for that start now. The
-    /// producer that mounts rows fills it, as it does `renewed`.
-    pub revealed: Vec<NodeKey>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -737,6 +681,7 @@ pub(crate) fn continue_document(
                     }
                     let starts = defaults::before_prop(arena, slot, *prop);
                     let font = relative::before_prop(arena, slot);
+                    let was_out_of_flow = text_style::is_out_of_flow(arena, slot);
                     let old = arena.set_prop(slot, *prop, value.clone());
                     if *prop == PropId::TestId {
                         selectors.update(
@@ -758,6 +703,7 @@ pub(crate) fn continue_document(
                     let changed = (*prop, old.as_ref());
                     receipt.layout_invalidated |=
                         crate::style::top_layer::prop_changed(arena, layout, slot, changed);
+                    text_style::flow_changed(arena, slot, was_out_of_flow);
                     if matches!(
                         prop,
                         PropId::Type | PropId::AccessibilityRole | PropId::Href
@@ -791,6 +737,7 @@ pub(crate) fn continue_document(
                     let slot = live_slot(arena, op_index, *id)?;
                     let starts = defaults::before_prop(arena, slot, *prop);
                     let font = relative::before_prop(arena, slot);
+                    let was_out_of_flow = text_style::is_out_of_flow(arena, slot);
                     if let Some(old) = arena.remove_prop(slot, *prop) {
                         if *prop == PropId::TestId {
                             selectors.update(slot, old.as_str(), None);
@@ -803,6 +750,7 @@ pub(crate) fn continue_document(
                         let changed = (*prop, Some(&old));
                         receipt.layout_invalidated |=
                             crate::style::top_layer::prop_changed(arena, layout, slot, changed);
+                        text_style::flow_changed(arena, slot, was_out_of_flow);
                         if matches!(
                             prop,
                             PropId::Type | PropId::AccessibilityRole | PropId::Href | PropId::Value
@@ -847,8 +795,10 @@ pub(crate) fn continue_document(
                     let before = crate::kernel::owner::before_style(arena, slot, changed);
                     let excluded = crate::flow::is_exclusion(arena, slot);
                     let named = arena.named_text_style(slot).is_some();
+                    let was_out_of_flow = text_style::is_out_of_flow(arena, slot);
                     arena.patch_style(slot, patch);
                     arena.update_exclusion_count(slot, excluded);
+                    text_style::flow_changed(arena, slot, was_out_of_flow);
                     if changed.has(crate::StyleId::Display) {
                         receipt.display_changed.push(arena.key(slot));
                     }
@@ -875,8 +825,10 @@ pub(crate) fn continue_document(
                     let before = crate::kernel::owner::before_style(arena, slot, changed);
                     let excluded = crate::flow::is_exclusion(arena, slot);
                     let named = arena.named_text_style(slot).is_some();
+                    let was_out_of_flow = text_style::is_out_of_flow(arena, slot);
                     arena.clear_style(slot, *mask, *written);
                     arena.update_exclusion_count(slot, excluded);
+                    text_style::flow_changed(arena, slot, was_out_of_flow);
                     if changed.has(crate::StyleId::Display) {
                         receipt.display_changed.push(arena.key(slot));
                     }
@@ -924,7 +876,17 @@ pub(crate) fn continue_document(
                     let written = written_direction(arena, reached.iter().map(|r| r.0));
                     for o in &old {
                         if !retained.contains(o) {
+                            // @ref LLP 1003.003 D6 — every child detached,
+                            // which motion reads as the commit leaves it: a
+                            // leaf this batch made is synced whole as created
+                            if !created.contains(o) || !arena.children(*o).is_empty() {
+                                receipt.reparented.push(arena.key(*o));
+                            }
                             arena.set_parent(*o, None);
+                            // One that leaves a box a bar keeps the room of takes its space back
+                            if crate::kernel::is_room(arena, slot) {
+                                crate::kernel::restyle_cover(arena, layout, &[*o]);
+                            }
                             // A producer detaches before it destroys: the
                             // parent an exit leaves from is the one it had.
                             if leaving_with(arena, *o).is_some() {
@@ -945,11 +907,35 @@ pub(crate) fn continue_document(
                             (n, before, arena.default_context(n))
                         })
                         .collect();
+                    // @ref LLP 1003.003 D6 — a node brought from elsewhere
+                    // whose subtree this op takes into or out of being
+                    // rendered. Until a batch has changed what renders (a
+                    // `display`, a detach, a root), each node renders as the
+                    // engine last heard; after, the op's view may not be
+                    // what the engine heard, so every such node is observed
+                    // as the commit leaves it.
+                    let shaken =
+                        !receipt.reparented.is_empty() || !receipt.display_changed.is_empty();
+                    let slot_rendered = !shaken && rendered(arena, slot);
+                    for (m, ..) in &moved {
+                        // A node this batch made is synced whole as created,
+                        // but what it holds may not be
+                        if created.contains(m) && arena.children(*m).is_empty() {
+                            continue;
+                        }
+                        let now = slot_rendered && arena.style(*m).display != Display::None;
+                        if shaken || rendered(arena, *m) != now {
+                            receipt.reparented.push(arena.key(*m));
+                        }
+                    }
                     // Each arriving child leaves its previous parent, and each
                     // such parent is pruned once — one pass and one engine update
                     // however many of its children moved here.
                     let mut sources = Vec::new();
                     let mut seen: IdSet<u32> = IdSet::default();
+                    // A child that comes into a box a bar keeps the room of, or
+                    // leaves one, takes no space there or takes it back
+                    let rooms = crate::kernel::room_moves(arena, slot, &new);
                     for n in &new {
                         if let Some(p) = arena.parent(*n) {
                             if p != slot && seen.insert(p) {
@@ -958,6 +944,7 @@ pub(crate) fn continue_document(
                         }
                         arena.set_parent(*n, Some(slot));
                     }
+                    crate::kernel::restyle_cover(arena, layout, &rooms);
                     for (p, context) in sources {
                         if arena.node_type(p) == NodeType::Text {
                             invalidate_text(arena, layout, p);
@@ -1011,6 +998,7 @@ pub(crate) fn continue_document(
                     let slot = live_slot(arena, op_index, *id)?;
                     if !arena.is_root(slot) {
                         arena.set_root(slot, true);
+                        receipt.reparented.push(arena.key(slot));
                         // A root's engine style differs from a child's (a static
                         // root is positioned): re-derive it now that the node is one.
                         if let Some(node) = arena.taffy(slot) {
@@ -1109,6 +1097,13 @@ pub(crate) fn finish_document(arena: &NodeArena, commit: DocumentCommit) -> Comm
     } else {
         receipt
             .display_changed
+            .retain(|key| arena.resolve(*key).is_some());
+    }
+    if !receipt.reparented.is_empty() {
+        receipt.reparented.sort_unstable();
+        receipt.reparented.dedup();
+        receipt
+            .reparented
             .retain(|key| arena.resolve(*key).is_some());
     }
     receipt
@@ -1466,7 +1461,7 @@ pub(crate) fn style_changed(
     symbol_font_changed(arena, slot, mask, receipt);
     if !mask.minus(StyleMask::LAYOUT).is_empty() {
         arena.mark_export_dirty(slot, NodeFlags::PAINT_DIRTY);
-        if !mask.intersects(StyleMask::TEXT) {
+        if !mask.intersects(StyleMask::TEXT) && !text_style::only_translates(arena, slot, mask) {
             arena.revise_text(slot, false);
         }
     }

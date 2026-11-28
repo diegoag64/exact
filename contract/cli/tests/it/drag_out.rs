@@ -90,6 +90,11 @@ fn each_argument_binds_its_prop_and_a_bound_draggable_follows_state() {
         card,
         (Some(true), "".into(), "".into(), "assets/1016.jpg".into())
     );
+    assert_eq!(
+        held(&r, "card-1016", PropId::DataTransferNames).as_deref(),
+        Some("Mount Fuji.jpg"),
+        "named by the card's title, the photo's suffix added (D14)"
+    );
     let row = (
         "Mount Fuji".to_string(),
         "https://example.com/landmarks/1016".to_string(),
@@ -230,11 +235,20 @@ fn each_refusal_names_what_to_write_instead() {
             "type-data-transfer",
             "a picture of an element is `share`'s",
         ),
-        ("drag=go", "lower-handler-later", "`drag` is not heard yet"),
+        (
+            "draggable=true dataTransfer=DataTransfer(text=\"a\") drag=go",
+            "lower-handler-later",
+            "Exact does not expose a drag's continuous motion at its source",
+        ),
         (
             "dragend=go",
-            "lower-handler-later",
-            "`dragend` is not heard yet",
+            "lower-drag-event-source",
+            "`dragend` is heard where a drag begins, on a node that declares `draggable`",
+        ),
+        (
+            "draggable=false dragstart=go",
+            "lower-drag-event-source",
+            "has `draggable=false`, so it never drags",
         ),
     ] {
         let (got, message) = refused(&node(attrs)).unwrap_or_default();
@@ -252,6 +266,19 @@ fn each_refusal_names_what_to_write_instead() {
         "{message}"
     );
     assert!(refused(&node("draggable=false")).is_none());
+    // LLP 1094.000 D16: a drag's start and end are heard where it begins, by a literal or a bound `draggable`
+    for attrs in [
+        "draggable=true dataTransfer=DataTransfer(text=\"a\") dragstart=go dragend=go",
+        "draggable=(n == 0) dataTransfer=DataTransfer(text=\"a\") dragstart=go",
+    ] {
+        assert!(refused(&node(attrs)).is_none(), "{attrs}");
+    }
+    let field = "component A\n  state n = 0\n  action go\n    n = 1\n  view\n    input draggable=true dataTransfer=DataTransfer(text=\"a\") dragstart=go\n";
+    assert_eq!(
+        refused(field).unwrap_or_default().0,
+        "lower-attr-tag",
+        "an ineligible tag is refused as before"
+    );
     // `draggable=false` drags nothing, so a gesture beside it claims nothing.
     assert!(refused(&node("draggable=false pan=moved")).is_none());
     let within = |body: &str| format!("component A\n  view\n    {body}\n");
@@ -306,4 +333,63 @@ fn expect_drag_reads_each_form_and_names_them_when_it_cannot() {
         "test \"drag\"\n  expect drag \"card\" missing \"text/plain\" == \"a\"\n"
     )
     .is_err());
+}
+
+#[test]
+fn scroll_into_view_commits_admit_drag_data_on_action_and_materialized_rows() {
+    let src = r#"component App
+  state badUrl = "https://example.com/ok"
+  state badFiles = ["assets/ok.jpg"]
+  state items = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35]
+  action poisonAndSeek
+    badUrl = "javascript:alert(1)"
+    badFiles = ["Info.plist", "app:/secret/key.txt"]
+    scrollIntoView("feed", 30, block="start")
+  view
+    column height=400 width=300
+      column draggable=true dataTransfer=DataTransfer(url=badUrl, files=badFiles) testId="outside"
+        text "outside"
+      list id="feed" virtualized=true height=200 width=300 estimated-item-height=50 testId="feed"
+        for i in items key=i
+          column height=50 draggable=true dataTransfer=DataTransfer(url=(i >= 30 ? "file:///etc/passwd" : "https://example.com/ok"), files=(i >= 30 ? ["Info.plist", "assets/ok.jpg"] : ["assets/ok.jpg"])) testId=`row-${i}`
+            text `${i}`
+"#;
+    let mut r = boot_source(src, Platform::Macos, "");
+    assert_eq!(
+        held(&r, "outside", PropId::DataTransferUrl).as_deref(),
+        Some("https://example.com/ok")
+    );
+    r.act("poisonAndSeek", vec![]).unwrap();
+    assert_eq!(held(&r, "outside", PropId::DataTransferUrl), None);
+    assert_eq!(held(&r, "outside", PropId::DataTransferFiles), None);
+    assert_eq!(held(&r, "row-30", PropId::DataTransferUrl), None);
+    assert_eq!(
+        held(&r, "row-30", PropId::DataTransferFiles).as_deref(),
+        Some("assets/ok.jpg")
+    );
+    let logged = refusals(&r);
+    assert!(
+        logged.iter().any(|l| l.contains("Info.plist")),
+        "{logged:?}"
+    );
+    assert!(
+        logged.iter().any(|l| l.contains("app:/secret/key.txt")),
+        "{logged:?}"
+    );
+    assert!(
+        logged
+            .iter()
+            .any(|l| l.contains("not an absolute http: or https: URL")),
+        "{logged:?}"
+    );
+
+    // Direct scroll_into_view_at materializing row 35 also admits drag props.
+    let feed = view(&r, "feed");
+    r.scroll_into_view_at(feed, "35", "start", "nearest")
+        .unwrap();
+    assert_eq!(held(&r, "row-35", PropId::DataTransferUrl), None);
+    assert_eq!(
+        held(&r, "row-35", PropId::DataTransferFiles).as_deref(),
+        Some("assets/ok.jpg")
+    );
 }

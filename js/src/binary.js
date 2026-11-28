@@ -143,6 +143,26 @@
       return "exactIdleTimeout must be an integer number of milliseconds from 1 to 3600000";
     return taken ? undefined : "exactIdleTimeout: only a WebSocket, event or byte stream takes an idle timeout";
   }
+  // `exactStreamOpen` (LLP 1016.000 D12): true when an HTTP(S) event or byte stream asks for an `open` event
+  // carrying the 2xx response status and immutable Headers, nothing when absent/false, or a refusal's words.
+  function streamOpenOf(init, stream, url, listen, own, child) {
+    var open = init ? init.exactStreamOpen : undefined;
+    if (open === undefined || open === false) return undefined;
+    if (open !== true) return "exactStreamOpen is true or false";
+    if (!stream)
+      return "exactStreamOpen reports an HTTP stream's response head on open: give exactStream too";
+    var text = String(url);
+    if (
+      listen ||
+      own ||
+      child ||
+      init.exactLongPoll !== undefined ||
+      init.exactUploadProgress === true ||
+      (/^[a-z][a-z0-9+.-]*:/i.test(text) && !/^https?:/i.test(text))
+    )
+      return "exactStreamOpen: only an HTTP event or byte stream takes exactStreamOpen";
+    return true;
+  }
   // An upload's event for its mapper, as XMLHttpRequest names them: `progress` for the host's count of the body's
   // bytes sent, and `load` for the reply, whatever its status, which ends the stream.
   function uploadEvent(o) {
@@ -699,7 +719,7 @@
         ? "text/plain;charset=UTF-8"
         : null;
   }
-  function requestBody(raw, method, headers) {
+  function requestBody(raw, method, headers, blob) {
     if (isReadableStream(raw))
       throw new TypeError(
         "fetch: ReadableStream request bodies are unavailable; collect the bytes with new Response(body).arrayBuffer() first"
@@ -707,6 +727,11 @@
     // Fetch's Request refuses a body on a GET or HEAD, an empty one too.
     if (raw != null && (method === "GET" || method === "HEAD"))
       throw new TypeError("fetch: a " + method + " request cannot have a body");
+    var bf = blob && raw != null ? blob.extractBody(raw) : null;
+    if (bf) {
+      if (bf.type && !headers.has("content-type")) headers.set("content-type", bf.type);
+      return { bytes: bf.bytes, text: "" };
+    }
     // A BufferSource goes as bytes (LLP 1069.002 D4); forms use their internal list, never an app's toString.
     var bytes = bufferSourceBytes(raw, "fetch"),
       form = !bytes && isForm(raw);
@@ -728,7 +753,7 @@
   // redirect's and a fetched reply's take no change ("immutable"). `to` is the
   // fetch's `exactBodyTo` path; the reply's `exactBodyTo` is `{path, bytes}`
   // once the host wrote the body there.
-  function responses() {
+  function responses(blob) {
     // ibex2's Headers takes Fetch's guard, through the hooks the runtime publishes for this prelude alone; a browser
     // realm's (the wasm target's module-glue.js and module-worker.js) are the platform's, which take none from data
     // code, so there they go unguarded
@@ -766,7 +791,13 @@
       return s;
     }
     function headersOf(init, kind) {
-      return guard(new Headers(init), kind);
+      var headers = new Headers(init);
+      if (kind === "immutable") {
+        // Forbidden response-header names (WHATWG Fetch §2.2.2), matching Response().
+        headers["delete"]("set-cookie");
+        headers["delete"]("set-cookie2");
+      }
+      return guard(headers, kind);
     }
     // A copy of a response's headers, as Fetch copies its header list: through the platform's own iteration, never
     // an iterator an app gives the headers
@@ -910,12 +941,14 @@
     function Response(body, init) {
       if (!new.target) throw new TypeError("Response must be constructed with new");
       var api = "new Response()",
-        form = isForm(body),
-        stream = isReadableStream(body);
-      var kept = body == null || form || stream || isBufferSource(body, api) ? body : string(body, api),
+        bf = blob && body != null ? blob.extractBody(body) : null,
+        form = !bf && isForm(body),
+        stream = !bf && isReadableStream(body);
+      var kept = bf || body == null || form || stream || isBufferSource(body, api) ? body : string(body, api),
         options = initOf(init, api);
-      var source =
-        kept == null
+      var source = bf
+        ? bf.bytes
+        : kept == null
           ? null
           : stream
             ? new StreamBody(kept)
@@ -924,7 +957,7 @@
               : typeof kept === "string"
                 ? kept
                 : bufferSourceBytes(kept, api);
-      var type = bodyType(kept, form);
+      var type = bf ? bf.type : bodyType(kept, form);
       states.set(this, initialized(source, type, options, api));
     }
     ["status", "statusText", "headers", "exactBodyTo"].forEach(function (name) {
@@ -980,6 +1013,26 @@
     Response.prototype.arrayBuffer = function () {
       return consumed(this, function (body) {
         return body instanceof Uint8Array ? copyBytes(body, "Response.arrayBuffer()") : fromBase64(body.base64).buffer;
+      });
+    };
+    Response.prototype.bytes = function () {
+      return consumed(this, function (body) {
+        return new Uint8Array(
+          body instanceof Uint8Array ? copyBytes(body, "Response.bytes()") : fromBase64(body.base64).buffer
+        );
+      });
+    };
+    Response.prototype.blob = function () {
+      var s;
+      try {
+        s = state(this);
+      } catch (e) {
+        return Promise.reject(e);
+      }
+      var type = (s.headers.get("content-type") || "").trim();
+      return consumed(this, function (body) {
+        var buf = body instanceof Uint8Array ? copyBytes(body, "Response.blob()") : fromBase64(body.base64).buffer;
+        return new global.Blob([buf], { type: type });
       });
     };
     // A body UTF-8 decoded, a leading byte order mark dropped (Fetch's "UTF-8 decode")
@@ -1052,7 +1105,13 @@
         exactBodyTo: written === undefined ? null : { path: to, bytes: written },
       });
     }
-    return { Response: Response, reply: reply };
+    return {
+      Response: Response,
+      reply: reply,
+      headers: function (pairs) {
+        return headersOf(pairs, "immutable");
+      },
+    };
   }
   function FetchError(f) {
     Object.defineProperties(this, {
@@ -1098,6 +1157,7 @@
     longPollOf: longPollOf,
     uploadOf: uploadOf,
     idleRefusal: idleRefusal,
+    streamOpenOf: streamOpenOf,
     socketProtocols: socketProtocols,
     uploadEvent: uploadEvent,
     presence: presence,

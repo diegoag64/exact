@@ -1052,13 +1052,13 @@ impl Input {
             event,
             InputEvent::Wheel { .. } | InputEvent::Message { .. } | InputEvent::Xr { .. }
         ) || (matches!(
-                event,
-                InputEvent::Pointer {
-                    phase: PointerPhase::Move,
-                    buttons,
-                    ..
-                } if buttons & 7 == self.mouse_buttons()
-            ) && self.contacts.is_empty())
+            event,
+            InputEvent::Pointer {
+                phase: PointerPhase::Move,
+                buttons,
+                ..
+            } if buttons & 7 == self.mouse_buttons()
+        ) && self.contacts.is_empty())
             || self.actions.is_none()
             || matches!(&event, InputEvent::Key { code, down, .. } if self.keys.contains(code) == *down)
         {

@@ -373,7 +373,12 @@ impl Cull {
     /// `[index count, instances, first index, base vertex, first instance]`,
     /// the first few, and the instance totals per view. Blocking: once only.
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn debug_read(&self, device: &wgpu::Device, queue: &wgpu::Queue, slot_list: &[u32]) -> String {
+    pub fn debug_read(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        slot_list: &[u32],
+    ) -> String {
         if self.direct || self.groups.is_empty() {
             return "no indirect draws".into();
         }
@@ -407,23 +412,31 @@ impl Cull {
             read.unmap();
             Some(words)
         };
-        let Some(words) = read_words(&self.indirect.raw, u64::from(VIEWS) * self.groups.len() as u64 * 20) else {
+        let Some(words) = read_words(
+            &self.indirect.raw,
+            u64::from(VIEWS) * self.groups.len() as u64 * 20,
+        ) else {
             return "read back failed".into();
         };
         // The camera's compacted lists: each kept slot must be one of its group's.
-        let compacted = read_words(&self.compacted.raw, self.compacted.raw.size()).unwrap_or_default();
+        let compacted =
+            read_words(&self.compacted.raw, self.compacted.raw.size()).unwrap_or_default();
         let mut members = (0usize, 0usize);
         let mut samples = Vec::new();
         for (g, group) in self.groups.iter().enumerate() {
             let count = words[g * 5 + 1] as usize;
             let start = self.regions[g] as usize;
-            let own = &slot_list[(group.range.start as usize).min(slot_list.len())..(group.range.end as usize).min(slot_list.len())];
+            let own = &slot_list[(group.range.start as usize).min(slot_list.len())
+                ..(group.range.end as usize).min(slot_list.len())];
             for at in start..start + count {
                 let value = compacted.get(at).copied().unwrap_or(u32::MAX);
                 members.1 += 1;
                 members.0 += usize::from(own.contains(&value));
                 if samples.len() < 6 {
-                    samples.push(format!("g{g}:{value:#x}/{:#x}", own.first().copied().unwrap_or(0)));
+                    samples.push(format!(
+                        "g{g}:{value:#x}/{:#x}",
+                        own.first().copied().unwrap_or(0)
+                    ));
                 }
             }
         }
@@ -439,7 +452,14 @@ impl Cull {
             .collect();
         // The camera's heaviest groups by triangles: [group, triangles, index count, instances].
         let mut heavy: Vec<(usize, u64, u32, u32)> = (0..groups)
-            .map(|g| (g, u64::from(words[g * 5]) / 3 * u64::from(words[g * 5 + 1]), words[g * 5], words[g * 5 + 1]))
+            .map(|g| {
+                (
+                    g,
+                    u64::from(words[g * 5]) / 3 * u64::from(words[g * 5 + 1]),
+                    words[g * 5],
+                    words[g * 5 + 1],
+                )
+            })
             .collect();
         heavy.sort_by(|a, b| b.1.cmp(&a.1));
         let total: u64 = heavy.iter().map(|h| h.1).sum();

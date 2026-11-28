@@ -222,7 +222,7 @@ pub(crate) fn unseen_in_grouped(checking: &Checking<'_>, styles: &[StyleDecl]) -
             .map(|s| s.attrs.as_slice())
     };
     let grouped = |attrs: &[Attr]| {
-        let class = crate::class::rows(attrs, &style, &[]).ok().flatten();
+        let class = crate::class::rows(attrs, &style).ok().flatten();
         let read: Vec<Attr> = class
             .map(|(_, rows)| rows)
             .unwrap_or_default()

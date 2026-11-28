@@ -110,19 +110,21 @@ impl Pipelines {
         p: &pipeline::Pipelines,
         layout: Option<&wgpu::BindGroupLayout>,
     ) -> Self {
-        let layout = layout.cloned().unwrap_or_else(|| d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("game outline"),
-            entries: &[0].map(|binding| wgpu::BindGroupLayoutEntry {
-                binding,
-                visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
-                count: None,
-            }),
-        }));
+        let layout = layout.cloned().unwrap_or_else(|| {
+            d.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("game outline"),
+                entries: &[0].map(|binding| wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }),
+            })
+        });
         let source = pipeline::outline_source();
         let shader = d.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("game outline"),

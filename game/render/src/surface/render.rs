@@ -61,6 +61,8 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Default
             resting: false,
             still: false,
             poll_input: false,
+            draw_demand: None,
+            trace_picture: None,
             idle_picture: None,
             idle_tick: None,
             samples: None,
@@ -220,6 +222,55 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
     pub fn render_hooks(&self) -> &H {
         &self.hooks
     }
+    fn ensure_renderer(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        format: wgpu::TextureFormat,
+        seekable: bool,
+        already_released: bool,
+        immersive: bool,
+    ) {
+        if self.format == Some(format) && self.render.is_some() {
+            return;
+        }
+        if self.render.is_some() {
+            self.release_renderer();
+        } else if !already_released {
+            self.gpu_timing = None;
+            self.hook_clock.reset();
+            self.hooks.device_lost();
+            self.ready_work = None;
+        }
+        let (rung, samples) =
+            self.sim
+                .as_ref()
+                .map_or((self.rung, exact_game::SceneSamples::One), |sim| {
+                    (
+                        frame_rung(self.rung, immersive, G::quality(sim.args())),
+                        G::samples(sim.args()),
+                    )
+                });
+        self.perf.pipeline_ready = crate::perf::timing().then_some(0.);
+        self.perf.pipeline_ready_seekable = seekable;
+        self.render = Some((
+            crate::renderer::RendererWithAssets::<ASSETS>::with_sample_count(
+                device,
+                queue,
+                format,
+                *self.samples.insert(crate::quality::samples(rung, samples)),
+                G::DEPTH_PREPASS,
+            )
+            .with_matte_models(G::MATTE_MODELS),
+            {
+                let mut feed = Feed::default();
+                feed.share_attachment_diagnostics(self.placed.attachments.diagnostics.clone());
+                feed
+            },
+        ));
+        self.format = Some(format);
+        self.dirty = true;
+    }
     /// `Surface::prepare_assets` under whatever pipeline timing is on.
     pub(super) fn prepare_now(
         &mut self,
@@ -241,6 +292,8 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         if !self.assets_dirty && self.format == Some(format) && !self.asset_work() {
             return;
         }
+        let released =
+            self.render.is_some() && self.format != Some(format) && self.release_renderer();
         let Some(sim) = &mut self.sim else { return };
         sim.refresh_presented();
         let mut textures = sim.take_textures();
@@ -252,36 +305,21 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
             return;
         }
         if self.format != Some(format) {
-            self.gpu_timing = None;
-            self.hook_clock.reset();
-            self.hooks.device_lost();
-            self.ready_work = None;
-            self.perf.pipeline_ready = crate::perf::timing().then_some(0.);
-            self.perf.pipeline_ready_seekable = if self.perf.rendering {
+            let seekable = if self.perf.rendering {
                 !self.perf.live
             } else {
                 self.seekable
             };
-            self.render = Some((
-                crate::renderer::RendererWithAssets::<ASSETS>::with_sample_count(
-                    device,
-                    queue,
-                    format,
-                    *self.samples.insert(crate::quality::samples(
-                        frame_rung(self.rung, self.xr_format.is_some(), G::quality(sim.args())),
-                        G::samples(sim.args()),
-                    )),
-                    G::DEPTH_PREPASS,
-                )
-                .with_matte_models(G::MATTE_MODELS),
-                {
-                    let mut feed = Feed::default();
-                    feed.share_attachment_diagnostics(self.placed.attachments.diagnostics.clone());
-                    feed
-                },
-            ));
-            self.format = Some(format);
+            self.ensure_renderer(
+                device,
+                queue,
+                format,
+                seekable,
+                released,
+                self.xr_format.is_some(),
+            );
         }
+        let sim = self.sim.as_mut().unwrap();
         let (renderer, _feed) = self.render.as_mut().unwrap();
         let live = sim.presentation_assets().map(str::to_owned).collect();
         // Under the live clock what the world does not present (`Sim::presents`:
@@ -415,6 +453,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         let frame_start = period.map(|_| Stamp::now());
         let measure = self.perf.measure_frame;
         self.frame_ready = false;
+        self.draw_demand = None;
         if !self.storage_fits(device) {
             return false;
         }
@@ -518,33 +557,9 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         self.look.points = (frame.width, frame.height);
         self.look.held = Some(*frame);
         if self.format != Some(format) {
-            self.gpu_timing = None;
-            self.hook_clock.reset();
-            self.hooks.device_lost();
-            self.ready_work = None;
-            self.render = Some((
-                crate::renderer::RendererWithAssets::<ASSETS>::with_sample_count(
-                    device,
-                    queue,
-                    format,
-                    *self.samples.insert(crate::quality::samples(
-                        frame_rung(self.rung, xr.is_some(), G::quality(sim.args())),
-                        G::samples(sim.args()),
-                    )),
-                    G::DEPTH_PREPASS,
-                )
-                .with_matte_models(G::MATTE_MODELS),
-                {
-                    let mut feed = Feed::default();
-                    feed.share_attachment_diagnostics(self.placed.attachments.diagnostics.clone());
-                    feed
-                },
-            ));
-            self.format = Some(format);
-            self.dirty = true;
-            self.perf.pipeline_ready = crate::perf::timing().then_some(0.);
-            self.perf.pipeline_ready_seekable = frame.seekable;
+            self.ensure_renderer(device, queue, format, frame.seekable, false, xr.is_some());
         }
+        let sim = self.sim.as_mut().unwrap();
         if ASSETS {
             if let Some((renderer, _)) = &mut self.render {
                 for (name, model) in &mut renderer.models.loaded {
@@ -689,11 +704,20 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         // headset draws faster, and what the reference space carries (the
         // hands' panels, under an entity at the stage's inverse, drawn a
         // tick late) shakes against it.
-        let xr_stage = xr.is_some().then(|| blend_stage(&mut self.xr_stages, G::xr_stage(sim.world(), sim.args()), sim.world().tick(), sim.alpha()));
+        let xr_stage = xr.is_some().then(|| {
+            blend_stage(
+                &mut self.xr_stages,
+                G::xr_stage(sim.world(), sim.args()),
+                sim.world().tick(),
+                sim.alpha(),
+            )
+        });
         if let Some(rung) = frame_rung(self.rung, xr.is_some(), G::quality(sim.args())) {
             let authored = sim.world().try_resource::<exact_game::Shadows>().is_some();
             // The immersive profile fits the sun's shadow to the game's stage.
-            let stage = rung.xr.then(|| xr_stage.unwrap_or_else(|| G::xr_stage(sim.world(), sim.args())));
+            let stage = rung
+                .xr
+                .then(|| xr_stage.unwrap_or_else(|| G::xr_stage(sim.world(), sim.args())));
             rung.clamp_staged(&mut input, authored, stage.as_ref());
             renderer.set_water_effects(rung.water_effects());
             renderer.set_immersive(rung.xr);
@@ -740,7 +764,11 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         renderer
             .quads
             .children(&renderer.device, &renderer.queue, &self.placed);
-        let idle_input = self.poll_input && !frame.seekable && sim.world_render_idle();
+        let polling = self.poll_input && !frame.seekable;
+        let check_world = !frame.seekable && (polling || !sim.input_pending());
+        let demand = check_world.then(|| sim.render_demand()).flatten();
+        let idle_world = check_world && demand.is_none();
+        let idle_input = polling && idle_world;
         if self.poll_input && H::ENABLED {
             if idle_input || G::paused(sim.args()) {
                 renderer
@@ -885,7 +913,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         retain_primes(&mut self.render, &mut self.placed, false);
         self.dirty = false;
         // At rest once idle at two ticks: this frame drew between idle poses.
-        let rests = if idle_input || (!self.poll_input && !frame.seekable && sim.render_idle()) {
+        let rests = if idle_world {
             let tick = sim.world().tick();
             tick > *self.idle_tick.get_or_insert(tick)
         } else {
@@ -898,6 +926,13 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         if self.resting {
             self.perf.submitted_live = None;
         }
+        self.draw_demand = if !frame.seekable && wants && !rests {
+            demand.or(idle_world.then_some("settling"))
+        } else if asset_work {
+            Some("asset-work")
+        } else {
+            None
+        };
         (wants && !rests) || hooks || asset_work
     }
 
@@ -946,7 +981,12 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
                 .idle_hook_reads
                 .as_ref()
                 .is_some_and(|reads| reads.borrow().iter().all(|read| !read.changed(world)));
-        if (G::paused(sim.args()) || sim.world_render_idle())
+        self.draw_demand = if G::paused(sim.args()) {
+            None
+        } else {
+            sim.render_demand()
+        };
+        if self.draw_demand.is_none()
             && self
                 .idle_picture
                 .as_ref()
@@ -968,6 +1008,54 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> WorldSurface<G, 
         self.resting = false;
         self.idle_tick = None;
         Ready(true)
+    }
+
+    pub(super) fn remember_traced_picture(&mut self, traced: bool) {
+        if !traced {
+            self.trace_picture = None;
+            return;
+        }
+        if let (Some(sim), Some((_, feed))) = (&self.sim, &self.render) {
+            let next = feed.idle_picture(sim.world());
+            if let Some(previous) = &mut self.trace_picture {
+                **previous = next;
+            } else {
+                self.trace_picture = Some(Box::new(next));
+            }
+        }
+    }
+
+    pub(super) fn describe_draw(&self, input_poll: bool, record: &mut dyn FnMut(&str)) {
+        if let Some(why) = self.draw_demand {
+            record(why);
+        }
+        let needs = self.hooks.needs();
+        if needs.contains(crate::Needs::ANIMATE) {
+            record("hook-animation");
+        }
+        if preparing(needs, self.seekable) {
+            record("hook-pending");
+        }
+        let Some(sim) = &self.sim else { return };
+        if sim.input_pending() {
+            record("input-queued");
+        }
+        if self.generation != sim.generation() || self.picture.0 != sim.picture_generation() {
+            record("world-replaced");
+        }
+        if ASSETS && self.models_seen != sim.world().model_revision() {
+            record("assets");
+        }
+        if let Some((renderer, feed)) = &self.render {
+            if let Some(old) = self.idle_picture.as_ref().or(self.trace_picture.as_deref()) {
+                old.changed_storages(&feed.idle_picture(sim.world()), record);
+            }
+            if let Some(reads) = renderer.idle_hook_reads.as_ref().filter(|_| input_poll) {
+                for read in reads.borrow().iter().filter(|r| r.changed(sim.world())) {
+                    record(&format!("hook:{}", read.name));
+                }
+            }
+        }
     }
 
     /// A display frame the module does not render: run the ticks due by
@@ -1101,7 +1189,12 @@ pub(super) fn frame_rung(
 /// `alpha` of the way from the one to the other, as `Sim::alpha` places the
 /// world's transforms. A tick skipped, or none seen yet, starts again at
 /// `now`.
-fn blend_stage(seen: &mut Option<(u64, exact_game::XrStage, exact_game::XrStage)>, now: exact_game::XrStage, tick: u64, alpha: f32) -> exact_game::XrStage {
+fn blend_stage(
+    seen: &mut Option<(u64, exact_game::XrStage, exact_game::XrStage)>,
+    now: exact_game::XrStage,
+    tick: u64,
+    alpha: f32,
+) -> exact_game::XrStage {
     let (before, at) = match *seen {
         Some((t, before, at)) if t == tick => (before, at),
         Some((t, _, at)) if t + 1 == tick => (at, now),
@@ -1109,7 +1202,11 @@ fn blend_stage(seen: &mut Option<(u64, exact_game::XrStage, exact_game::XrStage)
     };
     // The game's answer this frame is its latest: one asked again in the
     // same tick may differ only if the game changed it outside a tick.
-    let at = if seen.is_some_and(|(t, _, _)| t == tick) { now } else { at };
+    let at = if seen.is_some_and(|(t, _, _)| t == tick) {
+        now
+    } else {
+        at
+    };
     *seen = Some((tick, before, at));
     before.lerp(&at, alpha)
 }
@@ -1120,7 +1217,12 @@ mod stage_tests {
     use exact_game::{Vec3, XrStage};
 
     fn at(x: f32, yaw: f32) -> XrStage {
-        XrStage { position: Vec3::new(x, 1.0, 0.0), yaw, scale: 0.05, ..XrStage::default() }
+        XrStage {
+            position: Vec3::new(x, 1.0, 0.0),
+            yaw,
+            scale: 0.05,
+            ..XrStage::default()
+        }
     }
 
     #[test]
@@ -1131,8 +1233,14 @@ mod stage_tests {
         // The next tick: from the one before toward it, by the frame's alpha.
         let half = blend_stage(&mut seen, at(1.0, 0.0), 11, 0.5);
         assert!((half.position.x - 0.5).abs() < 1e-6, "{half:?}");
-        assert_eq!(blend_stage(&mut seen, at(1.0, 0.0), 11, 0.0).position.x, 0.0);
-        assert_eq!(blend_stage(&mut seen, at(1.0, 0.0), 11, 1.0).position.x, 1.0);
+        assert_eq!(
+            blend_stage(&mut seen, at(1.0, 0.0), 11, 0.0).position.x,
+            0.0
+        );
+        assert_eq!(
+            blend_stage(&mut seen, at(1.0, 0.0), 11, 1.0).position.x,
+            1.0
+        );
         // A tick skipped starts again where the game is.
         assert_eq!(blend_stage(&mut seen, at(5.0, 0.0), 14, 0.3), at(5.0, 0.0));
     }
@@ -1142,8 +1250,11 @@ mod stage_tests {
         let a = at(0.0, 3.0);
         let b = at(0.0, -3.0);
         let mid = a.lerp(&b, 0.5);
-        assert!((mid.yaw.abs() - core::f32::consts::PI).abs() < 0.02, "{}", mid.yaw);
+        assert!(
+            (mid.yaw.abs() - core::f32::consts::PI).abs() < 0.02,
+            "{}",
+            mid.yaw
+        );
         assert_eq!(a.lerp(&b, 0.0), a);
     }
 }
-

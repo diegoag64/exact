@@ -213,6 +213,7 @@ impl Em<'_> {
     /// where every condition holds; otherwise `out` is left as written.
     pub(super) fn lower(
         &mut self,
+        i: u32,
         e: &str,
         class: &str,
         parts: &exact_web::host::template::Parts,
@@ -237,8 +238,18 @@ impl Em<'_> {
             recipe,
             props,
         } = arms;
+        // What the safe-area executor finds the node by, its class's rows and its arms together (`safe_area::marks`), as
+        // the arms' one write replaces what the class's rows marked: an arm that reads an observation, or one that writes
+        // an axis's overflow, which the executor confirms by the computed value; no write where the arms add nothing
+        use crate::safe_area::{marks, reads, scrolls};
+        let (read, scroll) = (reads(&parts.css), scrolls(&parts.css));
+        let marks = marks(
+            read || values.iter().flatten().any(|v| reads(v)),
+            scroll || props.iter().any(|p| p.starts_with("overflow")),
+        )
+        .filter(|m| Some(m) != marks(read, scroll).as_ref());
         let key = crate::code::expression(self.plan, &key, scope, &mut self.uses)?;
-        let site = e.trim_start_matches('e');
+        let site = self.site_number(scope, i);
         let pick: String = lits
             .iter()
             .enumerate()
@@ -255,6 +266,7 @@ impl Em<'_> {
         } else {
             format!("c{class} ")
         };
+        let statics = scope.operand(serde_json::to_string(&statics).unwrap());
         // The name is the arm set's content: its recipe, literals and every
         // module constant the recipe reads, so a build or a dev generation
         // that changes any of them names new rules (theme2 07:33 condition 7),
@@ -270,7 +282,7 @@ impl Em<'_> {
         let pc = self.uses.rt("Pc");
         let s = self.uses.rt("S");
         let text = format!(
-            "{pc}({e},{},{statics:?},\"{name}\",{values},{props},({s},$b,$e)=>{{{recipe}}});",
+            "{pc}({e},{},{statics},\"{name}\",{values},{props},({s},$b,$e)=>{{{recipe}}});",
             match self.site_attrs {
                 true => format!(
                     "{}({site},()=>(v=>{pick}{})({key}))",
@@ -282,6 +294,12 @@ impl Em<'_> {
         );
         // The one `Pc` where the rows were (contiguous: `Interleaved`
         // refuses another binding between them), then the rows' chunks out.
+        // @ref LLP 1123 D17 — a site whose arms read an observation or may let an axis scroll is marked for the
+        // safe-area executor, with what its static rows mark, where the arms add to it
+        let text = match marks {
+            Some(marks) => format!("{e}.setAttribute(\"data-exact-safe-area\",\"{marks}\");{text}"),
+            None => text,
+        };
         let text = match self.mount_templates.field_mask(scope, &text) {
             Some(m) => format!("{}({m},()=>{{{text}}});", self.uses.rt("fm")),
             None => text,

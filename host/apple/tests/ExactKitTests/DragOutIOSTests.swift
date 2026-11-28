@@ -114,6 +114,94 @@ final class DragOutIOSTests: XCTestCase {
         XCTAssertNil(bar.accessibilityDragSourceDescriptors, "none once the card does not drag")
     }
 
+    /// During a drag, a tap on another card that could lift adds its items,
+    /// checked as a lift is; a card the drag already carries, or a point off
+    /// the card, adds none (D4, "Adding to a drag").
+    func testATapAddsAnotherCardToADragInFlight() throws {
+        if ExactEnv.agentPaints { throw XCTSkip("none while the agent paints (D4)") }
+        let p = presenter(card(10, ["draggable": "true", "dataTransferText": "Mount Fuji"])
+            + card(20, ["draggable": "true", "dataTransferText": "Rainbow Mountain"])
+            + [["op": "frame", "id": 20, "x": 20.0, "y": 200.0, "w": 200.0, "h": 120.0],
+               ["op": "create", "id": 1, "kind": "view"], ["op": "children", "id": 1, "ids": [10, 20]],
+               ["op": "roots", "ids": [1]], ["op": "frame", "id": 1, "x": 0.0, "y": 0.0, "w": 400.0, "h": 800.0]])
+        let first = try XCTUnwrap(drags(try XCTUnwrap(p.views[10])).first)
+        let second = try XCTUnwrap(drags(try XCTUnwrap(p.views[20])).first)
+        let session = PointDragSession(at: CGPoint(x: 120, y: 80), in: window)
+        session.carried = try sources(p).dragInteraction(first, itemsForBeginning: session)
+        XCTAssertEqual(session.carried.count, 1, "the first card lifts")
+        let added = try sources(p).dragInteraction(second, itemsForAddingTo: session, withTouchAt: CGPoint(x: 100, y: 60))
+        XCTAssertEqual(added.map { ($0.localObject as? DragItems.Lifted)?.id }, [20], "the tapped card's items, each from its own node")
+        session.carried += added
+        XCTAssertTrue(try sources(p).dragInteraction(second, itemsForAddingTo: session, withTouchAt: CGPoint(x: 100, y: 60)).isEmpty, "none twice")
+        XCTAssertTrue(try sources(p).dragInteraction(first, itemsForAddingTo: session, withTouchAt: CGPoint(x: 100, y: 60)).isEmpty, "none from the card lifted")
+        session.carried = []
+        XCTAssertTrue(try sources(p).dragInteraction(second, itemsForAddingTo: session, withTouchAt: CGPoint(x: 300, y: 60)).isEmpty, "off the card")
+    }
+
+    /// LLP 1094.000 D16: each node that joins a drag hears `dragstart` once
+    /// UIKit's callback returns, at the point in its box where it joined,
+    /// and `dragend` with the drag's outcome; a drag offers no move, and a
+    /// node that stops being draggable keeps its interaction until its drag
+    /// ends, lifting nothing new.
+    func testTheNodesThatJoinADragHearItsStartAndEnd() throws {
+        if ExactEnv.agentPaints { throw XCTSkip("none while the agent paints (D4)") }
+        // Each card hears its drag's start and end
+        let heardCard = { (id: Int, props: [String: Any]) in
+            self.card(id, props).map { op in op["op"] as? String == "create" && op["id"] as? Int == id ? op.merging(["handlers": ["dragstart", "dragend"]]) { $1 } : op }
+        }
+        // The first card carries a file and its text, each an item of its own, and is one source
+        let p = presenter(heardCard(10, ["draggable": "true", "dataTransferText": "Mount Fuji", "dataTransferFiles": "assets/apple/1016-thumb.jpg"])
+            + heardCard(20, ["draggable": "true", "dataTransferText": "Rainbow Mountain"])
+            + [["op": "frame", "id": 20, "x": 20.0, "y": 200.0, "w": 200.0, "h": 120.0],
+               ["op": "create", "id": 1, "kind": "view"], ["op": "children", "id": 1, "ids": [10, 20]],
+               ["op": "roots", "ids": [1]], ["op": "frame", "id": 1, "x": 0.0, "y": 0.0, "w": 400.0, "h": 800.0]])
+        var heard: [String] = []
+        p.onClipboard = { id, kind, line in heard.append("\(id) \(kind) \(line)") }
+        let settle = { RunLoop.main.run(until: Date().addingTimeInterval(0.05)) }
+        let sources = try sources(p), card = try XCTUnwrap(p.views[10])
+        let first = try XCTUnwrap(drags(card).first), second = try XCTUnwrap(drags(try XCTUnwrap(p.views[20])).first)
+        let session = PointDragSession(at: CGPoint(x: 120, y: 80), in: window)
+        session.carried = sources.dragInteraction(first, itemsForBeginning: session)
+        XCTAssertEqual(session.carried.count, 2)
+        sources.dragInteraction(first, sessionWillBegin: session)
+        XCTAssertTrue(session.localContext is OwnDrag)
+        XCTAssertFalse(sources.dragInteraction(first, sessionAllowsMoveOperation: session))
+        XCTAssertEqual(heard, [], "nothing runs inside UIKit's callback")
+        settle()
+        XCTAssertEqual(heard, ["10 69 100.0,60.0"])
+        let added = sources.dragInteraction(second, itemsForAddingTo: session, withTouchAt: CGPoint(x: 30, y: 40))
+        session.carried += added
+        sources.dragInteraction(first, session: session, willAdd: added, for: second)
+        settle()
+        XCTAssertEqual(heard, ["10 69 100.0,60.0", "20 69 30.0,40.0"])
+        // The card turned undraggable mid-drag keeps its interaction for the drag's end, and lifts nothing new
+        p.apply(wireBatch([["op": "props", "id": 10, "set": ["draggable": "false"]]]))
+        XCTAssertTrue(drags(card).first === first)
+        XCTAssertTrue(sources.dragInteraction(first, itemsForBeginning: PointDragSession(at: CGPoint(x: 120, y: 80), in: window)).isEmpty)
+        sources.dragInteraction(first, session: session, didEndWith: .copy)
+        settle()
+        XCTAssertEqual(heard.suffix(2), ["10 70 100.0,60.0\ncopy", "20 70 30.0,40.0\ncopy"])
+        XCTAssertTrue(drags(card).isEmpty, "its drag over, the undraggable card's interaction comes off")
+        // A cancelled drag ends `none`; a node gone by then hears none
+        heard = []
+        let again = PointDragSession(at: CGPoint(x: 120, y: 280), in: window)
+        again.carried = sources.dragInteraction(second, itemsForBeginning: again)
+        sources.dragInteraction(second, sessionWillBegin: again)
+        settle()
+        sources.dragInteraction(second, session: again, didEndWith: .cancel)
+        settle()
+        XCTAssertEqual(heard, ["20 69 100.0,80.0", "20 70 100.0,80.0\nnone"])
+        heard = []
+        let last = PointDragSession(at: CGPoint(x: 120, y: 280), in: window)
+        last.carried = sources.dragInteraction(second, itemsForBeginning: last)
+        sources.dragInteraction(second, sessionWillBegin: last)
+        settle()
+        p.apply(wireBatch([["op": "children", "id": 1, "ids": [10]], ["op": "destroy", "id": 21], ["op": "destroy", "id": 20]]))
+        sources.dragInteraction(second, session: last, didEndWith: .copy)
+        settle()
+        XCTAssertEqual(heard, ["20 69 100.0,80.0"])
+    }
+
     /// The lift reads what the touch lands on now, as the window routes it:
     /// the card's text lifts the card; a view put over it since the touch
     /// began, or a point off the card, lifts nothing.
@@ -274,6 +362,19 @@ final class DragOutIOSTests: XCTestCase {
         XCTAssertEqual(items.map { ($0.localObject as? DragItems.Lifted)?.id }, [10, 10, 10, 10])
     }
 
+    /// Each file is offered under the name `dataTransferNames` holds at its
+    /// place, else its own, its type still its own extension's (LLP 1094.000
+    /// D14); with no text, the lift is named by the first file's name.
+    func testANamedFileIsSuggestedUnderItsNameAndTypedByItsOwn() throws {
+        let p = page(["draggable": "true", "dataTransferFiles": "assets/apple/1016.jpg\napp:/data/notes.pdf\nassets/apple/1017.jpg",
+                      "dataTransferNames": "Mount Fuji.jpg\n\nFuji.png.jpg"])
+        let node = try XCTUnwrap(p.views[10])
+        let items = DragItems.items(of: node, in: nil)
+        XCTAssertEqual(items.map { $0.itemProvider.suggestedName }, ["Mount Fuji.jpg", "notes.pdf", "Fuji.png.jpg"])
+        XCTAssertEqual(items.map { $0.itemProvider.registeredTypeIdentifiers }, [[UTType.jpeg.identifier], [UTType.pdf.identifier], [UTType.jpeg.identifier]])
+        XCTAssertEqual(DragItems.name(of: node), "Mount Fuji.jpg")
+    }
+
     func testWithNoFileOneItemCarriesTheURLAndText() throws {
         let titled = DragItems.items(of: try XCTUnwrap(page(["draggable": "true", "dataTransferUrl": "https://example.com/1016",
                                                              "dataTransferText": "Mount Fuji"]).views[10]), in: nil)
@@ -397,6 +498,68 @@ final class DragOutIOSTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "its directory goes with the resolver")
     }
 
+    /// LLP 1094.000 D17: an `app:/` file's load returns its progress at once,
+    /// which counts the copy to the file's size; a cancel before the copy,
+    /// during it and as it ends each answers the user's cancel once and
+    /// removes that load's folder alone, and the lift's other loads go on.
+    func testAnAppFilesLoadCountsItsCopyAndItsCancelStopsIt() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent("drag-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let file = folder.appendingPathComponent("big.bin"), size = 48 << 20
+        try Data(count: size).write(to: file)
+        let scratch = DragItems.Scratch()
+        let load = DragItems.appFile("app:/data/big.bin", "big.bin", scratch, DragFiles.Journal(), open: { _, _ in .success(Darwin.open(file.path, O_RDONLY)) })
+        let loads = { (scratch: DragItems.Scratch) in Set((try? FileManager.default.contentsOfDirectory(atPath: scratch.directory.path)) ?? []) }
+        /// One load: the progress it returned, then what it answered, and how often.
+        func run(_ before: (Progress) -> Void = { _ in }, cancelAt: Int64? = nil) -> (Progress, URL?, Error?, Int) {
+            DragFiles.copies.isSuspended = true
+            var answered = 0, url: URL?, error: Error?
+            let done = expectation(description: "the load answers")
+            let returned = load { u, _, e in url = u; error = e; answered += 1; done.fulfill() }
+            XCTAssertNotNil(returned, "the load returns its progress")
+            let progress = returned ?? Progress(totalUnitCount: -1)
+            XCTAssertEqual(progress.completedUnitCount, 0, "returned before the copy")
+            before(progress)
+            let watch = cancelAt.map { at in progress.observe(\.completedUnitCount) { p, _ in if p.completedUnitCount >= at { p.cancel() } } }
+            DragFiles.copies.isSuspended = false
+            wait(for: [done], timeout: 30)
+            watch?.invalidate()
+            return (progress, url, error, answered)
+        }
+        let (progress, url, error, answered) = run()
+        XCTAssertNil(error)
+        XCTAssertEqual([progress.totalUnitCount, progress.completedUnitCount], [Int64(size), Int64(size)])
+        XCTAssertEqual(try XCTUnwrap(FileManager.default.attributesOfItem(atPath: try XCTUnwrap(url).path)[.size] as? NSNumber).intValue, size)
+        XCTAssertEqual(answered, 1)
+        let kept = loads(scratch)
+        for (name, cancel) in [("before", { (p: Progress) in p.cancel() }), ("during", { (_: Progress) in })] as [(String, (Progress) -> Void)] {
+            let (_, url, error, answered) = run(cancel, cancelAt: name == "during" ? 1 : nil)
+            XCTAssertNil(url, name)
+            XCTAssertEqual((error as? CocoaError)?.code, .userCancelled, name)
+            XCTAssertEqual(answered, 1, name)
+            XCTAssertEqual(loads(scratch), kept, "\(name): that load's folder alone goes")
+        }
+        XCTAssertNil(run().2, "the lift's next load goes on")
+        let delivered = loads(scratch)
+        // An empty file's copy calls back for no block: a cancel once its total is set is read after the copy is closed
+        let empty = folder.appendingPathComponent("empty.bin")
+        try Data().write(to: empty)
+        let emptyLoad = DragItems.appFile("app:/data/empty.bin", "empty.bin", scratch, DragFiles.Journal(), open: { _, _ in .success(Darwin.open(empty.path, O_RDONLY)) })
+        let done = expectation(description: "the empty load answers")
+        var emptyError: Error?
+        // The copy waits until the cancel is in place
+        DragFiles.copies.isSuspended = true
+        let emptyProgress = emptyLoad { _, _, e in emptyError = e; done.fulfill() }
+        let sized = emptyProgress?.observe(\.totalUnitCount) { p, _ in if p.totalUnitCount == 0 { p.cancel() } }
+        DragFiles.copies.isSuspended = false
+        XCTAssertNotNil(emptyProgress, "the load returns its progress")
+        wait(for: [done], timeout: 30)
+        sized?.invalidate()
+        XCTAssertEqual((emptyError as? CocoaError)?.code, .userCancelled)
+        XCTAssertEqual(loads(scratch), delivered, "the delivered loads' folders stay, the cancelled one's goes")
+    }
+
     func testAFileTheAppDoesNotShipCompletesWithTheError() throws {
         let resolver = try AssetResolver(root: URL(fileURLWithPath: NSTemporaryDirectory()), verified: [:])
         let done = expectation(description: "the load completes")
@@ -434,9 +597,9 @@ final class DragOutIOSTests: XCTestCase {
     }
 
     /// An `app:/` file is opened when a destination asks (here by a stand-in,
-    /// of a file made after the lift) and copied off the main thread; its
-    /// load answers the whole file with the descriptor already closed. A
-    /// copy that fails leaves no folder behind.
+    /// of a file made after the lift) and copied off the main thread under
+    /// the name it is offered under; its load answers the whole file with the
+    /// descriptor already closed. A copy that fails leaves no folder behind.
     func testAnAppFileIsOpenedAndCopiedWhenTheDestinationAsks() throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("drag-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -444,7 +607,7 @@ final class DragOutIOSTests: XCTestCase {
         let scratch = DragItems.Scratch()
         var fd: Int32 = -1, offMain = true
         let load = { (flags: Int32) in
-            DragItems.appFile("app:/data/notes.txt", scratch, DragFiles.Journal()) { _, _ in
+            DragItems.appFile("app:/data/notes.txt", "Backup notes.txt", scratch, DragFiles.Journal()) { _, _ in
                 offMain = offMain && !Thread.isMainThread
                 fd = open(folder.appendingPathComponent("notes.txt").path, flags)
                 return fd >= 0 ? .success(fd) : .failure(DragFiles.posix())
@@ -453,15 +616,17 @@ final class DragOutIOSTests: XCTestCase {
         let reads = load(O_RDONLY), fails = load(O_WRONLY)
         try Data("the backup".utf8).write(to: folder.appendingPathComponent("notes.txt"))
         let done = expectation(description: "the file loads")
-        var read: Data?, closed = false
+        var read: Data?, closed = false, copied: String?
         _ = reads({ url, _, error in
             XCTAssertNil(error)
             closed = fcntl(fd, F_GETFD) == -1 && errno == EBADF
             read = url.flatMap { try? Data(contentsOf: $0) }
+            copied = url?.lastPathComponent
             done.fulfill()
         })
         wait(for: [done], timeout: 5)
         XCTAssertEqual(read, Data("the backup".utf8))
+        XCTAssertEqual(copied, "Backup notes.txt", "the copy has the name the file is offered under (LLP 1094.000 D14)")
         XCTAssertTrue(closed, "the descriptor closed before the answer")
         XCTAssertTrue(offMain, "the copy runs off the main thread")
         // A descriptor that cannot be read fails the copy
@@ -632,15 +797,100 @@ final class DragOutIOSTests: XCTestCase {
         next(p, 10, 20, draggable: true)
         XCTAssertNil(try sources(p).dragInteraction(interaction, previewForCancelling: item, withDefault: fallback), "the view is another row's now")
     }
+
+    /// iOS 27's UIKit adds Ask Siri to the context menu of a view that also
+    /// holds a drag interaction (D4): a draggable card's menu offers it, a
+    /// plain card's does not. The simulator offers it only under `prefer
+    /// ask-siri available` (D10), set here as a drive sets it.
+    func testADraggableNodesMenuOffersAskSiri() throws {
+        if ExactEnv.agentPaints { throw XCTSkip("the agent paints the popover (LLP 1021 D4)") }
+        guard #available(iOS 27.0, *) else { throw XCTSkip("Ask Siri in a menu is iOS 27's") }
+        guard let scene = hostedWindowScene() else { throw missing("scene", "UIKit presents a context menu, and reads Siri's availability, in a scene's window") }
+        let session = ExactApp.shared.makeSession(label: "ask-siri")
+        defer { session.destroy() }
+        window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 400, height: 800)
+        window.rootViewController = UIViewController()
+        let view = ExactView(session: session)
+        XCTAssertNil(session.boot(plan: try fixturePlan("FIELDLESS"), size: window.bounds.size).error)
+        view.frame = window.bounds
+        window.rootViewController?.view.addSubview(view)
+        window.makeKeyAndVisible()
+        view.layoutIfNeeded()
+        let p = session.presenter
+        p.apply(wireBatch([
+            ["op": "create", "id": 100, "kind": "view"],
+            ["op": "create", "id": 101, "kind": "button", "handlers": ["press"],
+             "props": ["contextPopover": "m", "draggable": "true", "dataTransferText": "Mount Fuji"]],
+            ["op": "create", "id": 102, "kind": "button", "handlers": ["press"], "props": ["contextPopover": "m"]],
+            ["op": "create", "id": 103, "kind": "view", "props": ["id": "m", "popover": "auto"]],
+            ["op": "create", "id": 104, "kind": "button", "handlers": ["press"]],
+            ["op": "create", "id": 105, "kind": "text", "props": ["text": "Pin"]],
+            ["op": "children", "id": 104, "ids": [105]], ["op": "children", "id": 103, "ids": [104]],
+            ["op": "children", "id": 100, "ids": [101, 102, 103]], ["op": "roots", "ids": [100]],
+            ["op": "frame", "id": 100, "x": 0.0, "y": 0.0, "w": 400.0, "h": 800.0],
+            ["op": "frame", "id": 101, "x": 20.0, "y": 100.0, "w": 200.0, "h": 120.0],
+            ["op": "frame", "id": 102, "x": 20.0, "y": 400.0, "w": 200.0, "h": 120.0],
+        ]))
+        let agent = Agent(session: session)
+        if let refusal = agent.askSiriRefusal { throw missing("UIKit", refusal) }
+        XCTAssertEqual((agent.prefer(["page": ["ask-siri": "available"]])["page"] as? [String: Any])?["ask-siri"] as? String, "available")
+        defer { _ = agent.prefer(["page": ["ask-siri": "unavailable"]]) }
+        func labels() -> [String] {
+            var found: [String] = []
+            func visit(_ v: UIView) {
+                if let label = v as? UILabel, !label.isHidden, let text = label.text { found.append(text) }
+                v.subviews.forEach(visit)
+            }
+            visit(window)
+            return found
+        }
+        /// What UIKit shows when `id`'s menu opens, read once the popover's row
+        /// shows, by when UIKit has added whatever it adds; and how many items
+        /// the card's drag gives, at the card's centre, where the press was, and
+        /// at a point off the card, while the menu shows and once it has closed.
+        /// The test's requests stand in for UIKit's.
+        func open(_ id: UInt32) throws -> (rows: [String], shown: [Int], lent: Int, closed: [Int]) {
+            let card = try XCTUnwrap(p.views[id])
+            let interaction = try XCTUnwrap(card.interactions.compactMap { $0 as? UIContextMenuInteraction }.first)
+            let present = NSSelectorFromString("_presentMenuAtLocation:")
+            guard interaction.responds(to: present) else { throw missing("UIKit", "this UIKit has no -[UIContextMenuInteraction _presentMenuAtLocation:]") }
+            typealias Present = @convention(c) (AnyObject, Selector, CGPoint) -> Void
+            unsafeBitCast(interaction.method(for: present), to: Present.self)(interaction, present, CGPoint(x: card.bounds.midX, y: card.bounds.midY))
+            waitFor("\(id)'s menu to show its row", facts: { "\(labels())" }) { labels().contains("Pin") }
+            let centre = card.convert(CGPoint(x: card.bounds.midX, y: card.bounds.midY), to: window)
+            func items(at point: CGPoint) throws -> Int {
+                guard let drag = drags(card).first else { return 0 }
+                return try sources(p).dragInteraction(drag, itemsForBeginning: PointDragSession(at: point, in: window)).count
+            }
+            let rows = labels(), shown = [try items(at: centre), try items(at: .zero)]
+            // The view lent on to another node, as the pool's rebind does: the menu is not that node's.
+            let incarnation = card.incarnation
+            card.incarnation = NodePool.issue()
+            let lent = try items(at: .zero)
+            card.incarnation = incarnation
+            interaction.dismissMenu()
+            waitFor("\(id)'s menu to close") { !p.menus.showsContextMenu(of: card) && !labels().contains("Pin") }
+            return (rows, shown, lent, [try items(at: centre), try items(at: .zero)])
+        }
+        let draggable = try open(101), plain = try open(102)
+        XCTAssertTrue(draggable.rows.contains("Ask Siri"), "the draggable card's menu")
+        XCTAssertEqual(draggable.shown, [1, 1], "while its menu shows, its drag gives the card's text, at the card under the menu and off it")
+        XCTAssertEqual(draggable.lent, 0, "not once its view is another node's")
+        XCTAssertEqual(draggable.closed, [1, 0], "and once the menu has closed, only to a touch on the card")
+        XCTAssertFalse(plain.rows.contains("Ask Siri"), "a plain card's menu")
+    }
 }
 
 /// A drag session at one point of `window`, which a test hands the lift.
 final class PointDragSession: NSObject, UIDragSession {
     let at: CGPoint
     weak var window: UIView?
+    /// The items the drag carries so far.
+    var carried: [UIDragItem] = []
     init(at: CGPoint, in window: UIView) { self.at = at; self.window = window }
     var localContext: Any?
-    var items: [UIDragItem] { [] }
+    var items: [UIDragItem] { carried }
     func location(in view: UIView) -> CGPoint { window.map { view.convert(at, from: $0) } ?? at }
     var allowsMoveOperation: Bool { false }
     var isRestrictedToDraggingApplication: Bool { false }

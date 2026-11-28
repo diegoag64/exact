@@ -37,6 +37,29 @@ and optionally `EXACT_AGENT_WINDOW_TAP` to a launch button's test ID.
 `EXACT_AGENT_WINDOW_UNPACED=1` removes pacing to measure rendering capacity.
 These switches require a bounded development run and are stripped in production.
 
+## Colour inputs
+
+A Contract surface argument `color("surface.board")` binds straight linear-sRGB
+(D65) RGBA. Read it with `exact_gpu::json::color(&inputs[0], "fill")?`. All four
+components are `f32`. RGB retains out-of-gamut and extended values. Alpha ranges
+from zero to one. Keep the `ColorTarget` passed to `Surface::color_target`.
+Use `target.fragment(rgba)` as a fragment shader's RGBA output with replacement
+blending, or `target.clear(rgba)` as a render pass's clear colour. Both account
+for the attachment's primaries, transfer and alpha mode, including the hardware
+encode on an sRGB view. You can cache either value in `bind`. A changed format,
+colour space or alpha mode delivers the new target and rebinds colour inputs.
+A private straight linear-sRGB working texture takes the original input directly.
+
+Leave `opaque()` false for transparency. If the target offers only opaque
+presentation, the helper writes the straight colour at full alpha. Use a
+transparent canvas over a token-painted view where the compositor supports it.
+
+To run the pixel test, create an app with `bun scripts/exact.mjs new target/board`
+and copy `gpu/tests/board/.` into `target/board/`. Use the
+[GPU module manifest](../docs/recipes/gpu-module.md) with the crate name `board-gpu`. From that app, run
+`bun exact.mjs test macos board.test.contract` or `bun exact.mjs test web board.test.contract`.
+The board also draws a half-alpha Display P3 swatch and a literal clear over white.
+
 ## Android initialization
 
 `dlopen` runs no `JNI_OnLoad`, so a module that calls into Java exports the
@@ -85,6 +108,22 @@ HDR keeps D12b's encoded extended-sRGB output, including values above 1.
 
 `apps/caltrain/gpu` is a complete GPU module; the
 [GPU module recipe](../docs/recipes/gpu-module.md) shows a minimal surface.
+
+## Asynchronous surface wakes
+
+A resting surface whose `render` returned `false` receives no further frames until inputs
+or host state change. To request a redraw from a background thread (or a timer/worker on
+the web), implement `Surface::set_waker(&mut self, waker: SurfaceWaker)` (called once at
+surface creation, before any other callback) and call `waker.wake()` after publishing the
+new state (LLP 1009 D12). Multiple wakes before the next render coalesce into one host
+notification; wakes raised during `render` re-arm the next frame; wakes after surface
+destruction or module unload are silent no-ops. Under a seekable agent clock, wakes stay
+latched and settle deterministically on the next clock advance instead of running wall-clock
+frames.
+
+Native hosts register their coalescing callback through the optional C ABI symbol
+`gpu_on_wake(Option<extern "C" fn()>)`, passing `None` before unload to clear and drain any
+in-flight wake. On the web, `SurfaceWaker::wake` notifies `globalThis.exact.gpu.wake()`.
 
 ## Dynamic buffer offsets
 
@@ -334,10 +373,31 @@ impl Surface for Status {
 ```
 
 An application reports poll/map errors through `Surface::take_error` rather
-than panicking as this small example does. Drop these device resources and
-pending results in `device_lost`, then recreate them on the new device. For
-continuous readback, use several staging buffers and skip any still awaiting
-a map or still mapped; each copied slot starts its map in `submitted()`.
+than panicking as this small example does. For continuous readback, use several
+staging buffers and skip any still awaiting a map or still mapped; each copied
+slot starts its map in `submitted()`.
+
+## Device loss and recovery
+
+A wgpu device can be lost at any time (driver reset, GPU-process restart, or
+explicit `device.destroy()`). By default `Surface::device_lost(&mut self) -> bool`
+returns `false`: the module drops the surface and reconstructs a fresh one from
+its registered factory under the same canvas ID, replaying its host configuration
+(waker, storage directories, clock ownership, reduced motion, lifecycle, size,
+color target, performance reporting, and last accepted bind). Ordinary surfaces
+that cache pipelines, buffers, or bind groups inside `self` therefore recover
+automatically without custom teardown code. Surfaces must not reuse unscoped
+`wgpu` handles across device loss in global or thread-local caches: clear any
+module-wide GPU cache in `device_lost`.
+
+Return `true` from `device_lost` only when the surface must keep live CPU state
+across recovery (such as a game simulation, loaded 3D model, or shader source)
+and has released every handle from the lost device, including cloned child views
+and pending GPU work. The module clears its child textures and notifies
+`children(None, None)` / `child(i, "", None, [0.; 4])` before calling
+`device_lost`, then reattaches the kept surface with `device_ready`,
+`color_space_granted`, `color_target`, and `prepare_assets` once the replacement
+device arrives.
 
 ## Frame pacing and timing
 

@@ -88,13 +88,11 @@ impl Parser {
         self.next();
         let subject = self.expr()?;
         self.newline()?;
-        let platform = match &subject {
-            Expr::Member(base, field, _) if field == "platform" => match &**base {
-                Expr::Ident(name, _) => Some(name.as_str()),
-                _ => None,
-            },
-            _ => None,
-        };
+        let is_platform = matches!(
+            &subject,
+            Expr::Member(base, field, _)
+                if field == "platform" && matches!(&**base, Expr::Ident(..))
+        );
         let mut cases = Vec::new();
         let mut some = None;
         let mut none = None;
@@ -110,32 +108,11 @@ impl Parser {
                     TokenKind::Newline => {
                         self.next();
                     }
-                    _ if platform.is_some()
+                    _ if is_platform
                         && self.at_ident("case")
                         && matches!(self.peek2(), TokenKind::Str(_)) =>
                     {
-                        let case = self.next().span;
-                        let TokenKind::Str(host) = self.next().kind else {
-                            unreachable!()
-                        };
-                        if !crate::MODULE_PLATFORMS.contains(&host.as_str()) {
-                            return Err(SyntaxError {
-                                id: "contract-match-platform",
-                                message: format!("unknown platform {host:?}"),
-                                span: case,
-                            });
-                        }
-                        if let Some((_, first, _)) = cases.iter().find(|(name, _, _)| *name == host)
-                        {
-                            return duplicate("platform case", &host, case, *first);
-                        }
-                        self.view_range(case, case);
-                        self.newline()?;
-                        // Later cases lower to nested else-if nodes.
-                        self.view_depth += cases.len();
-                        let body = self.required_block(case, "case", |p| p.node());
-                        self.view_depth -= cases.len();
-                        cases.push((host, case, body?));
+                        self.platform_match_case(&mut cases, |p| p.node())?;
                     }
                     _ => {
                         let (var, case_span) = self.match_case_header(span)?;
@@ -155,38 +132,19 @@ impl Parser {
             }
         }
         if !cases.is_empty() {
-            self.platform_matches
-                .push((platform.unwrap().to_owned(), span));
-            if some.is_some() || none.is_some() {
-                return Err(SyntaxError {
-                    id: "contract-match-platform",
-                    message: "a platform match takes only quoted platform cases".into(),
-                    span,
-                });
-            }
-            let mut otherwise = Vec::new();
-            for (host, case, then) in cases.into_iter().rev() {
-                otherwise = vec![Node::When {
-                    tag: 0,
-                    cond: Expr::Binary(
-                        BinOp::Eq,
-                        Box::new(subject.clone()),
-                        Box::new(Expr::Str(host, case)),
-                        case,
-                    ),
-                    then,
-                    otherwise,
-                    span: case,
-                }];
-            }
-            return Ok(otherwise.pop().unwrap());
+            return self.finish_platform_match(
+                span,
+                subject,
+                cases,
+                some.is_some() || none.is_some(),
+            );
         }
-        let some = some.ok_or(SyntaxError {
+        let some = some.ok_or_else(|| SyntaxError {
             id: "contract-match-arms",
             message: "`match` needs `case some(x)`".into(),
             span,
         })?;
-        let none = none.ok_or(SyntaxError {
+        let none = none.ok_or_else(|| SyntaxError {
             id: "contract-match-arms",
             message: "`match` needs `case none`".into(),
             span,
@@ -198,6 +156,78 @@ impl Parser {
             none,
             span,
         })
+    }
+
+    /// Platform-match arm parsing lives outside `node_match` so nested option
+    /// `match`es do not pay for its locals in unoptimized debug frames.
+    #[inline(never)]
+    fn platform_match_case<T>(
+        &mut self,
+        cases: &mut Vec<(String, Span, Vec<T>)>,
+        parse: impl FnMut(&mut Self) -> R<T>,
+    ) -> R<()> {
+        let case = self.next().span;
+        let TokenKind::Str(host) = self.next().kind else {
+            unreachable!()
+        };
+        if !crate::MODULE_PLATFORMS.contains(&host.as_str()) {
+            return Err(SyntaxError {
+                id: "contract-match-platform",
+                message: format!("unknown platform {host:?}"),
+                span: case,
+            });
+        }
+        if let Some((_, first, _)) = cases.iter().find(|(name, _, _)| *name == host) {
+            return duplicate("platform case", &host, case, *first);
+        }
+        self.view_range(case, case);
+        self.newline()?;
+        // Later cases lower to nested else-if nodes.
+        self.view_depth += cases.len();
+        let body = self.required_block(case, "case", parse);
+        self.view_depth -= cases.len();
+        cases.push((host, case, body?));
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn finish_platform_match(
+        &mut self,
+        span: Span,
+        subject: Expr,
+        cases: Vec<(String, Span, Vec<Node>)>,
+        has_option_arms: bool,
+    ) -> R<Node> {
+        let Expr::Member(base, _, _) = &subject else {
+            unreachable!()
+        };
+        let Expr::Ident(platform, _) = &**base else {
+            unreachable!()
+        };
+        self.platform_matches.push((platform.clone(), span));
+        if has_option_arms {
+            return Err(SyntaxError {
+                id: "contract-match-platform",
+                message: "a platform match takes only quoted platform cases".into(),
+                span,
+            });
+        }
+        let mut otherwise = vec![];
+        for (host, case, then) in cases.into_iter().rev() {
+            otherwise = vec![Node::When {
+                tag: 0,
+                cond: Expr::Binary(
+                    BinOp::Eq,
+                    Box::from(subject.clone()),
+                    Box::from(Expr::Str(host, case)),
+                    case,
+                ),
+                then,
+                otherwise,
+                span: case,
+            }];
+        }
+        Ok(otherwise.pop().unwrap())
     }
 
     #[inline(never)]

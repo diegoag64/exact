@@ -66,7 +66,7 @@ class HostedTouchTest {
             @Implementation @JvmStatic fun under(x: Float, y: Float): IntArray {
                 asks++
                 val answer = reply.copyOf()
-                val at = 3 + 11 * answer[1]
+                val at = 3 + 11 * answer[1] + (if (answer[0] and 32 != 0) 5 else 0)
                 val left = Float.fromBits(answer[at + 1]); val top = Float.fromBits(answer[at + 2])
                 if (x < left || y < top || x >= left + Float.fromBits(answer[at + 3]) ||
                     y >= top + Float.fromBits(answer[at + 4])) answer[at] = 0
@@ -98,6 +98,7 @@ class HostedTouchTest {
                         (Float.fromBits(reply[i + 6]) / scale).toBits())
                 }.toIntArray()
             }
+            @Implementation @JvmStatic fun sheetDrag(index: Int, generation: Int, top: Float, ended: Boolean, velocity: Float) {}
             @Implementation @JvmStatic fun scrollDrag(id: Int, ended: Boolean, vx: Float, vy: Float, rest: Boolean, restX: Float, restY: Float, flings: Boolean) {}
             @Implementation @JvmStatic fun flingEnded(id: Int) {}
             @Implementation @JvmStatic fun refresh(id: Int) {}

@@ -11,6 +11,7 @@ pub use pointer::PointerSample;
 mod paranoid;
 mod queue;
 mod snapshot;
+mod xr;
 
 /// One immutable simulation instant; Copy keeps world borrows short in game code.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Data)]
@@ -306,6 +307,7 @@ pub struct Sim<G: Game> {
     last_epoch: std::cell::Cell<u64>,
     pub(crate) args_json: String,
     pub(crate) input: Input,
+    consumed_sensor_samples: Option<u64>,
     queue: VecDeque<Queued>,
     overflow_logged: bool,
     // Posts a full input queue refused; reported in agent state, never saved.
@@ -529,6 +531,7 @@ impl<G: Game> Sim<G> {
             restored_from: None,
             settle_delay: std::cell::Cell::new(100),
             input,
+            consumed_sensor_samples: None,
             queue,
             overflow_logged: false,
             refused_posts: 0,
@@ -1264,15 +1267,6 @@ impl<G: Game> Sim<G> {
             player: 0,
         });
     }
-    /// Queue a headset's head and controllers at the current clock, as a
-    /// headset host reports them each frame (`Input::xr`).
-    pub fn xr(&mut self, input: crate::XrInput) {
-        self.input(InputEvent::Xr {
-            input,
-            at_ms: self.last_us.unwrap_or(0) as f64 / 1000.0,
-            player: 0,
-        });
-    }
     /// Queue both key edges at the current clock.
     pub fn tap(&mut self, code: &str) {
         self.key_down(code);
@@ -1336,10 +1330,29 @@ impl<G: Game> Sim<G> {
     /// Whether the game and its timers are idle after the last tick. A painted
     /// host checks queued input separately so it can tick without drawing.
     pub fn world_render_idle(&self) -> bool {
-        !self.setup_pending
-            && self.input.next_deadline().is_none()
-            && self.world.table_pending_tick().is_none()
-            && G::render_idle(&self.world, &self.args)
+        self.render_demand().is_none()
+    }
+
+    /// The first outstanding reason the simulation asks for another live frame.
+    pub fn render_demand(&self) -> Option<&'static str> {
+        if self.setup_pending {
+            Some("setup")
+        } else if self.input.next_deadline().is_some() {
+            Some("input-timer")
+        } else if self.world.table_pending_tick().is_some() {
+            Some("table-timer")
+        } else {
+            (!G::render_idle(&self.world, &self.args)).then_some("game-active")
+        }
+    }
+
+    /// Start counting applied sensor samples for a development-trust Android canvas.
+    pub fn count_draw_samples(&mut self) {
+        self.consumed_sensor_samples.get_or_insert(0);
+    }
+    /// Sensor samples applied since the preceding draw, when counting is enabled.
+    pub fn take_consumed_sensor_samples(&mut self) -> Option<u64> {
+        self.consumed_sensor_samples.as_mut().map(std::mem::take)
     }
     /// The display drew nothing since [`Sim::render_idle`] and draws again at
     /// `now_ms`: the next live advance resumes as if the last frame were one

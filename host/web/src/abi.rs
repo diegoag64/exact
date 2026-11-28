@@ -57,6 +57,7 @@ pub struct Bridge<D: DataSource> {
 }
 
 mod clock;
+mod geometry;
 mod midi;
 mod mode;
 mod presence;
@@ -571,8 +572,9 @@ impl<D: DataSource> Bridge<D> {
             // with its code and repeat, and focusin (46) and focusout (47) with
             // their targets, toggle (50), scrollend (51), a file drag's enter
             // and leave (55, 56), a paste with files (57), an iframe's record (58), an atom's press (59),
-            // a left swipe (61), and a scroll drag's start (62) and release (63) (`Event::of_host_kind`).
-            6 | 10 | 13 | 19 | 20 | 21 | 28..=48 | 50..=59 | 61..=63 | 65 => {
+            // a left swipe (61), a scroll drag's start (62) and release (63), and a drag source's start (69) and end
+            // (70) (`Event::of_host_kind`).
+            6 | 10 | 13 | 19 | 20 | 21 | 28..=48 | 50..=59 | 61..=63 | 65 | 69 | 70 => {
                 match Event::of_host_kind(kind, &payload) {
                     Ok(event) => event,
                     Err(error) => return self.refuse(error),
@@ -1314,12 +1316,6 @@ macro_rules! host {
             EXACT_BRIDGE.with(|b| b.borrow_mut().set_display_scale(scale))
         }
 
-        /// The browser's document insets and segment rectangles in the input buffer.
-        #[no_mangle]
-        pub extern "C" fn exact_set_viewport_geometry(len: u32) -> u32 {
-            EXACT_BRIDGE.with(|b| b.borrow_mut().viewport_geometry(len as usize))
-        }
-
         /// Whether this canvas name is read by a performance resource.
         #[no_mangle]
         pub extern "C" fn exact_canvas_performance_requested(len: u32) -> u32 {
@@ -1344,6 +1340,7 @@ macro_rules! host {
         }
 
         $crate::mode_exports!();
+        $crate::geometry_exports!();
         $crate::midi_exports!();
 
         /// The locale and time zone: `locale NUL timeZone` in the input buffer.

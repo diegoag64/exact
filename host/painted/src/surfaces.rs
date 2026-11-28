@@ -48,6 +48,7 @@ mod placed;
 mod shaders;
 mod size;
 mod storage;
+mod wake;
 #[cfg(windows)]
 pub(crate) mod window;
 
@@ -63,6 +64,7 @@ struct Abi {
     output_error: std::cell::RefCell<Option<String>>,
     rendered: bool,
     device_loaded: bool,
+    wake_registered: bool,
     reduced_motion: std::cell::Cell<Option<bool>>,
     #[cfg(any(target_os = "android", all(test, unix)))]
     initialized: bool,
@@ -135,6 +137,7 @@ impl Abi {
             shaders: Default::default(),
             rendered: std::env::var("EXACT_GPU_RENDER").as_deref() == Ok("1"),
             device_loaded: false,
+            wake_registered: false,
             reduced_motion: std::cell::Cell::new(None),
             #[cfg(any(target_os = "android", all(test, unix)))]
             initialized: false,
@@ -181,12 +184,8 @@ impl Abi {
                 android_init::run(&abi, path)?;
                 abi.initialized = true;
             }
-            // A headset app's runtime makes the primary module's device
-            // (on Windows only when VR was asked for, `headset::requested`).
             #[cfg(any(target_os = "android", windows))]
-            if artifact.is_empty() {
-                headset::attach(path);
-            }
+            headset::attach(artifact, path);
             if artifact.is_empty()
                 && compat["inputs"]["gpuModules"]
                     .as_object()
@@ -234,9 +233,7 @@ impl Abi {
                 }
                 abi.load_device()?;
                 #[cfg(windows)]
-                if artifact.is_empty() {
-                    headset::device_made();
-                }
+                headset::device_made(artifact);
                 abi.symbol::<unsafe extern "C" fn(bool)>(b"gpu_seekable")(
                     std::env::var("EXACT_AGENT").as_deref() == Ok("1"),
                 );
@@ -250,8 +247,15 @@ impl Abi {
         if load {
             android::load(&mut abi)?;
         }
-        #[cfg(not(target_os = "android"))]
-        let _ = load;
+        if load {
+            if let Ok(register) = unsafe {
+                abi.library
+                    .get::<unsafe extern "C" fn(Option<extern "C" fn()>)>(b"gpu_on_wake")
+            } {
+                unsafe { register(Some(wake::surface_woken)) };
+                abi.wake_registered = true;
+            }
+        }
         Ok(abi)
     }
 
@@ -381,6 +385,14 @@ impl Drop for Abi {
         #[cfg(any(target_os = "android", all(test, unix)))]
         if !self.initialized {
             return;
+        }
+        if self.wake_registered {
+            if let Ok(register) = unsafe {
+                self.library
+                    .get::<unsafe extern "C" fn(Option<extern "C" fn()>)>(b"gpu_on_wake")
+            } {
+                unsafe { register(None) };
+            }
         }
         // A missing symbol can occur during validation of an older artifact.
         if let Ok(unload) = unsafe { self.library.get::<unsafe extern "C" fn()>(b"gpu_unload") } {
@@ -605,13 +617,9 @@ impl Surfaces {
     }
 
     fn lifecycle(&mut self, hidden: bool, interrupted: bool) {
-        for canvas in self.canvases.values() {
-            // The headset's session, not the window, pauses and resumes the
-            // canvas it draws (`gpu/openxr/src/session.rs`).
-            #[cfg(windows)]
-            if canvas.artifact.is_empty() && headset::drawing() {
-                continue;
-            }
+        // The headset's session, not the window, pauses and resumes the
+        // canvas it draws (`gpu/openxr/src/session.rs`).
+        for canvas in self.canvases.values().filter(|c| !Self::in_headset(c)) {
             let abi = &self.abis[&canvas.artifact];
             if self.hidden != hidden {
                 abi.lifecycle(canvas.id, u32::from(!hidden));
@@ -623,15 +631,6 @@ impl Surfaces {
         self.hidden = hidden;
         self.interrupted = interrupted;
     }
-    #[cfg(windows)]
-    pub(crate) fn restore_desktop_canvas_lifecycle(&self) {
-        for canvas in self.canvases.values().filter(|c| c.artifact.is_empty()) {
-            let abi = &self.abis[&canvas.artifact];
-            abi.lifecycle(canvas.id, u32::from(!self.hidden));
-            abi.lifecycle(canvas.id, if self.interrupted { 2 } else { 3 });
-        }
-    }
-
     fn initial_lifecycle(&self, abi: &Abi, id: u32) {
         if self.hidden {
             abi.lifecycle(id, 0);
@@ -667,6 +666,11 @@ impl Surfaces {
 
     pub(crate) fn take_outcomes(&mut self) -> Vec<(u64, Outcome)> {
         std::mem::take(&mut self.outcomes)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn has_pending_requests(&self) -> bool {
+        !self.captures.is_empty() || !self.work.is_empty() || !self.outcomes.is_empty()
     }
 
     fn sync<D: DataSource>(

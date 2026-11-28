@@ -59,9 +59,15 @@ impl Game for Diorama {
             Mesh::plane(6., 6.),
             Material::rgb(0.55, 0.6, 0.45),
         ));
-        for (i, (x, z)) in [(-1.5, -1.0), (0.0, -2.0), (1.4, -0.4), (-0.4, 0.9), (2.2, -3.5)]
-            .into_iter()
-            .enumerate()
+        for (i, (x, z)) in [
+            (-1.5, -1.0),
+            (0.0, -2.0),
+            (1.4, -0.4),
+            (-0.4, 0.9),
+            (2.2, -3.5),
+        ]
+        .into_iter()
+        .enumerate()
         {
             w.spawn((
                 Transform::at(x, 0.4 + 0.15 * i as f32, z),
@@ -200,7 +206,12 @@ struct Difference {
 
 fn difference(a: &fixture::Pixels, b: &fixture::Pixels) -> Difference {
     let (mut sum, mut max, mut off) = (0u64, 0u8, 0usize);
-    let pixels = a.data.as_chunks::<4>().0.iter().zip(b.data.as_chunks::<4>().0);
+    let pixels = a
+        .data
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(b.data.as_chunks::<4>().0);
     for (p, q) in pixels {
         let d = (0..3).map(|c| p[c].abs_diff(q[c])).max().unwrap();
         sum += u64::from(d);
@@ -222,7 +233,10 @@ fn one_multiview_pass_draws_what_each_eye_draws_on_its_own() {
         return;
     };
     if !gpu.device.features().contains(extra) {
-        eprintln!("skipped: {:?} has no multiview", gpu.adapter.get_info().name);
+        eprintln!(
+            "skipped: {:?} has no multiview",
+            gpu.adapter.get_info().name
+        );
         return;
     }
     let size = (320, 288);
@@ -236,7 +250,11 @@ fn one_multiview_pass_draws_what_each_eye_draws_on_its_own() {
         let mut surface = WorldSurface::<Diorama>::default();
         surface
             .bind(
-                &[Value::Bool(water), Value::Bool(one_sample), Value::Bool(staged)],
+                &[
+                    Value::Bool(water),
+                    Value::Bool(one_sample),
+                    Value::Bool(staged),
+                ],
                 None,
             )
             .unwrap();
@@ -288,7 +306,11 @@ fn one_multiview_pass_draws_what_each_eye_draws_on_its_own() {
         let mode = surface.xr_stereo_mode();
         assert_eq!(
             mode,
-            if one_sample { "multiview-direct-1x" } else { "multiview-direct-4x" },
+            if one_sample {
+                "multiview-direct-1x"
+            } else {
+                "multiview-direct-4x"
+            },
             "{case}"
         );
         let both = read(&stereo);
@@ -315,7 +337,10 @@ fn one_multiview_pass_draws_what_each_eye_draws_on_its_own() {
         }
         // The eyes see the scene from 64 mm apart: the layers differ.
         let parallax = difference(&both[0], &both[1]);
-        assert!(parallax.mean > 1.0, "{case}: the layers are the same picture");
+        assert!(
+            parallax.mean > 1.0,
+            "{case}: the layers are the same picture"
+        );
     }
 }
 
@@ -333,7 +358,11 @@ fn stereo_frame_cost() {
         let mut surface = WorldSurface::<Diorama>::default();
         surface
             .bind(
-                &[Value::Bool(water), Value::Bool(one_sample), Value::Bool(staged)],
+                &[
+                    Value::Bool(water),
+                    Value::Bool(one_sample),
+                    Value::Bool(staged),
+                ],
                 None,
             )
             .unwrap();
@@ -345,13 +374,21 @@ fn stereo_frame_cost() {
             for i in 0..40 {
                 let start = std::time::Instant::now();
                 if multiview {
-                    surface.render_xr_stereo(&frame(size), &gpu.device, &gpu.queue, &stereo, FORMAT);
+                    surface.render_xr_stereo(
+                        &frame(size),
+                        &gpu.device,
+                        &gpu.queue,
+                        &stereo,
+                        FORMAT,
+                    );
                 } else {
                     surface.render_xr(&frame(size), &gpu.device, &gpu.queue, &views, FORMAT);
                 }
                 surface.submitted();
                 let cpu = start.elapsed().as_secs_f64() * 1e3;
-                gpu.device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                gpu.device
+                    .poll(wgpu::PollType::wait_indefinitely())
+                    .unwrap();
                 let total = start.elapsed().as_secs_f64() * 1e3;
                 if i >= 10 {
                     times.push((cpu, total));

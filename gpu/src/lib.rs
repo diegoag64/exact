@@ -66,7 +66,7 @@ pub mod haptics;
 pub mod json;
 pub mod shaders;
 mod target;
-pub use target::ColorSpace;
+pub use target::{ColorSpace, ColorTarget};
 pub mod tier;
 pub use tier::{set_thread_tier, set_tier, tier, GpuTier};
 #[cfg(not(target_arch = "wasm32"))]
@@ -76,6 +76,8 @@ mod xr;
 pub use xr::{XrEye, XrScratch, XrStereo, XrView};
 pub mod xr_input;
 pub use xr_input::{XrHand, XrInput, XrPose, XR_INPUT_FLOATS};
+mod wake;
+pub use wake::SurfaceWaker;
 #[cfg(windows)]
 mod window;
 pub use uniform::FrameUniform;
@@ -223,6 +225,11 @@ impl AssetChanges {
 
 /// What an app implements per canvas.
 pub trait Surface {
+    /// Receive this canvas's wake handle, once at surface creation before any
+    /// other callback (LLP 1009 D12). Call [`SurfaceWaker::wake`] from any
+    /// thread when asynchronous work finishes and a resting canvas needs
+    /// another frame.
+    fn set_waker(&mut self, _waker: SurfaceWaker) {}
     /// This canvas's native session directories, once before its first bind.
     /// Copy paths you keep; create directories only when needed. The paths map
     /// to `app:/data`, `app:/cache` and `app:/tmp`, including named agent stores.
@@ -423,7 +430,16 @@ pub trait Surface {
     /// granted features and limits choose the resources and compute tier to use.
     fn device_ready(&mut self, _features: wgpu::Features, _limits: wgpu::Limits) {}
     /// Presentation was lost; release device resources without discarding owned state.
-    fn device_lost(&mut self) {}
+    ///
+    /// Returns `false` by default: the module drops this surface and builds a fresh one
+    /// from its registered factory under the same canvas ID, replaying host configuration
+    /// and the last accepted bind so surfaces that cache wgpu handles need no custom
+    /// recovery code. Return `true` only if this surface has dropped every handle from
+    /// the lost device (including cloned child views and any external cache) and can
+    /// safely continue in place on a replacement device.
+    fn device_lost(&mut self) -> bool {
+        false
+    }
     /// The GPU tier changed (`gpu_retier`, LLP 1139.003 D2): true when the
     /// surface released its renderer to remake it at the new rung.
     fn retier(&mut self) -> bool {
@@ -458,6 +474,9 @@ pub trait Surface {
     /// Every native readback reports sRGB before capture, including after
     /// detachment, then restores any P3 presentation grant after capture.
     fn color_space_granted(&mut self, _space: ColorSpace) {}
+    /// The current destination for a bound colour. Called before preparing or rendering
+    /// for a window, hardware buffer or native readback.
+    fn color_target(&mut self, _target: ColorTarget) {}
     /// Every output pixel of this instance has alpha one under its current
     /// clear/background policy. Evaluated after binding, never by surface type.
     /// Allows a host to present a full-window canvas beneath its UI. On Android
@@ -480,6 +499,12 @@ pub trait Surface {
     }
     /// One device event in canvas points, stamped with the host's clock.
     fn input(&mut self, _event: &InputEvent) {}
+    /// Why the surface requested this frame, sampled before rendering during a platform trace.
+    fn draw_reasons(&self, _input_poll: bool, _record: &mut dyn FnMut(&str)) {}
+    /// Remember this completed draw for the trace and return samples consumed since its predecessor.
+    fn finish_draw_trace(&mut self, _traced: bool) -> Option<u64> {
+        None
+    }
     /// Whether the event the last [`Surface::input`] took changed what the
     /// canvas shows, as [`Surface::frame_ready`] answers for `render`. False
     /// asks for no frame, so a resting scene can take a sensor's samples or a
@@ -639,6 +664,7 @@ pub struct Module {
     next: u32,
     error: String,
     seekable: bool,
+    frame_samples: bool,
     reduced_motion: bool,
     period_ms: f64,
     /// The host's last display callback and the device's thermal state ([`pace`]).
@@ -688,10 +714,11 @@ mod recovery;
 /// free (the compositor releases one some 5 ms after it) and a kernel
 /// stall of 8 ms then cost a refresh: about five a 90-second tour, none to
 /// two with four, for some 0.6 frames more queued on average.
-const FRAME_LATENCY: u32 = if cfg!(target_os = "android") { 4 } else { 2 };
+pub(crate) const FRAME_LATENCY: u32 = if cfg!(target_os = "android") { 4 } else { 2 };
 
 struct Instance {
     name: String,
+    factory: Factory,
     surface: Box<dyn Surface>,
     messages: Vec<String>,
     published: Option<String>,
@@ -712,15 +739,33 @@ struct Instance {
     acquire: acquire::Acquire,
     #[cfg(not(target_arch = "wasm32"))]
     readback: Option<readback::Readback>,
+    #[cfg(not(target_arch = "wasm32"))]
+    sampled: Option<readback::Rows>,
     #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
     layer: Option<usize>,
+    #[cfg(not(target_arch = "wasm32"))]
+    storage_dirs: Option<[std::path::PathBuf; 3]>,
+    #[cfg(not(target_arch = "wasm32"))]
+    poll_input: bool,
+    last_size: Option<(f32, f32)>,
+    visibility: Option<Lifecycle>,
+    interrupted: Option<Lifecycle>,
     outstanding: BTreeSet<String>,
     answered: BTreeSet<String>,
     bound: bool,
+    /// Reconstructed surface awaits its last accepted bind once `finish_attach`
+    /// has announced `device_ready` and `color_space_granted`.
+    needs_rebind: bool,
     /// The inputs its last accepted bind gave its surface ([`Module::bind_changed_json`]).
     inputs: Vec<Value>,
+    last_bind_at_ms: Option<f64>,
+    has_color_inputs: bool,
+    destination: ColorTarget,
     dirty: bool,
     input_dirty: bool,
+    wake: wake::WakeState,
+    #[cfg(exact_android_draw_trace)]
+    draw_trace: android::DrawTrace,
     /// Its first frame has been handed to the compositor (`Module::seen`);
     /// shared with the callback that says so.
     seen: Arc<AtomicBool>,
@@ -791,6 +836,7 @@ impl Module {
             next: 0,
             error: String::new(),
             seekable: false,
+            frame_samples: false,
             reduced_motion: false,
             period_ms: 0.0,
             host: Default::default(),
@@ -801,14 +847,21 @@ impl Module {
 
     /// Adopt a device (the platform-specific loader made it).
     pub fn set_gpu(&mut self, gpu: Gpu) {
+        self.set_gpu_inner(gpu, true);
+    }
+
+    pub(crate) fn set_gpu_inner(&mut self, gpu: Gpu, attach_layers: bool) {
         #[cfg(windows)]
         {
             self.window = None;
         }
-        self.check_device();
+        if self.gpu.is_some() {
+            self.lose_device();
+        }
         #[cfg(not(target_arch = "wasm32"))]
         for inst in self.instances.values_mut() {
             inst.readback = None;
+            inst.sampled = None;
             inst.scratch = None;
         }
         // A frame recorded on another device is never submitted on this one.
@@ -839,13 +892,13 @@ impl Module {
             if self.refused.contains_key(inst.name.as_str()) {
                 continue;
             }
-            let format =
+            let destination =
                 if let (Some(target), Some(config)) = (&inst.presentation, &mut inst.config) {
                     let caps = target.get_capabilities(&gpu.adapter);
                     inst.hdr = target::configure(&*inst.surface, &gpu.adapter, &caps, config);
                     inst.alpha_modes = caps.alpha_modes;
                     swapchains(|| target.configure(&gpu.device, config));
-                    view_format(config)
+                    ColorTarget::of(config)
                 } else {
                     if inst.config.is_some() {
                         continue;
@@ -855,15 +908,22 @@ impl Module {
                     #[cfg(target_arch = "wasm32")]
                     continue;
                     #[cfg(not(target_arch = "wasm32"))]
-                    inst.offscreen_format()
+                    ColorTarget::readback(inst.offscreen_format())
                 };
-            inst.surface
-                .device_ready(gpu.device.features(), gpu.device.limits());
-            inst.report_color_space();
-            inst.surface.prepare_assets(&gpu.device, &gpu.queue, format);
-            inst.dirty = true;
+            if let Err(e) = inst.finish_attach(&gpu, destination, true) {
+                self.error = e.0;
+                continue;
+            }
         }
         self.gpu = Some(gpu);
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+        if attach_layers {
+            if let Err(error) = self.reattach_layers() {
+                self.error = error;
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "tvos")))]
+        let _ = attach_layers;
     }
 
     pub(crate) fn recovery_report(&mut self) -> String {
@@ -871,13 +931,16 @@ impl Module {
         ids.sort_unstable();
         let rows: Vec<_> = ids
             .into_iter()
-            .map(|id| {
-                let inst = self.instances.get_mut(&id).unwrap();
+            .filter_map(|id| {
+                let inst = self.instances.get_mut(&id)?;
+                if self.refused.contains_key(inst.name.as_str()) {
+                    return None;
+                }
                 let state = inst
                     .surface
                     .agent("{\"op\":\"state\"}")
                     .unwrap_or("null".into());
-                format!("{{\"id\":{id},\"preparation\":{state}}}")
+                Some(format!("{{\"id\":{id},\"preparation\":{state}}}"))
             })
             .collect();
         format!(
@@ -943,7 +1006,7 @@ impl Module {
         match shaders::set_shader(name, text, Some(expected)) {
             Ok(()) => {
                 for inst in self.instances.values_mut() {
-                    inst.dirty = true;
+                    inst.invalidate();
                 }
                 true
             }
@@ -968,23 +1031,39 @@ impl Module {
         else {
             return self.fail(format!("no surface named `{name}` in this module"));
         };
-        self.insert(name, factory(), None)
+        let mut surface = factory();
+        let (wake, waker) = wake::WakeState::new();
+        surface.set_waker(waker);
+        self.insert(name, *factory, surface, wake, None)
     }
 
     fn insert(
         &mut self,
         name: &str,
+        factory: Factory,
         mut surface: Box<dyn Surface>,
+        wake: wake::WakeState,
         presentation: Option<(wgpu::Surface<'static>, wgpu::SurfaceConfiguration)>,
     ) -> Option<u32> {
         self.next += 1;
         let id = self.next;
+        let destination = presentation.as_ref().map_or_else(
+            || {
+                ColorTarget::readback(if surface.srgb_target() {
+                    wgpu::TextureFormat::Rgba8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Rgba8Unorm
+                })
+            },
+            |(_, config)| ColorTarget::of(config),
+        );
         surface.clock(self.seekable);
         surface.reduced_motion(self.reduced_motion);
         if let Some(gpu) = &self.gpu {
             surface.device_ready(gpu.device.features(), gpu.device.limits());
-            surface.color_space_granted(target::granted(presentation.as_ref().map(|(_, c)| c)));
+            surface.color_space_granted(destination.space);
         }
+        surface.color_target(destination);
         let (presentation, config) = presentation.map_or((None, None), |(target, config)| {
             (Some(SurfaceRef::new(target)), Some(config))
         });
@@ -992,6 +1071,7 @@ impl Module {
             id,
             Instance {
                 name: name.into(),
+                factory,
                 surface,
                 messages: Vec::new(),
                 published: None,
@@ -1007,14 +1087,30 @@ impl Module {
                 acquire: Default::default(),
                 #[cfg(not(target_arch = "wasm32"))]
                 readback: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                sampled: None,
                 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
                 layer: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                storage_dirs: None,
+                #[cfg(not(target_arch = "wasm32"))]
+                poll_input: false,
+                last_size: None,
+                visibility: None,
+                interrupted: None,
                 outstanding: BTreeSet::new(),
                 answered: BTreeSet::new(),
                 bound: false,
+                needs_rebind: false,
                 inputs: Vec::new(),
+                last_bind_at_ms: None,
+                has_color_inputs: false,
+                destination,
                 dirty: false,
                 input_dirty: false,
+                wake,
+                #[cfg(exact_android_draw_trace)]
+                draw_trace: Default::default(),
                 seen: Default::default(),
                 presented: Default::default(),
                 children: None,
@@ -1030,25 +1126,46 @@ impl Module {
         Some(id)
     }
 
-    /// Release presentation resources while preserving every surface's state.
+    /// Release presentation resources, and drop or reconstruct surfaces whose
+    /// GPU handles belong to the lost device.
     pub fn lose_device(&mut self) {
+        let had_gpu = self.gpu.is_some();
         #[cfg(not(target_arch = "wasm32"))]
         self.pipeline_cache.invalidate();
         #[cfg(windows)]
         {
             self.window = None;
         }
+        // Detach the old device's loss latch before dropping anything so a
+        // retired device's callback cannot look active for this module.
+        self.device_lost = Arc::new(AtomicBool::new(false));
         // The recorded frame and its drawables go before their surfaces do.
         self.open = None;
         for inst in self.instances.values_mut() {
             self.retired.extend(inst.release());
-            inst.surface.device_lost();
+            inst.seen = Arc::new(AtomicBool::new(false));
+            inst.cadence.rest();
+            // Notify retained surfaces that module-owned child GPU views are gone
+            // before dropping them or calling `device_lost`. Textureless geometry
+            // slots hold no GPU resources and stay intact for retained surfaces.
+            if inst.children.is_some() {
+                inst.surface.children(None, None);
+                inst.children = None;
+            }
+            for (index, slot) in inst.each.iter_mut().enumerate() {
+                if slot.take().is_some() {
+                    inst.surface.child(index, "", None, [0.0; 4]);
+                }
+            }
+            let retained = inst.surface.device_lost();
             inst.answered.clear();
             inst.outstanding.clear();
-            inst.dirty = true;
-            inst.children = None;
-            inst.each.clear();
-            inst.child_geometry.clear();
+            if had_gpu && !retained {
+                inst.each.clear();
+                inst.child_geometry.clear();
+                inst.reconstruct(self.seekable, self.reduced_motion);
+            }
+            inst.invalidate();
         }
         self.gpu = None;
     }
@@ -1094,7 +1211,7 @@ impl Module {
         self.reduced_motion = reduce;
         for inst in self.instances.values_mut() {
             inst.surface.reduced_motion(reduce);
-            inst.dirty = true;
+            inst.invalidate();
             inst.drain();
         }
     }
@@ -1112,6 +1229,11 @@ impl Module {
             _ => return,
         };
         if let Some(inst) = self.instances.get_mut(&id) {
+            match event {
+                Lifecycle::Hidden | Lifecycle::Visible => inst.visibility = Some(event),
+                Lifecycle::Interrupted | Lifecycle::Resumed => inst.interrupted = Some(event),
+                Lifecycle::Activated => {}
+            }
             inst.surface.lifecycle(event);
             inst.drain();
         }
@@ -1141,7 +1263,9 @@ impl Module {
         };
         let reply = inst.surface.agent(request);
         let messages = inst.surface.messages();
-        inst.dirty |= reply.is_some() || !messages.is_empty();
+        if reply.is_some() || !messages.is_empty() {
+            inst.invalidate();
+        }
         inst.messages.extend(messages);
         if let Some(record) = inst.surface.published() {
             inst.published = Some(record);
@@ -1156,6 +1280,10 @@ impl Module {
     /// New inputs for a canvas; a refusal is reported and the surface keeps
     /// its last accepted inputs.
     pub fn bind(&mut self, id: u32, inputs: &[Value], at_ms: Option<f64>) -> bool {
+        self.bind_inputs(id, inputs, at_ms, false)
+    }
+
+    fn bind_inputs(&mut self, id: u32, inputs: &[Value], at_ms: Option<f64>, tagged: bool) -> bool {
         self.settle(id);
         self.check_device();
         let Some(inst) = self.instances.get_mut(&id) else {
@@ -1165,8 +1293,11 @@ impl Module {
             Ok(()) => {
                 inst.drain();
                 inst.bound = true;
+                inst.has_color_inputs =
+                    tagged && binding::has_color(inputs, inst.surface.rest_arguments());
                 inst.inputs = inputs.to_vec();
-                inst.dirty = true;
+                inst.last_bind_at_ms = at_ms;
+                inst.invalidate();
                 #[cfg(windows)]
                 if inst.surface.is_empty() {
                     self.discard_window_picture(id);
@@ -1192,7 +1323,7 @@ impl Module {
             retired,
         } = inst.surface.assets();
         if !retired.is_empty() {
-            inst.dirty = true;
+            inst.invalidate();
         }
         for name in &retired {
             inst.answered.remove(name);
@@ -1216,6 +1347,7 @@ impl Module {
     /// Deliver one requested asset, with None for a missing file; works without a device.
     pub fn asset(&mut self, id: u32, name: &str, bytes: Result<&[u8], AssetError>) -> bool {
         self.settle(id);
+        self.check_device();
         if !asset_name(name) {
             self.error = format!("asset `{name}`: invalid relative asset path");
             return false;
@@ -1237,7 +1369,7 @@ impl Module {
                 .prepare_assets(&gpu.device, &gpu.queue, view_format(config));
         }
         inst.drain();
-        inst.dirty = true;
+        inst.invalidate();
         if let Some(SurfaceError(error)) = inst.surface.take_error() {
             self.error = error;
             return false;
@@ -1272,7 +1404,7 @@ impl Module {
                 inst.presented.forget_record();
                 inst.presented.reset();
                 inst.drain();
-                inst.dirty = true;
+                inst.invalidate();
                 true
             }
             Err(error) => {
@@ -1280,15 +1412,6 @@ impl Module {
                 false
             }
         }
-    }
-
-    /// Whether a canvas has something to render: inputs it has not shown.
-    pub fn dirty(&self, id: u32) -> bool {
-        self.has_device(id)
-            && self
-                .instances
-                .get(&id)
-                .is_some_and(|i| i.dirty || i.input_dirty || i.surface.preparing())
     }
 
     /// Whether a canvas's last render went without a drawable (`acquire`):
@@ -1308,8 +1431,7 @@ impl Module {
 
     /// Every command submitted to the device so far, complete (LLP 1008 §9):
     /// a host that hands the module textures it renders itself waits here
-    /// before drawing into one the module may still be reading — sampling
-    /// it, or copying it into the previous children.
+    /// before drawing into one the module may still be reading.
     pub fn sync(&mut self) -> bool {
         self.flush();
         match self.gpu() {
@@ -1327,6 +1449,9 @@ impl Module {
     /// Drop a canvas's surface.
     pub fn destroy(&mut self, id: u32) {
         self.settle(id);
+        if let Some(inst) = self.instances.get(&id) {
+            inst.wake.kill();
+        }
         self.release(id);
         self.instances.remove(&id);
     }

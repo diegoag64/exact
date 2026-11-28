@@ -123,6 +123,7 @@ impl Parser {
                     s,
                     Step::FailFetch { .. }
                         | Step::AnswerFetch { .. }
+                        | Step::AnswerStream { .. }
                         | Step::AnswerSource { .. }
                         | Step::Prefer { .. }
                         | Step::PreferExtension { .. }
@@ -281,7 +282,7 @@ impl Parser {
     }
 
     /// A launch line's quoted value.
-    fn launch_str(&mut self, word: &str, what: &str) -> R<String> {
+    pub(super) fn launch_str(&mut self, word: &str, what: &str) -> R<String> {
         match self.peek_kind().clone() {
             TokenKind::Str(s) if !s.is_empty() => {
                 self.next();
@@ -496,49 +497,6 @@ impl Parser {
         })
     }
 
-    /// A JSON value from its tokens, as JSON text. Its
-    /// brackets may span lines.
-    fn json_value(&mut self) -> R<String> {
-        let token = self.next();
-        Ok(match token.kind {
-            TokenKind::Json(raw) => raw,
-            TokenKind::Punct(open @ ("{" | "[")) => {
-                let close = if open == "{" { "}" } else { "]" };
-                let mut out = String::from(open);
-                while !self.eat_punct(close) {
-                    if out.len() > 1 {
-                        self.expect_punct(",")?;
-                        out.push(',');
-                    }
-                    if open == "{" {
-                        out.push_str(&json_string(&self.str_lit("a key")?));
-                        self.expect_punct(":")?;
-                        out.push(':');
-                    }
-                    out.push_str(&self.json_value()?);
-                }
-                out.push_str(close);
-                out
-            }
-            TokenKind::Str(s) => json_string(&s),
-            TokenKind::Number(n) => format!("{n}"),
-            TokenKind::Punct("-") if matches!(self.peek_kind(), TokenKind::Number(_)) => {
-                format!("-{}", self.step_number("a number")?)
-            }
-            TokenKind::Ident(w) if w == "true" || w == "false" || w == "null" => w,
-            other => {
-                return Err(SyntaxError {
-                    id: "syntax-expected-step",
-                    message: format!(
-                    "expected a JSON object, list, string, number, true, false or null, found {}",
-                    describe(&other)
-                ),
-                    span: token.span,
-                })
-            }
-        })
-    }
-
     pub(super) fn step(&mut self) -> R<Step> {
         let (word, span) = match self.peek_kind().clone() {
             TokenKind::Ident(w) => (w, self.peek().span),
@@ -604,10 +562,12 @@ impl Parser {
             },
             "tap" => {
                 let target = self.str_lit("a testId")?;
-                if self.at_ident("drag") {
+                if target.starts_with('@') {
+                    self.ticket_step(&target, span, false)?
+                } else if self.at_ident("drag") {
                     self.next();
                     return self.drag_step(target, span);
-                }
+                } else {
                 let form = match self.peek_kind().clone() {
                     TokenKind::Ident(w) if w == "hover" || w == "dblclick" || w == "contextmenu" || w == "into" || w == "pinch" || w == "swipe" || w == "wheel" => {
                         self.next();
@@ -720,10 +680,13 @@ impl Parser {
                     modifiers,
                     span,
                 }
+                }
             }
             "type" => {
                 let target = self.str_lit("a testId")?;
-                if self.at_ident("key") {
+                if target.starts_with('@') {
+                    self.ticket_step(&target, span, true)?
+                } else if self.at_ident("key") {
                     self.next();
                     let key = self.str_lit("the key's name")?;
                     // `down` / `up` / `for <ms>`: one of them, on the virtual clock (platformer R7).
@@ -1006,6 +969,12 @@ impl Parser {
                 account: self.json_value()?,
                 span,
             },
+            // @ref LLP 1018.000 D1 — `secret "<name>" "<value>"`: a plain secret.keep seed.
+            "secret" => Step::Secret {
+                name: self.launch_str("secret", "a plain secret.keep grant name")?,
+                value: self.launch_str("secret", "the seeded secret text")?,
+                span,
+            },
             "stored" => Step::Stored {
                 name: self.ident()?.0,
                 window: false,
@@ -1043,34 +1012,50 @@ impl Parser {
                 self.next();
                 Step::BeforeData { span }
             }
-            // @ref LLP 1103 D3 — `fail fetch "<prefix>" [times N]`, `pass fetch "<prefix>"`.
-            "fail" | "pass" => {
+            // @ref LLP 1103 D3 — `fail fetch "<prefix>" [times N]`, `pass fetch|stream "<prefix>"`.
+            "pass" => {
+                if self.at_ident("fetch") {
+                    self.next();
+                    Step::PassFetch {
+                        prefix: self.launch_str("pass fetch", "the URL prefix a fetch starts with")?,
+                        span,
+                    }
+                } else if self.at_ident("stream") {
+                    self.next();
+                    Step::PassStream {
+                        prefix: self.launch_str("pass stream", "the URL prefix a stream starts with")?,
+                        span,
+                    }
+                } else {
+                    return self.err(
+                        "syntax-expected-step",
+                        "`pass` takes `fetch` or `stream`: `pass fetch \"https://api.example.com/\"` or `pass stream \"https://api.example.com/\"`",
+                    );
+                }
+            }
+            "fail" => {
                 if !self.at_ident("fetch") {
                     return self.err(
                         "syntax-expected-step",
-                        format!("`{word}` takes `fetch`: `{word} fetch \"https://api.example.com/\"`"),
+                        "`fail` takes `fetch`: `fail fetch \"https://api.example.com/\"` (to fail a stream, write `answer stream` with a `fail \"...\"` row or non-2xx status)",
                     );
                 }
                 self.next();
-                let prefix = self.launch_str(&format!("{word} fetch"), "the URL prefix a fetch starts with")?;
-                if word == "pass" {
-                    Step::PassFetch { prefix, span }
+                let prefix = self.launch_str("fail fetch", "the URL prefix a fetch starts with")?;
+                let times = if self.at_ident("times") {
+                    self.next();
+                    let n = self.step_number("how many fetches fail, a positive whole number")?;
+                    if n.fract() != 0.0 || !(1.0..=u32::MAX as f64).contains(&n) {
+                        return self.err(
+                            "syntax-expected-step",
+                            "`fail fetch … times` takes a positive whole number",
+                        );
+                    }
+                    Some(n as u32)
                 } else {
-                    let times = if self.at_ident("times") {
-                        self.next();
-                        let n = self.step_number("how many fetches fail, a positive whole number")?;
-                        if n.fract() != 0.0 || !(1.0..=u32::MAX as f64).contains(&n) {
-                            return self.err(
-                                "syntax-expected-step",
-                                "`fail fetch … times` takes a positive whole number",
-                            );
-                        }
-                        Some(n as u32)
-                    } else {
-                        None
-                    };
-                    Step::FailFetch { prefix, times, span }
-                }
+                    None
+                };
+                Step::FailFetch { prefix, times, span }
             }
             "drop" => {
                 self.expect_word("stream")?;
@@ -1087,6 +1072,7 @@ impl Parser {
                     span,
                 }
             }
+            "answer" if self.at_ident("stream") => return self.answer_stream(span),
             "answer" => {
                 self.expect_word("fetch")?;
                 let prefix = self.launch_str("answer fetch", "a URL prefix")?;
@@ -1299,7 +1285,7 @@ impl Parser {
                 return Err(SyntaxError {
                     id: "syntax-expected-step",
                     message: format!(
-                    "expected `tap`, `scroll`, `type`, `pick`, `authorize`, `presence`, `clock`, `fold`, `rotate`, `resize`, `reload`, `close`, `back`, `screenshot`, `prefer`, `request`, `expect`, or a launch line (`size`, `epoch`, `time-zone`, `locale`, `seed`, `signed-in`, `stored`, `fresh`, `before data`), found `{other}`"
+                    "expected `tap`, `scroll`, `type`, `pick`, `authorize`, `presence`, `clock`, `fold`, `rotate`, `resize`, `reload`, `close`, `back`, `screenshot`, `prefer`, `request`, `expect`, or a launch line (`size`, `epoch`, `time-zone`, `locale`, `seed`, `signed-in`, `secret`, `stored`, `fresh`, `before data`), found `{other}`"
                 ),
                     span,
                 })
@@ -1311,7 +1297,7 @@ impl Parser {
 }
 
 /// A string as JSON writes it.
-fn json_string(s: &str) -> String {
+pub(super) fn json_string(s: &str) -> String {
     let mut out = String::from('"');
     for c in s.chars() {
         match c {
@@ -1340,7 +1326,7 @@ pub(super) fn during_read(op: &str) -> bool {
 
 /// The words of a test's launch lines, which a test file may also write at
 /// its top level for every test in it (habits F7, calendar F13).
-pub(super) const LAUNCH: [&str; 13] = [
+pub(super) const LAUNCH: [&str; 14] = [
     "size",
     "at",
     "epoch",
@@ -1348,6 +1334,7 @@ pub(super) const LAUNCH: [&str; 13] = [
     "locale",
     "seed",
     "signed-in",
+    "secret",
     "stored",
     "fresh",
     "before",
@@ -1368,11 +1355,13 @@ pub(super) fn launch_word(step: &Step) -> &'static str {
         Step::Locale { .. } => "locale",
         Step::Seed { .. } => "seed",
         Step::SignedIn { .. } => "signed-in",
+        Step::Secret { .. } => "secret",
         Step::Stored { .. } => "stored",
         Step::Fresh { .. } => "fresh",
         Step::BeforeData { .. } => "before data",
         Step::FailFetch { .. } => "fail fetch",
         Step::AnswerFetch { .. } => "answer fetch",
+        Step::AnswerStream { .. } => "answer stream",
         Step::AnswerSource { .. } => "answer source",
         _ => "",
     }
@@ -1386,20 +1375,40 @@ pub fn is_launch(step: &Step) -> bool {
 /// Whether two launch lines set the same fact: `fail fetch` lines, the same
 /// prefix; preferences, the same fact after resolving drive aliases.
 pub fn same_launch(a: &Step, b: &Step) -> bool {
-    fn fetch_rule(step: &Step) -> Option<(&str, Option<&str>)> {
+    fn fetch_rule(step: &Step) -> Option<(&str, Option<String>)> {
         match step {
             Step::FailFetch { prefix, .. } => Some((prefix, None)),
-            Step::AnswerFetch { prefix, method, .. } => Some((prefix, method.as_deref())),
+            Step::AnswerFetch { prefix, method, .. } => {
+                Some((prefix, method.as_deref().map(str::to_ascii_uppercase)))
+            }
+            _ => None,
+        }
+    }
+    fn stream_rule(step: &Step) -> Option<(&str, Option<String>)> {
+        match step {
+            Step::AnswerStream { prefix, method, .. } => {
+                Some((prefix, method.as_deref().map(str::to_ascii_uppercase)))
+            }
+            _ => None,
+        }
+    }
+    fn secret_slot(step: &Step) -> Option<&str> {
+        match step {
+            Step::SignedIn { key, .. } => Some(key),
+            Step::Secret { name, .. } => Some(name),
             _ => None,
         }
     }
     if let (Some(x), Some(y)) = (fetch_rule(a), fetch_rule(b)) {
         return x == y;
     }
+    if let (Some(x), Some(y)) = (stream_rule(a), stream_rule(b)) {
+        return x == y;
+    }
     if let (Step::AnswerSource { source: x, .. }, Step::AnswerSource { source: y, .. }) = (a, b) {
         return x == y;
     }
-    if let (Step::SignedIn { key: x, .. }, Step::SignedIn { key: y, .. }) = (a, b) {
+    if let (Some(x), Some(y)) = (secret_slot(a), secret_slot(b)) {
         return x == y;
     }
     if let (Step::Stored { name: x, .. }, Step::Stored { name: y, .. }) = (a, b) {
@@ -1456,6 +1465,7 @@ fn prefer_key(name: &str) -> &str {
         "safe-area",
         "display-scale",
         "gpu-tier",
+        "ask-siri",
         "posture",
         "segments",
         "gap",

@@ -55,6 +55,15 @@ pub enum LayoutOperand {
     },
 }
 
+/// The answer in an authored held-ticket step (`tap "@target" choice` or `type "@target" "text"`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TicketAnswer {
+    /// A discrete choice (`tap "@browser" dismissed`, `tap "@share" cancel`).
+    Choice(String),
+    /// Typed text (`type "@date" "2026-10-10"`).
+    Text(String),
+}
+
 /// `test "name"` with steps: the agent API's own operations (LLP 1012) and
 /// `expect` lines that read their replies — compiled to a script the agent
 /// driver runs against the real hosts; never a second evaluator (LLP 1017 P7).
@@ -238,6 +247,17 @@ pub enum Step {
         /// Where.
         span: Span,
     },
+    /// A scripted HTTP stream fixture (`answer stream`, LLP 1103), installed before boot when leading a test.
+    AnswerStream {
+        /// What a matching stream request's URL starts with.
+        prefix: String,
+        /// An explicit HTTP method restricts the fixture to that method.
+        method: Option<String>,
+        /// Stream schedule or buffered non-streaming reply, encoded as JSON.
+        stream: String,
+        /// Where.
+        span: Span,
+    },
     /// `answer source <name> with <json>`: what the named source answers
     /// from here on, under `contract verify`'s runner. Leading a test (or the
     /// file), before boot; later, a step that asks again every resource
@@ -253,6 +273,13 @@ pub enum Step {
     /// `pass fetch "…"`: the prefix stops failing or answering (LLP 1103).
     PassFetch {
         /// The prefix a `fail fetch` armed.
+        prefix: String,
+        /// Where.
+        span: Span,
+    },
+    /// `pass stream "…"`: stream rules at the prefix stop answering (LLP 1103).
+    PassStream {
+        /// The prefix an `answer stream` armed.
         prefix: String,
         /// Where.
         span: Span,
@@ -297,6 +324,15 @@ pub enum Step {
         key: String,
         /// The fixture account as JSON.
         account: String,
+        /// Where.
+        span: Span,
+    },
+    /// A plain `secret.keep` value seeded in the test's initial scratch store (LLP 1018.000 D1).
+    Secret {
+        /// The granted plain `secret.keep` name.
+        name: String,
+        /// The seeded secret value text.
+        value: String,
         /// Where.
         span: Span,
     },
@@ -368,6 +404,16 @@ pub enum Step {
     Presence {
         /// `allow`, `cancel`, `fail`, `lockout` or `invalidated`.
         answer: String,
+        /// Where.
+        span: Span,
+    },
+    /// `tap "@target" <choice>` or `type "@target" "<text>"`: answer a held device
+    /// or package ticket by its capability or target name.
+    Ticket {
+        /// The ticket's name without its leading `@` (for example `browser`, `share`, `date`).
+        target: String,
+        /// The choice or typed text answering the hold.
+        answer: TicketAnswer,
         /// Where.
         span: Span,
     },

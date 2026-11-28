@@ -24,6 +24,46 @@ package enum LiftTarget {
         return corners.contains(where: { $0.width > 0 }) ? node.roundedPath(in: node.bounds) : nil
     }
 
+    /// A list cell's ground as it shows while pressed, in the cell's
+    /// coordinates now: the background installed where it has a shape (the
+    /// press under way), else UIKit's default one in a pressed state, since
+    /// a sidebar's row at rest draws none; `insets`, the row's own background
+    /// insets where its list gave some, replace UIKit's. Nil for a ground
+    /// with no inset or radius.
+    package static func backgroundShape(of cell: UICollectionViewListCell, insets: NSDirectionalEdgeInsets? = nil) -> UIBezierPath? {
+        var pressed = cell.configurationState
+        pressed.isHighlighted = true
+        var ground = cell.backgroundConfiguration.flatMap { $0.cornerRadius > 0 ? $0 : nil } ?? cell.defaultBackgroundConfiguration().updated(for: pressed)
+        if let insets { ground.backgroundInsets = insets }
+        var inset = ground.backgroundInsets, margins = cell.directionalLayoutMargins
+        let added = ground.edgesAddingLayoutMarginsToBackgroundInsets
+        if added.contains(.top) { inset.top += margins.top }
+        if added.contains(.bottom) { inset.bottom += margins.bottom }
+        if added.contains(.leading) { inset.leading += margins.leading }
+        if added.contains(.trailing) { inset.trailing += margins.trailing }
+        guard ground.cornerRadius > 0 || inset != .zero else { return nil }
+        let rtl = cell.effectiveUserInterfaceLayoutDirection == .rightToLeft
+        let edges = UIEdgeInsets(top: inset.top, left: rtl ? inset.trailing : inset.leading,
+                                 bottom: inset.bottom, right: rtl ? inset.leading : inset.trailing)
+        return UIBezierPath(roundedRect: cell.bounds.inset(by: edges), cornerRadius: ground.cornerRadius)
+    }
+
+    /// How a node its clip path shapes lifts, for its context menu and its drag alike (LLP 1021 §5.1, LLP 1094.000
+    /// D4): in what the path leaves of its box, the box's shape in CSS (CSS Masking §5.1), cut to the box as it
+    /// shows (its surface while layout resizes it, LLP 1063) since UIKit's visible path is a portion of the view; on
+    /// its own fill, which UIKit's copy leaves out, or, where it has none, on the screen. Nil, a lift as without a
+    /// clip path, for a node with a `border-radius`, which keeps its rounded outline; for content the menu lifts as a
+    /// canvas's snapshot (`placedPreview`); for a node with a filter's picture of its own, which hides its layers and
+    /// so leaves UIKit's copy of it empty; and where the path leaves nothing of the box.
+    package static func clipLift(_ node: NodeView) -> (outline: UIBezierPath, ground: UIColor)? {
+        guard let clip = node.presentedClipPath, rounded(node) == nil, node.placedAncestor?.placement == nil, node.filterPicture == nil else {
+            return nil
+        }
+        let cut = clip.normalized(using: node.clipRule).intersection(CGPath(rect: node.surface?.frame ?? node.bounds, transform: nil))
+        guard !cut.boundingBoxOfPath.isEmpty else { return nil }
+        return (UIBezierPath(cgPath: cut), node.ownFill.flatMap { $0.alpha > 0 ? UIColor(cgColor: $0) : nil } ?? .clear)
+    }
+
     /// The view UIKit highlights, lifts and returns a preview over: the view of
     /// the controller that holds `view` (its route's, a sheet's, or the root
     /// controller's in an app with no routes), which the bars stay above.
@@ -56,8 +96,12 @@ package enum LiftTarget {
     /// `container(of:)`, centered on the view, with the view's transform, as
     /// UIKit's own target for a view carries it (`UITargetedPreview(view:parameters:)`),
     /// and each ancestor's scale and rotation; converting the center takes the
-    /// translations.
-    package static func target(_ view: UIView, pullDown: Bool = false) -> UIPreviewTarget? {
+    /// translations. UIKit sizes a preview to its visible path and puts the
+    /// path's middle at the target's center, so a preview drawn in part of its
+    /// view (a balloon's outline above the room its box keeps for a tail it
+    /// does not draw) aims at the middle of that part, `around`, in the view's
+    /// own space; else it would show offset by half what it leaves out.
+    package static func target(_ view: UIView, around region: CGRect? = nil, pullDown: Bool = false) -> UIPreviewTarget? {
         guard let container = pullDown ? pullDownContainer(of: view) : container(of: view), let parent = view.superview else { return nil }
         var transform = view.transform
         for ancestor in sequence(first: parent, next: { $0.superview }) {
@@ -67,7 +111,8 @@ package enum LiftTarget {
         }
         transform.tx = 0
         transform.ty = 0
-        return UIPreviewTarget(container: container, center: view.convert(CGPoint(x: view.bounds.midX, y: view.bounds.midY), to: container), transform: transform)
+        let middle = region.flatMap { $0.isEmpty ? nil : CGPoint(x: $0.midX, y: $0.midY) } ?? CGPoint(x: view.bounds.midX, y: view.bounds.midY)
+        return UIPreviewTarget(container: container, center: view.convert(middle, to: container), transform: transform)
     }
 
     /// `view` as its own preview, clipped to its corners, over nothing (a

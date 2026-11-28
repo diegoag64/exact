@@ -11,8 +11,8 @@
 //! the person's font scale, taken linearly: Android's own scaling is
 //! non-linear above 100%, and comes with the reported type ramp (D4, S2).
 //! An alert uses the platform face unless its own family is written (LLP 1104 D4).
-use super::shape::{Entry, Plan, Row};
-use crate::paint::{rgba, Backend, Ink, Rect4, Shape, SvgPaint};
+use super::shape::{Entry, MenuSurface, Plan, Row};
+use crate::paint::{rgba, Backend, Rect4, Shape};
 use crate::text::{Paragraph, RunPaint, TextEngine};
 use exact_kernel::style::roles;
 use exact_kernel::{ColorValue, Direction, StyleProps, SymbolSet, TextAlign, ViewId, WhiteSpace};
@@ -20,6 +20,10 @@ use std::rc::Rc;
 use tiny_skia::Transform;
 
 mod menu;
+mod surface;
+#[cfg(test)]
+#[path = "look/surface_tests.rs"]
+mod surface_tests;
 mod windows;
 
 /// A Material colour role, read through the role of Exact's that LLP
@@ -137,7 +141,7 @@ pub struct Inputs {
 enum Item {
     Text(Rc<Paragraph>, (f32, f32), [u8; 4], ViewId),
     Rule(Rect4, [u8; 4]),
-    Symbol(String, Rect4, [u8; 4]),
+    Symbol(String, Rect4, [u8; 4], Direction),
 }
 
 #[derive(Clone, Copy, Default)]
@@ -192,6 +196,8 @@ pub struct Layout {
     /// Whose shapes its symbols take: WinUI's on the desktop, else Material's.
     symbols: SymbolSet,
     symbol_weight: u16,
+    /// Authored non-uniform or elliptical `border-radius` fell back to 4 dp.
+    pub(in crate::presenter) non_uniform_radius: bool,
 }
 
 pub(in crate::presenter) fn paragraph(
@@ -337,14 +343,16 @@ impl Layout {
                 pop,
                 inputs,
             ),
-            Plan::Menu(entries) => menu(engine, entries, inputs, false),
+            Plan::Menu { entries, surface } => {
+                menu(engine, entries, surface.as_ref(), inputs, false)
+            }
         }
     }
 
     /// Windows' ContentDialog and MenuFlyout presentation.
     pub fn desktop(engine: &mut TextEngine, plan: &Plan, pop: ViewId, inputs: &Inputs) -> Layout {
         match plan {
-            Plan::Menu(entries) => menu(engine, entries, inputs, true),
+            Plan::Menu { entries, .. } => menu(engine, entries, None, inputs, true),
             Plan::Alert {
                 font_family,
                 title,
@@ -393,8 +401,15 @@ impl Layout {
         if let Some(content) = &self.windows {
             content.paint_buttons(backend, &self.targets, feedback);
         }
-        if let Some(clip) = self.menu_clip() {
+        let clip_container = self.menu_clip().is_some()
+            || (self.windows.is_none()
+                && self.border.is_none()
+                && self.elevation > 0.0
+                && self.radius > MENU_PADDING);
+        if clip_container {
             backend.push_clip(&container, ts);
+        }
+        if let Some(clip) = self.menu_clip() {
             backend.push_clip(&Shape::rect(clip), ts);
         }
         let ripple = feedback.ripple.filter(|_| self.windows.is_none());
@@ -463,7 +478,7 @@ impl Layout {
                     backend.text(engine, paragraph, &paint, *at, ts);
                 }
                 Item::Rule(rect, color) => backend.fill(&Shape::rect(*rect), *color, ts),
-                Item::Symbol(role, rect, color) => {
+                Item::Symbol(role, rect, color, direction) => {
                     let color = self
                         .contrast
                         .filter(|_| {
@@ -477,94 +492,28 @@ impl Layout {
                                 })
                         })
                         .map_or(*color, |p| p.highlighted_text);
-                    symbol(
+                    crate::paint::paint_symbol(
                         backend,
                         role,
                         *rect,
                         color,
                         self.symbols,
                         self.symbol_weight,
-                        false,
+                        *direction,
                     );
                 }
             }
         }
         if self.menu.is_some() {
             backend.pop_clip();
+        }
+        if clip_container {
             backend.pop_clip();
+        }
+        if self.menu.is_some() {
             self.paint_menu_scrollbar(backend);
         }
     }
-}
-
-/// A symbol role's path in `rect`, in `set`'s shape, as the page draws one
-/// at `weight` (`paint/svg.rs`): stroked, or filled.
-pub(in crate::presenter) fn symbol(
-    backend: &mut dyn Backend,
-    role: &str,
-    rect: Rect4,
-    color: [u8; 4],
-    set: SymbolSet,
-    weight: u16,
-    mirrored: bool,
-) {
-    // A role, an icon token's form, or `sf/` a role's Apple name (LLP 1121 D10).
-    let Some(path) = exact_kernel::symbol_path_in(role, set) else {
-        return;
-    };
-    // A translucent colour once over all an icon's paths.
-    let group = path.d.contains(';') && color[3] < 255;
-    if group {
-        backend.push_opacity(f32::from(color[3]) / 255.0);
-    }
-    let paint = if group {
-        [color[0], color[1], color[2], 255]
-    } else {
-        color
-    };
-    for d in path.d.split(';') {
-        glyph_in(backend, d, path, rect, paint, weight, mirrored);
-    }
-    if group {
-        backend.pop_opacity();
-    }
-}
-
-/// A path in `rect` under its viewBox, stroked in a role's 24 units, or filled.
-fn glyph_in(
-    backend: &mut dyn Backend,
-    d: &str,
-    symbol: exact_kernel::SymbolPath<'_>,
-    rect: Rect4,
-    color: [u8; 4],
-    weight: u16,
-    mirrored: bool,
-) {
-    let [_, _, bw, _] = crate::paint::view_box(symbol.view_box);
-    let path = exact_kernel::svg::parse_d(d);
-    let weight = f32::from(weight).clamp(100., 900.);
-    let paint = SvgPaint {
-        path: &path,
-        fill: symbol.filled.then_some(Ink::Solid(color)),
-        even_odd: symbol.even_odd,
-        stroke: (!symbol.filled).then_some(Ink::Solid(color)),
-        order: [0, 1, 2],
-        width: (1.1 + (weight - 100.0) / 400.0) * bw / 24.0,
-        cap: 1,
-        join: 1,
-        miter: 4.0,
-        dash: Vec::new(),
-        phase: 0.0,
-    };
-    let ts = crate::paint::fitted(symbol.view_box, rect);
-    let ts = if mirrored {
-        Transform::from_translate(2.0 * rect.0 + rect.2, 0.0)
-            .pre_scale(-1.0, 1.0)
-            .pre_concat(ts)
-    } else {
-        ts
-    };
-    backend.svg_path(&paint, ts);
 }
 
 /// Material's basic dialog: the headline, the supporting text, and the
@@ -704,12 +653,20 @@ fn alert(
         menu: None,
         symbols: SymbolSet::Material,
         symbol_weight: 400,
+        non_uniform_radius: false,
     }
 }
 
 /// Menu rows share their measured text and icon slots with painting and hit testing.
-fn menu(engine: &mut TextEngine, entries: &[Entry], inputs: &Inputs, desktop: bool) -> Layout {
+fn menu(
+    engine: &mut TextEngine,
+    entries: &[Entry],
+    surface: Option<&MenuSurface>,
+    inputs: &Inputs,
+    desktop: bool,
+) -> Layout {
     let (dark, scale) = (inputs.dark, inputs.font_scale);
+    let palette = surface::MenuPalette::resolve(surface, dark, desktop);
     // WinUI's MenuFlyout_themeresources.xaml: narrow input padding, 16 px
     // icons, 28 px placeholder, and a 4,2,4,2 item margin.
     // https://github.com/microsoft/microsoft-ui-xaml/blob/winui3/main/controls/dev/CommonStyles/MenuFlyout_themeresources.xaml
@@ -726,32 +683,35 @@ fn menu(engine: &mut TextEngine, entries: &[Entry], inputs: &Inputs, desktop: bo
         (None, false) => None,
     };
     let trailing_check = |row: &Row| !desktop && row.checked && row.symbol.is_some();
-    let trailing = |row: &Row| {
-        if trailing_check(row) {
-            symbol + inset
-        } else {
-            0.
-        }
-    };
     let rows = || {
         entries.iter().filter_map(|e| match e {
             Entry::Item(row) => Some(row),
             _ => None,
         })
     };
+    let has_trailing = !desktop && rows().any(|r| r.checkable && r.symbol.is_some());
+    let trailing = |_row: &Row| {
+        if has_trailing {
+            symbol + inset
+        } else {
+            0.
+        }
+    };
     let has_symbols = rows().any(|r| lead(r).is_some());
-    let indent = |row: &Row| {
+    // LLP 1115.001 D10 (#1956): reserve the leading slot across sibling rows
+    // whenever any item has a leading symbol or is checkable without a symbol.
+    let has_lead = has_symbols || (!desktop && rows().any(|r| r.checkable && r.symbol.is_none()));
+    let indent = |_row: &Row| {
         if desktop {
             if has_symbols {
                 28.
             } else {
                 0.
             }
+        } else if has_lead {
+            MENU_SYMBOL + MENU_INSET
         } else {
-            match lead(row) {
-                Some(_) => MENU_SYMBOL + MENU_INSET,
-                None => 0.0,
-            }
+            0.0
         }
     };
     // WinUI's MenuFlyout has no section title: one in its caption type.
@@ -817,10 +777,10 @@ fn menu(engine: &mut TextEngine, entries: &[Entry], inputs: &Inputs, desktop: bo
             (Entry::Item(row), Some((p, detail))) => (row, p, detail),
             (Entry::Header(_, node, _), Some((p, _))) => {
                 let tall = (p.height + 12.).max(if desktop { 28. } else { MENU_HEADER });
-                let ink = inputs.contrast.filter(|_| desktop).map_or_else(
-                    || Role::OnSurfaceVariant.color(dark),
-                    |palette| palette.text,
-                );
+                let ink = inputs
+                    .contrast
+                    .filter(|_| desktop)
+                    .map_or_else(|| palette.on_surface_variant, |palette| palette.text);
                 let x = if !desktop && inputs.direction == Direction::Rtl {
                     label_x(&p, width - inset, 1.)
                 } else {
@@ -833,7 +793,7 @@ fn menu(engine: &mut TextEngine, entries: &[Entry], inputs: &Inputs, desktop: bo
             }
             _ => {
                 let line = (0.0, y + rule.1, width, rule.0);
-                items.push(Item::Rule(line, Role::OutlineVariant.color(dark)));
+                items.push(Item::Rule(line, palette.rule));
                 y += rule.0 + 2.0 * rule.1;
                 continue;
             }
@@ -846,31 +806,45 @@ fn menu(engine: &mut TextEngine, entries: &[Entry], inputs: &Inputs, desktop: bo
             (text_height + 16.0).max(MENU_ROW)
         };
         let (ink, tint) = match (row.enabled, row.destructive) {
-            (false, _) => (Role::Disabled, Role::Disabled),
-            (true, true) => (Role::Error, Role::Error),
-            (true, false) => (Role::OnSurface, Role::OnSurfaceVariant),
+            (false, _) => (palette.disabled, palette.disabled),
+            (true, true) => (palette.error, palette.error_icon),
+            (true, false) => (palette.on_surface, palette.icon_variant),
         };
-        let ink = inputs.contrast.filter(|_| desktop).map_or_else(
-            || ink.color(dark),
-            |p| if row.enabled { p.text } else { p.disabled },
-        );
-        let tint = inputs.contrast.filter(|_| desktop).map_or_else(
-            || tint.color(dark),
-            |p| if row.enabled { p.text } else { p.disabled },
-        );
+        let ink = inputs.contrast.filter(|_| desktop).map_or(ink, |p| {
+            if row.enabled {
+                p.text
+            } else {
+                p.disabled
+            }
+        });
+        let tint = inputs.contrast.filter(|_| desktop).map_or(tint, |p| {
+            if row.enabled {
+                p.text
+            } else {
+                p.disabled
+            }
+        });
         let rtl = !desktop && inputs.direction == Direction::Rtl;
         let icon_rect = |start| {
             let x = if rtl { width - start - symbol } else { start };
             (x, y + (tall - symbol) / 2., symbol, symbol)
         };
         if let Some(role) = lead(row) {
-            items.push(Item::Symbol(role, icon_rect(inset), tint));
+            let symbol_direction = if row.symbol.is_some() {
+                row.symbol_direction
+            } else if desktop {
+                Direction::Ltr
+            } else {
+                inputs.direction
+            };
+            items.push(Item::Symbol(role, icon_rect(inset), tint, symbol_direction));
         }
         if trailing_check(row) {
             items.push(Item::Symbol(
                 "checkmark".into(),
                 icon_rect(width - inset - symbol),
                 tint,
+                inputs.direction,
             ));
         }
         let start = inset + indent(row);
@@ -888,11 +862,11 @@ fn menu(engine: &mut TextEngine, entries: &[Entry], inputs: &Inputs, desktop: bo
         if let Some(p) = detail {
             let at = (x(&p), detail_top);
             let color = if row.enabled {
-                Role::OnSurfaceVariant
+                palette.on_surface_variant
             } else {
-                Role::Disabled
+                palette.disabled
             };
-            items.push(Item::Text(p, at, color.color(dark), row.node));
+            items.push(Item::Text(p, at, color, row.node));
         }
         let rect = if desktop {
             (4., y, width - 8., tall)
@@ -905,7 +879,7 @@ fn menu(engine: &mut TextEngine, entries: &[Entry], inputs: &Inputs, desktop: bo
             enabled: row.enabled,
             layer: (
                 Shape::new(rect, [if desktop { 4. } else { 0. }; 4]),
-                Role::OnSurface.color(dark),
+                palette.state_layer,
             ),
         });
         y += tall + margin;
@@ -913,15 +887,12 @@ fn menu(engine: &mut TextEngine, entries: &[Entry], inputs: &Inputs, desktop: bo
     // Compose's DropdownMenu scrolls its items within the window's room,
     // as WinUI's MenuFlyout does.
     let height = (y + padding).min(inputs.room.max(4.));
+    let (radius, non_uniform_radius) = surface::menu_radius(surface, width, height, desktop);
     Layout {
         size: (width, height),
-        radius: if desktop { 8. } else { 4. },
+        radius,
         elevation: 3.0,
-        container: if desktop {
-            Role::Surface.color(dark)
-        } else {
-            Role::SurfaceContainer.color(dark)
-        },
+        container: palette.container,
         border: desktop.then(|| Role::OutlineVariant.color(dark)),
         contrast: inputs.contrast.filter(|_| desktop),
         items,
@@ -935,6 +906,7 @@ fn menu(engine: &mut TextEngine, entries: &[Entry], inputs: &Inputs, desktop: bo
             SymbolSet::Material
         },
         symbol_weight: weight(400, inputs.bold_text && !desktop),
+        non_uniform_radius,
     }
 }
 
@@ -1222,10 +1194,12 @@ mod tests {
             subtitle: None,
             direction: Direction::Rtl,
             symbol: Some("checkmark".into()),
+            symbol_direction: Direction::Rtl,
             destructive: false,
             enabled: true,
             cancel: true,
             checked: false,
+            checkable: false,
             opens: None,
         };
         for font_scale in [1., 2.] {
@@ -1242,7 +1216,7 @@ mod tests {
                 Entry::Header(row.title.clone(), 1, Direction::Rtl),
                 Entry::Item(row.clone()),
             ];
-            let menu = menu(&mut engine, &entries, &inputs, false);
+            let menu = menu(&mut engine, &entries, None, &inputs, false);
             let alert = alert(
                 &mut engine,
                 (None, None),
@@ -1300,10 +1274,12 @@ mod tests {
                 subtitle: None,
                 direction: exact_kernel::Direction::Ltr,
                 symbol: None,
+                symbol_direction: exact_kernel::Direction::Ltr,
                 destructive: false,
                 enabled: true,
                 cancel: false,
                 checked: true,
+                checkable: true,
                 opens: None,
             }),
             Entry::Separator,
@@ -1317,12 +1293,12 @@ mod tests {
             window: (400., 800.),
             room: 800.,
         };
-        let mut layout = menu(&mut engine, &entries, &inputs, false);
+        let mut layout = menu(&mut engine, &entries, None, &inputs, false);
         assert!(layout.size.0 < 300.);
         layout.widen(300., true);
         for item in &layout.items {
             match item {
-                Item::Symbol(_, rect, _) => assert_eq!(rect.0 + rect.2, 288.),
+                Item::Symbol(_, rect, _, _) => assert_eq!(rect.0 + rect.2, 288.),
                 Item::Text(p, at, _, node) => {
                     let bounds = text_rect(p, *at);
                     let end = if *node == 1 { 288. } else { 252. };
@@ -1387,10 +1363,12 @@ mod tests {
             subtitle: None,
             direction: exact_kernel::Direction::Ltr,
             symbol: Some("calendar".into()),
+            symbol_direction: exact_kernel::Direction::Ltr,
             destructive: false,
             enabled: true,
             cancel: true,
             checked: false,
+            checkable: false,
             opens: None,
         };
         let alert = Plan::Alert {
@@ -1403,10 +1381,13 @@ mod tests {
             cancellable: true,
             outside: false,
         };
-        let menu = Plan::Menu(vec![
-            Entry::Header("Section".into(), 1, Direction::Ltr),
-            Entry::Item(row),
-        ]);
+        let menu = Plan::Menu {
+            entries: vec![
+                Entry::Header("Section".into(), 1, Direction::Ltr),
+                Entry::Item(row),
+            ],
+            surface: None,
+        };
         let mut engine = crate::text::fixtures::engine();
         for bold_text in [false, true, false] {
             let inputs = Inputs {
@@ -1448,10 +1429,61 @@ mod tests {
                     })
                     .collect();
                 assert_eq!(measured, weights);
-                if matches!(plan, Plan::Menu(_)) {
+                if matches!(plan, Plan::Menu { .. }) {
                     assert_eq!(layout.symbol_weight, if bold_text { 600 } else { 400 });
                 }
             }
         }
+    }
+
+    #[test]
+    fn desktop_flyout_preserves_authored_symbol_direction() {
+        let mut engine = crate::text::fixtures::engine();
+        let make = |node, symbol: Option<&str>, symbol_direction, checked| Row {
+            node,
+            title: "Action".into(),
+            menu_label: None,
+            subtitle: None,
+            direction: Direction::Rtl,
+            symbol: symbol.map(String::from),
+            symbol_direction,
+            destructive: false,
+            enabled: true,
+            cancel: false,
+            checked,
+            checkable: checked,
+            opens: None,
+        };
+        let entries = [
+            Entry::Item(make(1, Some("back"), Direction::Rtl, false)),
+            Entry::Item(make(2, Some("back"), Direction::Ltr, false)),
+            Entry::Item(make(3, None, Direction::Rtl, true)),
+        ];
+        let inputs = Inputs {
+            dark: false,
+            direction: Direction::Rtl,
+            contrast: None,
+            font_scale: 1.,
+            bold_text: false,
+            window: (400., 600.),
+            room: 600.,
+        };
+        let layout = menu(&mut engine, &entries, None, &inputs, true);
+        let symbols: Vec<_> = layout
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Symbol(role, _, _, dir) => Some((role.as_str(), *dir)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            symbols,
+            vec![
+                ("back", Direction::Rtl),
+                ("back", Direction::Ltr),
+                ("checkmark", Direction::Ltr),
+            ]
+        );
     }
 }

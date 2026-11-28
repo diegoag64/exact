@@ -1218,11 +1218,20 @@ mod keeps_colour_tests {
 
     #[test]
     fn a_material_keeps_its_colour_only_when_told_and_encodes_as_before_without_it() {
-        let plain = MaterialData { unlit: true, ..Default::default() };
-        let marked = MaterialData { keeps_colour: true, ..plain.clone() };
+        let plain = MaterialData {
+            unlit: true,
+            ..Default::default()
+        };
+        let marked = MaterialData {
+            keeps_colour: true,
+            ..plain.clone()
+        };
         let (a, b) = (crate::bin::to_vec(&plain), crate::bin::to_vec(&marked));
         assert_ne!(a, b);
-        let mut back = MaterialData { keeps_colour: true, ..Default::default() };
+        let mut back = MaterialData {
+            keeps_colour: true,
+            ..Default::default()
+        };
         crate::bin::read_into(&a, &mut back).unwrap();
         assert!(!back.keeps_colour && back.unlit);
         let mut back = MaterialData::default();

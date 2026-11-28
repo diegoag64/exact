@@ -352,7 +352,10 @@ package final class ArrangementHost {
 
     private func refreshContentSizes() {
         for entry in entries.values {
-            for holder in entry.holders { holder.contentChanged() }
+            for holder in entry.holders {
+                holder.followMinimumMargins(of: holder.node)
+                holder.contentChanged()
+            }
         }
     }
 
@@ -524,7 +527,7 @@ package final class ArrangementHost {
             }
             if let node, presenter.navigation.routeSurfaces.values.contains(where: { $0.collapseScroll === node || $0.edgeScroll === node }) { continue }
             if let node {
-                node.keepingScrollTop(of: scroll) { scroll.contentInsetAdjustmentBehavior = .never; node.scrollOrigin = 0; node.scrollCollapsed = 0 }
+                node.keepingScrollTop(of: scroll) { scroll.contentInsetAdjustmentBehavior = .never; node.scrollOrigin = 0 }
             } else {
                 let top = scroll.contentOffset.y + scroll.adjustedContentInset.top
                 scroll.contentInsetAdjustmentBehavior = .never
@@ -593,6 +596,16 @@ package final class ArrangementHost {
         entries.values.flatMap { entry in
             entry.holders.filter { entry.isHidden($0) }.map { $0.node.id }
         }
+    }
+
+    /// Each shown pane's controller, by its node: an owner whose update is sampled with its block
+    /// (LLP 1123 D2, `OwnerBlocks.samplesOwners`).
+    package var shownPanes: [UInt32: UIViewController] {
+        var out: [UInt32: UIViewController] = [:]
+        for entry in entries.values {
+            for holder in entry.holders where !entry.isHidden(holder) && holder.view.window != nil { out[holder.node.id] = holder }
+        }
+        return out
     }
 
     package var blocks: [UInt32: (block: HostBlock, placement: BlockPlacement?)] {

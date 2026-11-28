@@ -137,7 +137,7 @@ impl Collection {
         node: NodesId,
         view: ViewId,
         frames: &[Frame],
-        children: &mut Vec<Child>,
+        children: &mut Children,
     ) -> Result<Option<Box<Self>>, InstanceError> {
         let plan = u.env.plan;
         let descriptor = plan.node(node);
@@ -357,6 +357,7 @@ impl Collection {
             end_travel: 0,
             end_sent: f64::NAN,
             reuse,
+            live: std::cell::Cell::new(false),
         });
         this.update_data(u, frames, true, false)?;
         Ok(Some(this))

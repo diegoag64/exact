@@ -17,9 +17,9 @@ const TESTING_DEVICES = resolve(homedir(), 'Library/Developer/XCTestDevices');
 export async function packageViewFixture(root, fixtureDir, triple, appId, env, runApple) {
   const { packageCompiler, composedModule, moduleLibraryLinkArgs, moduleSeam } = await import('./compose.mjs');
   const dir = resolve(fixtureDir, 'package-screen'), fixtures = resolve(root, 'host/apple/tests/fixtures');
-  const tags = ['probe-table', 'probe-plain'];
+  const tags = ['probe-table', 'probe-plain', 'probe-cleared'];
   const packages = [{ extension: 'screen-probe', module: 'ScreenProbe', className: 'ScreenPackage', views: tags }];
-  packageCompiler({ packages, packageDir: dir, packagesRoot: dir, packageTargets: new Map([[dir, ['iphonesimulator', ['-target', triple]]]]),
+  await packageCompiler({ packages, packageDir: dir, packagesRoot: dir, packageTargets: new Map([[dir, ['iphonesimulator', ['-target', triple]]]]),
     seam: resolve(root, 'host/apple/modules/ExactPackage.swift'), packageCopies: [[resolve(fixtures, 'ScreenPackage.swift'), resolve(fixtures, 'AppearanceTable.swift')]],
     ios: true, swiftc: read('xcrun', ['swiftc', '--version']).stdout }).place(dir);
   const composition = resolve(dir, 'ExactComposed.swift');
@@ -33,7 +33,7 @@ export async function packageViewFixture(root, fixtureDir, triple, appId, env, r
   writeFileSync(resolve(pkg, 'exact.json'), JSON.stringify({ name, version: '1.0.0', kind: 'interface', names: [], views: Object.fromEntries(tags.map(tag => [tag, {}])) }));
   writeFileSync(resolve(pkg, 'package.json'), JSON.stringify({ name, version: '1.0.0', exports: './exact.json' }));
   writeFileSync(resolve(dir, 'package.json'), JSON.stringify({ dependencies: { [name]: '1.0.0' } }));
-  writeFileSync(resolve(dir, 'app.json'), JSON.stringify({ app: { id: appId, name: 'Package screen' }, modules: ['app-table', 'reusable-table', 'clearing-table'] }));
+  writeFileSync(resolve(dir, 'app.json'), JSON.stringify({ app: { id: appId, name: 'Package screen' }, modules: ['app-table', 'reusable-table', 'clearing-table', 'reusable-cleared'] }));
   for (const [file, key] of [['package-screen', 'PACKAGE_SCREEN'], ['package-screen-split', 'PACKAGE_SCREEN_SPLIT']]) {
     cpSync(resolve(fixtures, `${file}.contract`), resolve(dir, `${file}.contract`));
     const plan = env[`TEST_RUNNER_EXACT_${key}_PLAN`] = resolve(dir, `${file}.plan`);
@@ -71,6 +71,8 @@ export function compileFixtures(root, run, env, dir, prefix, appId) {
   contract([resolve(root, 'host/apple/tests/fixtures/table-access.contract'), '-o', env[`${prefix}_TABLE_ACCESS_PLAN`] = resolve(dir, 'table-access.plan')]);
   contract([resolve(root, 'scripts/fixtures/prose-list.contract'), '-o', env[`${prefix}_PROSE_LIST_PLAN`] = resolve(dir, 'prose-list.plan')]);
   if (prefix === 'TEST_RUNNER_EXACT') {
+    contract([resolve(root, 'host/apple/tests/fixtures/header-family.contract'), '-o', env[`${prefix}_HEADER_FAMILY_PLAN`] = resolve(dir, 'header-family.plan')]);
+    contract([resolve(root, 'host/apple/tests/fixtures/header-family-hatch.contract'), '-o', env[`${prefix}_HEADER_FAMILY_HATCH_PLAN`] = resolve(dir, 'header-family-hatch.plan')]);
     // LaunchColorIOSTests reads the build's XML and compiled catalogue as an app bundle.
     const fixtures = env[`${prefix}_LAUNCH_COLOR_FIXTURES`] = resolve(dir, 'launch-colors');
     for (const [name, manifest] of [
@@ -111,6 +113,7 @@ export function compileFixtures(root, run, env, dir, prefix, appId) {
   writeFileSync(eagerList, readFileSync(resolve(root, 'scripts/fixtures/collection-fixed-chat.contract'), 'utf8')
     .replace('virtualized=true', 'virtualized=false').replace(' estimated-item-height=40', '').replace(' scrollFollowEnd=true', ''));
   contract([eagerList, '-o', env[`${prefix}_COLLECTION_FIXED_EAGER_PLAN`] = resolve(dir, 'collection-fixed-eager.plan')]);
+  contract([resolve(root, 'host/apple/tests/fixtures/side-reach.contract'), '-o', env[`${prefix}_SIDE_REACH_PLAN`] = resolve(dir, 'side-reach.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/arrangement-sizing.contract'), '-o', env[`${prefix}_ARRANGEMENT_SIZING_PLAN`] = resolve(dir, 'arrangement-sizing.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/canvas-capture.contract'), '-o', env[`${prefix}_CANVAS_CAPTURE_PLAN`] = resolve(dir, 'canvas-capture.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/range-adjust.contract'), '-o', env[`${prefix}_RANGE_ADJUST_PLAN`] = resolve(dir, 'range-adjust.plan')]);
@@ -142,7 +145,11 @@ export function compileFixtures(root, run, env, dir, prefix, appId) {
   env[`${prefix}_STRICT_LOCAL_INSETS`] = '1';
   contract([resolve(root, 'host/apple/tests/fixtures/lazy-tab-title.contract'), '-o', env[`${prefix}_LAZY_TAB_TITLE_PLAN`] = resolve(dir, 'lazy-tab-title.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/headless-reply.contract'), '-o', env[`${prefix}_HEADLESS_REPLY_PLAN`] = resolve(dir, 'headless-reply.plan')]);
-  for (const [name, key] of [['saved-scheme', 'SAVED_SCHEME'], ['grouped-card', 'GROUPED_CARD'], ['frame-health', 'FRAME_HEALTH'], ['store-refresh', 'STORE_REFRESH'], ['headless', 'HEADLESS'], ['headless-markdown', 'HEADLESS_MARKDOWN'], ['headless-hidden-markdown', 'HEADLESS_HIDDEN_MARKDOWN'], ['headless-live', 'HEADLESS_LIVE'], ['headless-back', 'HEADLESS_BACK'], ['native-navigation-scroll', 'NATIVE_SCROLL'], ['intersect', 'INTERSECT'], ['native-buttons', 'BUTTONS'], ['keyboard-form', 'KEYBOARD'], ['tab-edge', 'TAB_EDGE'], ['repaint', 'REPAINT'], ['still-title', 'STILL_TITLE'], ['navigation-bars', 'NAVIGATION_BARS'], ['large-title', 'LARGE_TITLE'], ['transparent-bar', 'TRANSPARENT_BAR'], ['bar-band', 'BAR_BAND'], ['pad-bar', 'PAD_BAR'], ['pushed-title', 'PUSHED_TITLE'], ['inline-frame', 'INLINE_FRAME'], ['fieldless', 'FIELDLESS'], ['web-documents', 'WEB_DOCUMENTS'], ['iframe-post-messages', 'IFRAME_POST_MESSAGES'], ['iframe-partition', 'IFRAME_PARTITION'], ['iframe-windows', 'IFRAME_WINDOWS'], ['iframe-pdf', 'IFRAME_PDF'], ['iframe-resident-popover', 'IFRAME_RESIDENT_POPOVER'], ['tab-owner', 'TAB_OWNER'], ['grouped-list-reveal', 'GROUPED_REVEAL'], ['due-now', 'DUE_NOW'], ['caret-reveal', 'CARET_REVEAL'], ['cover-scroll', 'COVER_SCROLL'], ['page-edges', 'PAGE_EDGES'], ['barless-route', 'BARLESS_ROUTE'], ['page-edges-grouped', 'PAGE_EDGES_GROUPED'], ['control-bars', 'CONTROL_BARS'], ['cover-tabs', 'COVER_TABS'], ['root-tabs-order', 'ROOT_TABS_ORDER'], ['layout-insert', 'LAYOUT_INSERT'], ['search-scope', 'SEARCH_SCOPE'], ['barless-tab', 'BARLESS_TAB'], ['pull-refresh', 'PULL_REFRESH'], ['edge-effect', 'EDGE_EFFECT'], ['sticky-bar', 'STICKY_BAR'], ['glass-press', 'GLASS_PRESS'], ['surface-pairs', 'SURFACE_PAIRS'], ['prevent-focus', 'PREVENT_FOCUS'], ['accent-bars', 'ACCENT_BARS'], ['accent-tabs', 'ACCENT_TABS'], ['search-tabs', 'SEARCH_TABS'], ['beside-routes', 'BESIDE_ROUTES'], ['bar-insets', 'BAR_INSETS'], ['bar-hero', 'BAR_HERO'], ['bar-control', 'BAR_CONTROL'], ['tips', 'TIPS'], ['boot-control-top', 'BOOT_CONTROL_TOP'], ['boot-control-bottom', 'BOOT_CONTROL_BOTTOM'], ['boot-control-tab', 'BOOT_CONTROL_TAB'], ['boot-dialog', 'BOOT_DIALOG'], ['boot-tabs', 'BOOT_TABS'], ['boot-clipboard', 'BOOT_CLIPBOARD'], ['boot-motion', 'BOOT_MOTION'], ['boot-plain', 'BOOT_PLAIN'], ['boot-padded', 'BOOT_PADDED'], ['boot-transform', 'BOOT_TRANSFORM'], ['boot-tip', 'BOOT_TIP'], ['split-custom', 'SPLIT_CUSTOM'], ['split-tabs', 'SPLIT_TABS'], ['split-back', 'SPLIT_BACK'], ['split-boot', 'SPLIT_BOOT'], ['split-change', 'SPLIT_CHANGE']]) {
+  // SplitIOSTests' authored sidebar: split-back's list in the sidebar style (LLP 1127 D17).
+  const sidebar = resolve(dir, 'split-sidebar.contract');
+  writeFileSync(sidebar, readFileSync(resolve(root, 'scripts/fixtures/split-back.contract'), 'utf8').replace('listStyle="inset-grouped"', 'listStyle="sidebar"'));
+  contract([sidebar, '-o', env[`${prefix}_SPLIT_SIDEBAR_PLAN`] = resolve(dir, 'split-sidebar.plan')]);
+  for (const [name, key] of [['saved-scheme', 'SAVED_SCHEME'], ['grouped-card', 'GROUPED_CARD'], ['frame-health', 'FRAME_HEALTH'], ['store-refresh', 'STORE_REFRESH'], ['headless', 'HEADLESS'], ['headless-markdown', 'HEADLESS_MARKDOWN'], ['headless-hidden-markdown', 'HEADLESS_HIDDEN_MARKDOWN'], ['headless-live', 'HEADLESS_LIVE'], ['headless-back', 'HEADLESS_BACK'], ['native-navigation-scroll', 'NATIVE_SCROLL'], ['intersect', 'INTERSECT'], ['native-buttons', 'BUTTONS'], ['keyboard-form', 'KEYBOARD'], ['tab-edge', 'TAB_EDGE'], ['repaint', 'REPAINT'], ['still-title', 'STILL_TITLE'], ['navigation-bars', 'NAVIGATION_BARS'], ['large-title', 'LARGE_TITLE'], ['transparent-bar', 'TRANSPARENT_BAR'], ['bar-band', 'BAR_BAND'], ['pad-bar', 'PAD_BAR'], ['pushed-title', 'PUSHED_TITLE'], ['inline-frame', 'INLINE_FRAME'], ['fieldless', 'FIELDLESS'], ['web-documents', 'WEB_DOCUMENTS'], ['iframe-post-messages', 'IFRAME_POST_MESSAGES'], ['iframe-partition', 'IFRAME_PARTITION'], ['iframe-windows', 'IFRAME_WINDOWS'], ['iframe-pdf', 'IFRAME_PDF'], ['iframe-resident-popover', 'IFRAME_RESIDENT_POPOVER'], ['tab-owner', 'TAB_OWNER'], ['grouped-list-reveal', 'GROUPED_REVEAL'], ['due-now', 'DUE_NOW'], ['caret-reveal', 'CARET_REVEAL'], ['cover-scroll', 'COVER_SCROLL'], ['page-edges', 'PAGE_EDGES'], ['barless-route', 'BARLESS_ROUTE'], ['page-edges-grouped', 'PAGE_EDGES_GROUPED'], ['control-bars', 'CONTROL_BARS'], ['cover-tabs', 'COVER_TABS'], ['cover-barless-top', 'COVER_BARLESS_TOP'], ['root-tabs-order', 'ROOT_TABS_ORDER'], ['layout-insert', 'LAYOUT_INSERT'], ['search-scope', 'SEARCH_SCOPE'], ['barless-tab', 'BARLESS_TAB'], ['pull-refresh', 'PULL_REFRESH'], ['edge-effect', 'EDGE_EFFECT'], ['sticky-bar', 'STICKY_BAR'], ['glass-press', 'GLASS_PRESS'], ['surface-pairs', 'SURFACE_PAIRS'], ['prevent-focus', 'PREVENT_FOCUS'], ['accent-bars', 'ACCENT_BARS'], ['accent-tabs', 'ACCENT_TABS'], ['search-tabs', 'SEARCH_TABS'], ['beside-routes', 'BESIDE_ROUTES'], ['bar-insets', 'BAR_INSETS'], ['bar-hero', 'BAR_HERO'], ['bar-control', 'BAR_CONTROL'], ['tips', 'TIPS'], ['boot-control-top', 'BOOT_CONTROL_TOP'], ['boot-control-bottom', 'BOOT_CONTROL_BOTTOM'], ['boot-control-tab', 'BOOT_CONTROL_TAB'], ['boot-dialog', 'BOOT_DIALOG'], ['boot-tabs', 'BOOT_TABS'], ['boot-clipboard', 'BOOT_CLIPBOARD'], ['boot-motion', 'BOOT_MOTION'], ['boot-plain', 'BOOT_PLAIN'], ['boot-padded', 'BOOT_PADDED'], ['boot-transform', 'BOOT_TRANSFORM'], ['boot-tip', 'BOOT_TIP'], ['split-custom', 'SPLIT_CUSTOM'], ['split-tabs', 'SPLIT_TABS'], ['split-back', 'SPLIT_BACK'], ['split-boot', 'SPLIT_BOOT'], ['split-change', 'SPLIT_CHANGE'], ['split-late', 'SPLIT_LATE']]) {
     contract([resolve(root, `scripts/fixtures/${name}.contract`), '-o', env[`${prefix}_${key}_PLAN`] = resolve(dir, `${name}.plan`)]);
   }
   // NamedWindowsTests' links that name a window (LLP 1030.004).
@@ -206,12 +213,22 @@ export function compileFixtures(root, run, env, dir, prefix, appId) {
   contract([resolve(root, 'host/apple/tests/fixtures/bar-hosted.contract'), '-o', env[`${prefix}_BAR_HOSTED_PLAN`] = resolve(dir, 'bar-hosted.plan')]);
   // NavigationBarIOSTests': a header's title drawn as a face, in an ink per scheme.
   contract([resolve(root, 'host/apple/tests/fixtures/bar-face-scheme.contract'), '-o', env[`${prefix}_BAR_FACE_SCHEME_PLAN`] = resolve(dir, 'bar-face-scheme.plan')]);
+  contract([resolve(root, 'host/apple/tests/fixtures/nav-back-guard.contract'), '-o', env[`${prefix}_NAV_BACK_GUARD_PLAN`] = resolve(dir, 'nav-back-guard.plan')]);
+  contract([resolve(root, 'host/apple/tests/fixtures/split-back-guard.contract'), '-o', env[`${prefix}_SPLIT_BACK_GUARD_PLAN`] = resolve(dir, 'split-back-guard.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/dialog-sheet-reads.contract'), '-o', env[`${prefix}_DIALOG_SHEET_READS_PLAN`] = resolve(dir, 'dialog-sheet-reads.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/route-backdrop.contract'), '-o', env[`${prefix}_ROUTE_BACKDROP_PLAN`] = resolve(dir, 'route-backdrop.plan')]);
+  // RouteAllocationIOSTests': a route's controller allocation and vertical bar (LLP 1123 D4).
+  contract([resolve(root, 'host/apple/tests/fixtures/route-allocation.contract'), '-o', env[`${prefix}_ROUTE_ALLOCATION_PLAN`] = resolve(dir, 'route-allocation.plan')]);
+  // AspectFitIOSTests': a first root fitted to the window's aspect-fit guide (LLP 1123 D16).
+  contract([resolve(root, 'host/apple/tests/fixtures/aspect-fit.contract'), '-o', env[`${prefix}_ASPECT_FIT_PLAN`] = resolve(dir, 'aspect-fit.plan')]);
+  // PopoverRouteIOSTests': a route presented as a popover anchored to a button (LLP 1123 D7).
+  contract([resolve(root, 'host/apple/tests/fixtures/popover-route.contract'), '-o', env[`${prefix}_POPOVER_ROUTE_PLAN`] = resolve(dir, 'popover-route.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/trailing-time.contract'), '-o', env[`${prefix}_TRAILING_TIME_PLAN`] = resolve(dir, 'trailing-time.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/intersect-route.contract'), '-o', env[`${prefix}_INTERSECT_ROUTE_PLAN`] = resolve(dir, 'intersect-route.plan')]);
   // KeyboardSheetIOSTests': a sheet's field, its keyboard toolbar and the keyboard's overlap as a value.
   contract([resolve(root, 'host/apple/tests/fixtures/keyboard-sheet.contract'), '-o', env[`${prefix}_KEYBOARD_SHEET_PLAN`] = resolve(dir, 'keyboard-sheet.plan')]);
+  // PushedNoticeIOSTests': a pushed route whose row above navigationScroll mounts mid-push (#2055).
+  contract([resolve(root, 'host/apple/tests/fixtures/pushed-notice.contract'), '-o', env[`${prefix}_PUSHED_NOTICE_PLAN`] = resolve(dir, 'pushed-notice.plan')]);
   // PlatformDefaultsIOSTests': Next fields whose submit moves the focus through the runner.
   contract([resolve(root, 'host/apple/tests/fixtures/return-focus.contract'), '-o', env[`${prefix}_RETURN_FOCUS_PLAN`] = resolve(dir, 'return-focus.plan')]);
   contract([resolve(root, 'host/apple/tests/fixtures/view-transition.contract'), '-o', env[`${prefix}_VIEW_TRANSITION_PLAN`] = resolve(dir, 'view-transition.plan')]);

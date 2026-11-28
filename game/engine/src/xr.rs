@@ -76,7 +76,11 @@ impl XrStage {
             scale: if size > 0.0 { metres / size } else { 1.0 },
             yaw: 0.0,
             position: Vec3::new(0.0, height, -distance),
-            extent: if size > 0.0 && size.is_finite() { size } else { 0.0 },
+            extent: if size > 0.0 && size.is_finite() {
+                size
+            } else {
+                0.0
+            },
         }
     }
 
@@ -106,7 +110,8 @@ impl XrStage {
 
     /// A reference-space point (a controller's position) in the world.
     pub fn to_world(&self, reference: Vec3) -> Vec3 {
-        self.center + self.rotation().inverse() * (reference - self.position) / self.metres_per_unit()
+        self.center
+            + self.rotation().inverse() * (reference - self.position) / self.metres_per_unit()
     }
 
     /// A reference-space direction in the world, its length kept.
@@ -204,7 +209,7 @@ mod tests {
             position: Vec3::new(0.1, 0.85, -0.9),
             extent: 0.0,
         };
-        let reference_view = Mat4::look_at_rh(
+        let reference_view = glam::camera::rh::view::look_at_mat4(
             Vec3::new(0.03, 1.6, 0.0),
             Vec3::new(0.0, 0.85, -0.9),
             Vec3::Y,
@@ -284,7 +289,11 @@ mod tests {
         let to = from.map(|p| mid + Vec3::new(0.1, 0.0, -0.05) + turn * ((p - mid) * 1.5));
         let pinched = stage.pinched(from, to, (0.001, 10.0));
         for (world, hand) in held.iter().zip(to) {
-            assert!((pinched.to_reference(*world) - hand).length() < 1e-4, "{} {hand}", pinched.to_reference(*world));
+            assert!(
+                (pinched.to_reference(*world) - hand).length() < 1e-4,
+                "{} {hand}",
+                pinched.to_reference(*world)
+            );
         }
         assert!((pinched.scale - stage.scale * 1.5).abs() < 1e-6);
         assert!((pinched.yaw - (stage.yaw + 0.5)).abs() < 1e-5);

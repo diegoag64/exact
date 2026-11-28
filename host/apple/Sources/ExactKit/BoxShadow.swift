@@ -203,6 +203,22 @@ extension NodeView {
         }
     }
 
+    #if os(iOS) || os(tvOS)
+    /// Includes shadows a later hover, focus, or appearance change could bring.
+    package var mayCastGroupedCardShadow: Bool {
+        func hasLookShadow(_ style: NodeStyle) -> Bool {
+            Self.look("hover", in: style)?["box_shadow"]?.array?.isEmpty == false
+                || Self.look("focus_visible", in: style)?["box_shadow"]?.array?.isEmpty == false
+        }
+        let base = pressPaint.lookBase ?? style
+        if props["defaultSurfaceShadow"] != nil || base["box_shadow"]?.array?.isEmpty == false || hasLookShadow(base) {
+            return true
+        }
+        guard let section = nodeSuperview, section.groupedShadowCard === self else { return false }
+        return hasLookShadow(section.style)
+    }
+    #endif
+
     /// The `box-shadow` list resolved for the view's appearance; a popover's
     /// default surface's shadow where its author wrote none (`defaultSurface`).
     package var boxShadows: [BoxShadowSpec] {
@@ -240,6 +256,10 @@ extension NodeView {
     /// The casters onto the layer: the outer ones at its bottom, cast from
     /// the border box; the inset ones over the box's paint; or gone.
     func applyShadow(outline makeOutline: @autoclosure () -> CGPath) {
+        #if os(macOS)
+        let hadShadow = shadowCaster != nil || insetCaster != nil
+        defer { if materialView != nil, hadShadow != (shadowCaster != nil || insetCaster != nil) { applyTransform() } }
+        #endif
         defer { overflowClipGeometryChanged() }
         if let card = groupedShadowCard {
             card.syncShadowClip()
@@ -292,11 +312,7 @@ extension NodeView {
             let caster = shadowCaster ?? ShadowCaster()
             if caster.superlayer !== outerHost { outerHost.insertSublayer(caster, at: 0) }
             shadowCaster = caster
-            #if os(iOS) || os(tvOS)
             let extended = extensionFrame
-            #else
-            let extended: CGRect? = nil
-            #endif
             caster.cast(box: bounds, outline: outline, shadows: outer.map { spec in
                 guard spec.spread != 0 else { return (outline, spec) }
                 let grown = bounds.insetBy(dx: -spec.spread, dy: -spec.spread)
@@ -322,12 +338,8 @@ extension NodeView {
             .map { CGSize(width: max(0, $0.width), height: max(0, $0.height)) }
         let caster = insetCaster ?? InsetShadowCaster()
         insetCaster = caster
-        #if os(iOS) || os(tvOS)
         // Where `insertBoxSublayer` puts it: with the picture, in an extended box's extension picture (LLP 1123 D13)
         let home = pictureHost
-        #else
-        let home = host
-        #endif
         if caster.superlayer !== home { insertInsetCaster(caster, into: host) }
         caster.cast(box: bounds, padding: BorderPaint.roundedRect(padding, padRadii, shape: shape), shadows: inner.map { spec in
             let hole = padding.insetBy(dx: spec.spread, dy: spec.spread)
@@ -423,8 +435,8 @@ extension NodeView {
     /// (`clip` beside `visible`, CSS Overflow 3 §3.1).
     var clipsOneAxis: Bool {
         guard kind != "text" else { return false }
-        let pair = [style["overflow_x"]?.string ?? "visible", style["overflow_y"]?.string ?? "visible"]
-        return pair == ["clip", "visible"] || pair == ["visible", "clip"]
+        let ox = style["overflow_x"]?.string ?? "visible", oy = style["overflow_y"]?.string ?? "visible"
+        return (ox == "clip" && oy == "visible") || (ox == "visible" && oy == "clip")
     }
 
     /// Overflow clips at the padding edge; a one-axis clip has square corners.
@@ -472,6 +484,8 @@ extension NodeView {
     package var clipsItself: Bool {
         #if os(iOS) || os(tvOS)
         if pageBand != .zero || reach != .zero, scrollHoldsContent { return false }
+        #else
+        if !NSEdgeInsetsEqual(reach, NSEdgeInsetsZero), scrollHoldsContent { return false }
         #endif
         return overflowClips && clipBox == nil
     }
@@ -582,10 +596,8 @@ extension NodeView {
             }
             func views(_ view: View) {
                 include(view.convert(view.bounds, to: self))
-                #if os(iOS) || os(tvOS)
-                // A box's extension paints its own frame; what UIKit holds inside it is UIKit's (LLP 1123 D13)
+                // A box's extension paints its own frame; what the platform holds inside it is its own (LLP 1123 D13)
                 if view.isBoxExtension { return }
-                #endif
                 for child in view.subviews { views(child) }
             }
             // AppKit may not have attached backing layers yet; views still

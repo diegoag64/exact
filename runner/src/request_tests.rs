@@ -1,6 +1,25 @@
 use super::*;
 
 #[test]
+fn http_is_ordered_until_the_source_explicitly_opts_in() {
+    for request in [
+        Request::get("https://example.test"),
+        Request::post_json("https://example.test", "{}"),
+        Request::continuation::<crate::host_work::TestWork>(1),
+        Request::storage(vec![]),
+    ] {
+        assert_eq!(request.http, HttpScheduling::Ordered);
+    }
+    let request = Request::get("https://example.test").independent_http(4096);
+    assert_eq!(
+        request.http,
+        HttpScheduling::Independent {
+            max_response_bytes: 4096
+        }
+    );
+}
+
+#[test]
 fn surface_scope_must_be_admitted_and_name_the_operation() {
     let admitted = "surface.read world\nsurface.write world\nsurface.read map";
     assert!(Request::capture_surface("world")
@@ -212,5 +231,50 @@ fn prefetch_is_part_of_equality_and_only_plain_http_takes_it() {
         request.independent_http(1024),
     ] {
         assert!(request.prefetch().prefetch_refusal().is_some());
+    }
+}
+
+#[test]
+fn a_summary_is_the_text_format_wrote() {
+    for (status, len) in [(200, 0), (404, 5), (u16::MAX, 70_000)] {
+        let outcome = Outcome::Response(Response {
+            status,
+            headers: vec![],
+            body: vec![0; len],
+        });
+        assert_eq!(outcome.summary(), format!("HTTP {status}, {len} bytes"));
+        let storage = Outcome::Storage(vec![1; len]);
+        assert_eq!(storage.summary(), format!("storage, {len} bytes"));
+        let captured = Outcome::Surface(SurfaceOutcome::Captured(vec![2; len]));
+        assert_eq!(captured.summary(), format!("surface captured, {len} bytes"));
+    }
+}
+
+#[test]
+fn a_failure_summary_lowers_its_kind_as_unicode_would() {
+    for kind in [
+        FailureKind::Network,
+        FailureKind::Refused,
+        FailureKind::Unsupported,
+        FailureKind::Aborted,
+        FailureKind::Timeout,
+        FailureKind::NotFound,
+    ] {
+        // Every variant is listed: adding one breaks this match.
+        match kind {
+            FailureKind::Network
+            | FailureKind::Refused
+            | FailureKind::Unsupported
+            | FailureKind::Aborted
+            | FailureKind::Timeout
+            | FailureKind::NotFound => {}
+        }
+        let name = format!("{kind:?}");
+        assert!(name.is_ascii(), "{name}");
+        let outcome = Outcome::Failed {
+            kind,
+            message: "no".into(),
+        };
+        assert_eq!(outcome.summary(), format!("{}: no", name.to_lowercase()));
     }
 }

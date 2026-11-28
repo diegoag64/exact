@@ -33,6 +33,20 @@ open class ExactActivity : Activity() {
     /** The `video` and `audio` elements' player ([VideoPlayer]), where the APK links one (LLP 1042.001 D2). */
     protected open val video: ((Context) -> VideoPlayer)? = null
     private var natives: Natives? = null
+    internal val picture by lazy { VideoPictureInPicture(this) }
+    internal fun floatPicture(target: MediaAllocation) {
+        natives?.floatPicture(target, picture) ?: target.tell("pictureinpictureerror", "no video player is mounted", "")
+    }
+    // After system expansion the activity resumes. After Close it stops, sometimes before the mode callback.
+    private var pictureAwaitingResume: MediaAllocation? = null
+    internal fun leftPicture(target: MediaAllocation) {
+        if (!nativeStarted) natives?.stopPicture(target)
+        else if (!nativeResumed) pictureAwaitingResume = target
+    }
+    override fun onPictureInPictureModeChanged(active: Boolean, config: android.content.res.Configuration) {
+        super.onPictureInPictureModeChanged(active, config)
+        picture.modeChanged(active)
+    }
     private val hostedModules by lazy { HostedModules(Extensions.withViews(modules)) }
 
     /** A signed update activated ([Requests]): the open videos and pages are opened from its assets again, and its
@@ -73,7 +87,8 @@ open class ExactActivity : Activity() {
 
     private var nativeState: Bundle? = null
     private var nativeStarted = false
-    private var nativeResumed = false
+    internal var nativeResumed = false
+        private set
     /** The app's text fields, each the platform's own ([Fields], LLP 1115.001 D8). */
     private var fields: Fields? = null
     /** The row pitch `start=N` scrolls by (0: the app's plan scrolls to it itself). */
@@ -167,6 +182,9 @@ open class ExactActivity : Activity() {
                 if (!File(shaders, "com.android.skia.shaders_cache").exists()) Warm.launch()
             }
             environment(arrived)
+            if (Setup.development && intent.getStringExtra("x_agent_seed_wait") == "1") {
+                (drive {} as? AgentDrive)?.awaitSeed()
+            }
             Setup.nativeEnvironment()
             try { FilePicker.start(applicationContext) }
             catch (e: Exception) { android.util.Log.w("exact", "file picker: startup cleanup failed", e) }
@@ -566,6 +584,7 @@ open class ExactActivity : Activity() {
         root.access.controller = { elements.controller(it) }
         root.addView(hosted, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         root.addView(view, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        root.drags.page = view
         val ticker = if (intent.getStringExtra("tag") == "1") TagView(this) { view.tagState() } else View(this)
         elements.frame = { ticker.invalidate() }
         hosted.frame = { ticker.invalidate() }
@@ -578,12 +597,24 @@ open class ExactActivity : Activity() {
         view.ticker = ticker
         // The app's bars (LLP 1115.001 D11), over the page and everything it hosts. The host tells this reader its
         // bars anew, as it paints everything again for it.
-        view.bars = Bars(this, root)
+        requests.surfaces?.picture = view::picture
+        view.bars = Bars(this, root, view::picture)
         loopNotice = android.system.Os.getenv("EXACT_DEV_PLAN")?.let { DevLoop.Notice(this, root, it) }
         accessible(accessibility.isEnabled || asked)
     }
 
     private var loopNotice: DevLoop.Notice? = null
+
+    /** Tell the host the keyboard as its inset animation moves it, which the inset dispatch gives only at its ends (LLP
+     * 1123 D7), while this reader reads. Activation (stage 5) calls it: registering an inset animation callback changes
+     * how Android runs the keyboard's animation, so no shipping reader registers one before then. */
+    internal fun followKeyboard() {
+        if (Build.VERSION.SDK_INT < 30) return
+        root.setWindowInsetsAnimationCallback(KeyboardProgress { depth ->
+            if (stopped || !reads()) return@KeyboardProgress
+            view.owner?.keyboardProgress(depth) ?: Native.keyboardProgress(depth)
+        })
+    }
     private lateinit var root: Root
 
     /** The app is edge to edge (LLP 1115.001 D3.4): the window reaches under transparent system bars and into the
@@ -690,30 +721,16 @@ open class ExactActivity : Activity() {
             }
         }
         window.setBackgroundDrawable(android.graphics.drawable.ColorDrawable(c[4]))
-        val bars = barAppearance(c[5])
-        val hide = bars.hidden.takeIf { it != barsHidden }
-        barsHidden = bars.hidden
-        if (Build.VERSION.SDK_INT < 30) {
-            Legacy.lightBars(window, bars.statusLight, bars.navigationLight)
-            hide?.let { Legacy.hideBars(window, it) }
-            return
-        }
-        val controller = window.insetsController ?: return
-        val status = android.view.WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS
-        val navigation = android.view.WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
-        controller.setSystemBarsAppearance(
-            (if (bars.statusLight) status else 0) or (if (bars.navigationLight) navigation else 0), status or navigation)
-        // Immersive mode as a hand-built app asks for it: both bars go, and a swipe from an edge shows them over the
-        // page for a moment. Only a change is applied, so a chrome that moves the page does not hide bars the person
-        // has just swiped in.
-        if (hide == true) {
-            controller.systemBarsBehavior = android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller.hide(android.view.WindowInsets.Type.systemBars())
-        } else if (hide == false) controller.show(android.view.WindowInsets.Type.systemBars())
+        val next = barAppearance(c[5])
+        val hide = next.hidden.takeIf { it != bars?.hidden }
+        bars = next
+        applyBarAppearance(window, next, hide)
+        requests.surfaces?.barAppearance(next)
     }
 
-    /** Whether [chrome] last hid the system bars; null before the first. */
-    private var barsHidden: Boolean? = null
+    /** The page's last resolved bar appearance from [chrome]; null before the first chrome update. */
+    internal var bars: BarAppearance? = null
+        private set
 
     /** The device's settings as the host was last told them. */
     private var told: Device? = null
@@ -826,7 +843,10 @@ open class ExactActivity : Activity() {
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (!hasFocus && reads()) pads.background()
-        if (hasFocus) Activities.resumed()
+        if (hasFocus) {
+            Activities.resumed()
+            picture.pageReady()
+        }
         // Over the keyguard's dismissal: focus comes once the phone is unlocked.
         if (hasFocus) Controls.ready(this)
     }
@@ -847,6 +867,8 @@ open class ExactActivity : Activity() {
         if (reads()) Extensions.stopped(isChangingConfigurations)
         view.running(false, reads())
         natives?.lifecycle?.event(ViewLifecycle.STOP)
+        pictureAwaitingResume?.let { natives?.stopPicture(it) }
+        pictureAwaitingResume = null
         natives?.stopMedia(allowBackground = !isFinishing && reads())
         // Behind the hide, the pads' release and the stop of the turns (none queued after it), what they and anything
         // since the pause committed is on disk before Android may kill it.
@@ -882,6 +904,8 @@ open class ExactActivity : Activity() {
         window()
         configure()
         nativeResumed = true
+        pictureAwaitingResume = null
+        picture.pageReady()
         modulePhase = 3; moduleOwners?.move(modulePhase)
         natives?.lifecycle?.event(ViewLifecycle.RESUME)
         Auth.resumed()
@@ -931,6 +955,7 @@ open class ExactActivity : Activity() {
 
     override fun onDestroy() {
         if (Immersive.activity === this) Immersive.activity = null
+        picture.destroy()
         folds.stop()
         accessibility.removeAccessibilityStateChangeListener(accessWatch)
         requests.destroy()
@@ -964,6 +989,7 @@ open class ExactActivity : Activity() {
     /** This activity's reader lets go of the host: its hosted views and their surfaces go, and the owner stops
      * telling its view. Once: at [onDestroy], or sooner when the activity that replaces it is made first. */
     private fun release() {
+        Extensions.credentials.leaving(this)
         hatchReader?.takeIf { it.activity === this }?.activity = null
         requests.surfaces?.destroy()
         natives?.let { elements ->
@@ -1010,12 +1036,12 @@ open class ExactActivity : Activity() {
         listOf("mi_purge_delay", "mi_eager_commit", "mi_arena_eager_commit").forEach { k ->
             intent.getStringExtra(k)?.let { android.system.Os.setenv("MIMALLOC_" + k.removePrefix("mi_").uppercase(), it, true) }
         }
-        listOf("x_agent", "x_auth_fixture", "x_hatches", "x_agent_storage", "x_agent_storage_fresh", "x_agent_stored", "x_plan", "x_store",
+        listOf("x_agent", "x_auth_fixture", "x_hatches", "x_agent_storage", "x_agent_storage_fresh", "x_agent_stored", "x_agent_stored_file", "x_plan", "x_store",
             "x_agent_epoch", "x_agent_seed", "x_agent_locale", "x_agent_format_locale", "x_agent_time_zone",
             "x_agent_substitutes", "x_agent_fail_fetch", "x_agent_process", "x_agent_home", "x_agent_login_env",
             "x_agent_share", "x_agent_bind", "x_agent_pads", "x_agent_timing", "x_agent_presentation", "x_agent_chrome",
             "x_rows", "x_moves", "x_idle_frames", "x_slots", "x_lower", "x_row_reuse",
-            "x_image_viewports", "x_defer_collections", "x_log_journal",
+            "x_image_viewports", "x_defer_collections", "x_log_journal", "x_log_access", "x_log_fields",
             // The update store's origin and directory (LLP 1030.006 D7); a production bake ignores both.
             "x_update_origin", "x_update_dir").forEach { k ->
             intent.getStringExtra(k)?.let { android.system.Os.setenv("EXACT_" + k.removePrefix("x_").uppercase(), it, true) }

@@ -62,7 +62,10 @@ fn started() -> Sim<Hands> {
 #[test]
 fn a_press_and_a_release_each_reach_one_tick() {
     let mut sim = started();
-    assert!(sim.world().try_resource::<XrInput>().is_none(), "no headset, no resource");
+    assert!(
+        sim.world().try_resource::<XrInput>().is_none(),
+        "no headset, no resource"
+    );
     // Frames at 72 Hz under a 60 Hz world: held for five frames.
     let frame = 1000.0 / 72.0;
     for n in 0..12u32 {
@@ -92,7 +95,13 @@ fn a_frame_that_only_moved_replaces_the_one_before_it() {
     sim.advance(1000.0 / 60.0 + 5.0, Clock::Seekable);
     let seen = sim.world().resource::<Seen>();
     assert_eq!((seen.pressed, seen.released), (1, 0));
-    let x = sim.world().resource::<XrInput>().hand(XrHand::Right).aim.position.x;
+    let x = sim
+        .world()
+        .resource::<XrInput>()
+        .hand(XrHand::Right)
+        .aim
+        .position
+        .x;
     assert!((x - 0.4).abs() < 1e-6);
 }
 
@@ -111,10 +120,22 @@ fn the_hands_save_and_restore_and_refuse_what_is_not_finite() {
     assert_eq!(other.world().resource::<Seen>().released, 1);
     let mut bad = hands(false, 0.0);
     bad.hand_mut(XrHand::Left).aim.position.y = f32::NAN;
-    let before = sim.world().resource::<XrInput>().hand(XrHand::Right).aim.position;
+    let before = sim
+        .world()
+        .resource::<XrInput>()
+        .hand(XrHand::Right)
+        .aim
+        .position;
     sim.input(event(0.0, bad));
     sim.run(50.0);
-    assert_eq!(sim.world().resource::<XrInput>().hand(XrHand::Right).aim.position, before);
+    assert_eq!(
+        sim.world()
+            .resource::<XrInput>()
+            .hand(XrHand::Right)
+            .aim
+            .position,
+        before
+    );
     let mut odd = hands(false, 0.0);
     odd.hand_mut(XrHand::Right).buttons = 1 << 9;
     assert!(sim.validate_input(&event(0.0, odd)).is_err());
@@ -133,5 +154,8 @@ fn the_stage_takes_an_aim_into_the_world() {
     let (o, d) = stage.ray_to_world(origin, direction);
     let hit = o + d * (o.y / -d.y);
     // 0.2 m right of and 0.4 m nearer than the table's centre, at 20 units a metre.
-    assert!((hit - Vec3::new(2.0 + 4.0, 0.0, 1.0 + 8.0)).length() < 1e-3, "{hit}");
+    assert!(
+        (hit - Vec3::new(2.0 + 4.0, 0.0, 1.0 + 8.0)).length() < 1e-3,
+        "{hit}"
+    );
 }

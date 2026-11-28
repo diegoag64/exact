@@ -88,7 +88,7 @@ impl<D: DataSource> Presenter<D> {
     // it. A press between keeps the contact only within the slop (the pan
     // that begins takes the press), as a draggable element hears a drag that
     // starts on a button inside it (LLP 1057.001 rule 3; kanban F6).
-    pub(super) fn pan_candidate(&self, hit: NodeKey) -> Option<Candidate> {
+    pub(in crate::presenter) fn pan_candidate(&self, hit: NodeKey) -> Option<Candidate> {
         let mut at = self.host.kernel().node_by_key(hit).map(|n| n.id);
         while let Some(id) = at {
             let n = self.host.kernel().node(id)?;

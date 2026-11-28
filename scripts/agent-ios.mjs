@@ -27,6 +27,7 @@ import {
   forwardedEnv,
   simulatorLaunch,
   simulatorAppContainer,
+  simulatorScreenshot,
 } from '../host/apple/devices.mjs';
 import { appleExecutableName, resolveApp } from './app.mjs';
 export const simulatorOrientation = name => simulatorTurns.some(turn => turn.scene === name);
@@ -99,7 +100,7 @@ function stuckLaunch(udid, pid) {
     }
   } catch {}
   const shot = resolve(tmpdir(), `exact-ios-launch-${Date.now()}.png`);
-  const io = spawnSync('xcrun', ['simctl', 'io', udid, 'screenshot', shot], { encoding: 'utf8', timeout: 10000 });
+  const io = simulatorScreenshot(udid, shot, { timeout: 10000 });
   return [
     pid ? `its process ${pid} ${running ? 'is still running' : 'has exited'}` : 'simctl named no process for it',
     io.status === 0 ? `the simulator's display is in ${shot}` : "the simulator's display could not be captured",

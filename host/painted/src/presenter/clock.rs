@@ -13,6 +13,38 @@ pub fn wall_since(started: std::time::Instant) -> Wall {
 }
 
 impl<D: DataSource> Presenter<D> {
+    /// A motion frame.
+    pub fn tick(&mut self, now_ms: f64) {
+        let animating = self.arrange.is_some()
+            || self.group.is_some()
+            || self.focus.is_some()
+            || self.brush.moving()
+            || self.bars_ripple_moving()
+            || self.surface_ripple_moving()
+            || self.stage_moving();
+        let (layout, paint) = self.host.tick_effects(now_ms);
+        self.release_overdue();
+        if layout {
+            self.hatches.stale = true;
+            self.dirty = true;
+            self.clamp_scroll();
+            self.queue_collections();
+            if let Some(error) = self.refresh_transform_geometry() {
+                self.host.log(error);
+            }
+        }
+        self.tick_arrange(self.host.now());
+        self.tick_drag_edge(self.host.now());
+        self.tick_field_drag(self.host.now());
+        self.settle_wheel_snaps();
+        self.step_glides(now_ms);
+        self.step_zooms(now_ms);
+        if let Some(error) = self.deliver_scroll_ends() {
+            self.host.log(error);
+        }
+        self.dirty |= paint || animating;
+    }
+
     /// Android's painted loop: defer an ordinary timer behind a waiting paint,
     /// but bring a due motion sample's clock forward before testing frame demand.
     #[cfg(any(target_os = "android", test))]
@@ -24,7 +56,7 @@ impl<D: DataSource> Presenter<D> {
         frame_ms: f64,
     ) -> (bool, Option<String>) {
         let motion = self.host.motion_due_ms().is_some_and(|due| due <= now);
-        if vsync && self.host.wants_frames() {
+        if vsync && self.wants_frames() {
             *last_tick = now;
             (false, self.animation_frame(now))
         } else if self.wake_due_ms().is_some_and(|due| due <= now)
@@ -90,6 +122,7 @@ impl<D: DataSource> Presenter<D> {
         let after = self.finish_commit();
         self.hatch_timers(now_ms);
         let held = self.release_held_tap(false);
+        self.settle_wheel_snaps();
         let ends = self.deliver_scroll_ends();
         e.or(after)
             .or(held)
@@ -118,6 +151,7 @@ impl<D: DataSource> Presenter<D> {
         self.dirty |= paint;
         let after = self.finish_commit();
         self.hatch_presented(now_ms);
+        self.settle_wheel_snaps();
         let ends = self.deliver_scroll_ends();
         admission.or(e).or(after).or(ends)
     }
@@ -183,6 +217,11 @@ impl<D: DataSource> Presenter<D> {
             .host
             .runner_mut()
             .fire_native_timer(timer.index, timer.generation, now_ms);
+        // An idle firing, or a callback the runner no longer owes: nothing
+        // committed, so there is nothing to lay out, service or paint.
+        if a.receipts.is_empty() && a.error.is_none() {
+            return None;
+        }
         let (e, paint) = self.host.advanced(a);
         self.dirty |= paint;
         let after = self.finish_commit();
@@ -336,6 +375,7 @@ impl<D: DataSource> Presenter<D> {
         self.dirty = true;
         let after = self.after_commit();
         let held = self.release_held_tap(false);
+        self.settle_wheel_snaps();
         let ends = self.deliver_scroll_ends();
         (landed, e.or(after).or(held).or(ends))
     }

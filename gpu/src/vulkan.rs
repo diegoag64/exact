@@ -101,6 +101,26 @@ pub(crate) fn create_gpu(
     Some(make(unsafe { &*provider }, requirements))
 }
 
+/// The device a headset's provider makes, or None when the module makes its own.
+pub(crate) fn headset_gpu(
+    requirements: &[crate::grants::Requirements],
+) -> Option<Result<Gpu, DeviceFailure>> {
+    let made = create_gpu(requirements);
+    // On a PC (docs/quest.md, "PC VR on Windows") a provider that refused
+    // leaves the window its ordinary device: the provider is cleared and
+    // the reason logged, and the host hears that no session was made.
+    #[cfg(windows)]
+    if let Some(Err(e)) = &made {
+        log(&format!(
+            "the headset's device failed ({e}); the window makes its own"
+        ));
+        // SAFETY: null clears the provider.
+        unsafe { set_provider(std::ptr::null()) };
+        return None;
+    }
+    made
+}
+
 fn failure(stage: &str, e: impl std::fmt::Display) -> DeviceFailure {
     DeviceFailure::new(
         DeviceFailureKind::NoDevice,
@@ -420,6 +440,16 @@ fn wgpu_format(format: u32) -> Option<wgpu::TextureFormat> {
     })
 }
 
+/// Where canvas `id`'s immersive subject stands ([`crate::Module::xr_focus`]).
+pub fn xr_focus(id: u32) -> Option<[f32; 3]> {
+    native::with(|m| m.xr_focus(id)).flatten()
+}
+
+/// How canvas `id` drew its last stereo frame ([`crate::Module::xr_stereo_mode`]).
+pub fn xr_stereo_mode(id: u32) -> &'static str {
+    native::with(|m| m.xr_stereo_mode(id)).unwrap_or("none")
+}
+
 /// The `VkFormat` canvas `id` draws its page frames in (0 when it has none
 /// a target may have): a target in it keeps the surface's renderer as it is.
 pub fn vulkan_format(id: u32) -> u32 {
@@ -733,7 +763,7 @@ macro_rules! __vulkan_exports {
         /// `out` is three writable numbers.
         #[no_mangle]
         pub unsafe extern "C" fn gpu_xr_focus(id: u32, out: *mut f32) -> u32 {
-            match $crate::native::xr_focus(id) {
+            match $crate::vulkan::xr_focus(id) {
                 Some(focus) if !out.is_null() => {
                     ::std::ptr::copy_nonoverlapping(focus.as_ptr(), out, 3);
                     1
@@ -744,7 +774,7 @@ macro_rules! __vulkan_exports {
         /// How canvas `id` drew its last stereo frame, in gpu_out_ptr; its length.
         #[no_mangle]
         pub extern "C" fn gpu_xr_stereo_mode(id: u32) -> u32 {
-            let bytes = $crate::native::xr_stereo_mode(id).as_bytes().to_vec();
+            let bytes = $crate::vulkan::xr_stereo_mode(id).as_bytes().to_vec();
             let len = bytes.len() as u32;
             EXACT_GPU_OUT.with(|out| *out.borrow_mut() = bytes);
             len

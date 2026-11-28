@@ -267,11 +267,7 @@ pub fn emit(plan: &Plan, site_attrs: bool, dev_reload: bool) -> Result<Output, S
         out: String::new(),
         mount_templates: Default::default(),
         next_local_element: None,
-        repeated_nodes: if site_attrs || dev_reload {
-            Vec::new()
-        } else {
-            sites::repeated_nodes(plan, &sites)
-        },
+        repeated_nodes: sites::repeated_nodes(plan, &sites),
         classes: Vec::new(),
         looks: Vec::new(),
         press_paint: false,
@@ -769,6 +765,7 @@ pub fn emit(plan: &Plan, site_attrs: bool, dev_reload: bool) -> Result<Output, S
         js
     };
     let mut css = fonts.css.clone();
+    surfaces::color_observer_css(&mut css, plan);
     // @ref LLP 1095 D4 — the theme's reach into the host's own sheet.
     css.push_str(&(exact_kernel::style::roles::theme_css() + &crate::base_scale::css(plan)));
     css.push_str("#exact-root#exact-root{");
@@ -885,19 +882,8 @@ impl Em<'_> {
             return Ok(None);
         }
         let parts = self.parts[i as usize].clone().ok_or("no parts")?;
-        let mut virtualized = false;
-        for b in row.bindings.iter().map(|b| plan.binding(b)) {
-            if b.kind == BindingKind::Prop && b.id == PropId::Virtualized as u16 {
-                match style::literal(plan, plan.code(b.expr)) {
-                    Some(Value::Bool(v)) => virtualized = v,
-                    _ => {
-                        return Err(format!(
-                            "node {i}: a dynamic `virtualized` is not in the JS target"
-                        ))
-                    }
-                }
-            }
-        }
+        let mut filter_input = false;
+        let virtualized = self.virtualized(i)?;
         let element = if parts.tag == "canvas" {
             "div"
         } else {
@@ -979,7 +965,6 @@ impl Em<'_> {
         if let Some(id) = self.exact_id(i) {
             attrs.push(("data-exact-id".into(), id));
         }
-        attrs.extend(self.site_attrs.then(|| ("data-site".into(), i.to_string())));
         attrs.extend(
             self.dev_reload
                 .then(|| ("data-carry-type".into(), format!("{node_type:?}"))),
@@ -1007,9 +992,8 @@ impl Em<'_> {
         {
             attrs.push(("tabindex".into(), "0".into()));
         }
-        // A `symbol`'s content is drawn as `use`'s clones, which Chrome
-        // styles from their own attributes, not the page's class rules: its
-        // static rows go inline too (the live host writes every row inline).
+        // A `symbol`'s content is drawn as `use`'s clones, which Chrome styles from their own attributes, not the page's
+        // class rules: its static rows go inline too (the live host writes every row inline).
         if !css.is_empty() && self.in_symbol(i) {
             attrs.push(("style".into(), format!("{css}{presence}")));
         } else if !presence.is_empty() {
@@ -1018,6 +1002,7 @@ impl Em<'_> {
         if parts.tag == "canvas" {
             attrs.extend(style::canvas_bitmap(plan, row)?);
         }
+        attrs.extend(crate::safe_area::attribute(&parts.css)); // LLP 1123 D17
         let class = if css.is_empty() {
             "0".to_string()
         } else {
@@ -1027,28 +1012,18 @@ impl Em<'_> {
             }
             format!("{}", at + 1)
         };
-        let attrs_js = if attrs.is_empty() {
-            "0".to_string()
-        } else {
-            format!(
-                "{{{}}}",
-                attrs
-                    .iter()
-                    .map(|(k, v)| format!(
-                        "{}:{}",
-                        serde_json::to_string(k).unwrap(),
-                        scope.operand(serde_json::to_string(v).unwrap())
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            )
-        };
+        let attrs_js = self.attrs_js(i, &attrs, scope);
         let text = content
             .map(|t| scope.operand(serde_json::to_string(&t).unwrap()))
             .unwrap_or("0".into());
         let status_owner = self.answers.status_owner(i);
+        // @ref LLP 1075.003 §3.7 — a tab's contents are made when it is first
+        // selected: a virtualized list's rows as well.
+        let panel = self.panels.binary_search(&exact_plan::NodesId(i)).is_ok();
+        // Keep a unique element name for dev-reload tab panels so inner `v0`
+        // declarations do not shadow the `tp(e, e => ...)` carry parameter.
         let e = match &mut self.next_local_element {
-            Some(next) if !status_owner => {
+            Some(next) if !status_owner && !(panel && self.dev_reload) => {
                 let name = format!("v{next}");
                 *next += 1;
                 name
@@ -1075,7 +1050,7 @@ impl Em<'_> {
                 }
                 // A trap belongs to this binding instance even before it has a DOM element.
                 let f = self.binding_value(i, "{}", &b, scope, true)?;
-                let f = self.counted(i, k, f);
+                let f = self.counted(i, &e, k, scope, f);
                 let read = format!("{e}{name}");
                 let memo = self.uses.rt("bindingMemo");
                 let _ = write!(self.out, "const {read}={memo}({f});");
@@ -1168,8 +1143,7 @@ impl Em<'_> {
             if b.kind == BindingKind::Prop && b.id == PropId::FocusGuide as u16 {
                 continue;
             }
-            // Nor have the system bars (LLP 1105 D7), interactive glass,
-            // a menu's order or a tip (LLP 1035.006.000 D4).
+            // Nor have the system bars (LLP 1105 D7), UIKit's glass and menu props or a tip (LLP 1035.006.000 D4).
             // A zoomable scroller's zoom is zoom.js's; no other scroller has one.
             if b.kind == BindingKind::Prop && b.id == PropId::ScrollZoom as u16 {
                 if zoomable {
@@ -1182,11 +1156,16 @@ impl Em<'_> {
                 continue;
             }
             if b.kind == BindingKind::Prop
-                && (b.id == PropId::StatusBarStyle as u16
+                && (b.id == PropId::AppleMagnification as u16
+                    || b.id == PropId::AppleAllowsMagnification as u16
+                    || b.id == PropId::AppleAllowsBackForwardNavigationGestures as u16
+                    || b.id == PropId::AppleInactiveSchedulingPolicy as u16
+                    || b.id == PropId::StatusBarStyle as u16
                     || b.id == PropId::StatusBarAnimation as u16
                     || b.id == PropId::SystemBarsHidden as u16
                     || b.id == PropId::GlassInteractive as u16
                     || b.id == PropId::MenuOrder as u16
+                    || b.id == PropId::KeepsMenuPresented as u16
                     || b.id == PropId::Arrangement as u16
                     || b.id == PropId::Tip as u16
                     || b.id == PropId::TipMessage as u16
@@ -1202,14 +1181,7 @@ impl Em<'_> {
                     self.markdown(i, &e, &format!("()=>{source}"), plan.code(b.expr));
                 }
                 // Refused SVG literals still run their binding to journal the refusal.
-                let svg_animation = node_type.is_svg_element()
-                    && b.kind == BindingKind::Style
-                    && matches!(
-                        exact_kernel::StyleId::from_bit(b.id as u32),
-                        Some(
-                            exact_kernel::StyleId::Animation | exact_kernel::StyleId::ExitAnimation
-                        )
-                    );
+                let svg_animation = self.needs_svg_animation_guard(node_type, b.kind, b.id);
                 if !svg_animation
                     && !(b.kind == BindingKind::Prop
                         && b.id == PropId::AccessibilityKeyShortcuts as u16
@@ -1224,17 +1196,20 @@ impl Em<'_> {
             let at = self.out.len();
             let f = if let Some((_, read)) = heading.iter().flatten().find(|(index, _)| *index == k)
             {
-                self.status_read(i, &e, &b, read.clone())
+                self.status_read(i, &e, &b, scope, read.clone())
             } else {
                 let f = self
                     .bound(i, &e, &b, scope)
                     .map_err(|x| format!("node {i}: {x}"))?;
-                self.counted(i, k, f)
+                self.counted(i, &e, k, scope, f)
             };
             self.paint_binding(node_type, &b, &e, &f);
             match b.kind {
                 BindingKind::Prop if markdown && b.id == PropId::Text as u16 => {
                     self.markdown(i, &e, &f, plan.code(b.expr))
+                }
+                BindingKind::Prop if b.id == PropId::Value as u16 && input::text_field(&parts) => {
+                    filter_input = self.field_value(i, b.expr, &e, &f);
                 }
                 BindingKind::Prop if b.id == PropId::Dataset as u16 => self.dataset(&e, &f),
                 BindingKind::Prop if self.canvas_setting(&b, &e, &f) => {}
@@ -1283,7 +1258,7 @@ impl Em<'_> {
             seen.extend(raw.map(|raw| lower::Seen { b, f, raw, at, end }));
         }
         if !seen.is_empty() {
-            self.lower(&e, &class, &parts, scope, seen)?;
+            self.lower(i, &e, &class, &parts, scope, seen)?;
         }
         self.motion_node(i, &e, scope)?;
         if self.reorder_handle(i) {
@@ -1305,6 +1280,9 @@ impl Em<'_> {
                     self.out,
                     "{on}({e},\"message\",{ve}({name},[{types}],a_{a}),{message});"
                 );
+                continue;
+            }
+            if matches!(h.event, EventKind::Pinch | EventKind::Pinchrelease) {
                 continue;
             }
             let mut args = Vec::new();
@@ -1355,6 +1333,8 @@ impl Em<'_> {
                 | EventKind::Drop
                 | EventKind::Dragenter
                 | EventKind::Dragleave
+                | EventKind::Dragstart // @ref LLP 1094.000 D16: drag-out.js tells the node.
+                | EventKind::Dragend
                 | EventKind::Atompress // LLP 1045.000 D7: the Markdown editor's and reader's.
                 | EventKind::Play
                 | EventKind::Playing
@@ -1401,8 +1381,7 @@ impl Em<'_> {
                 | EventKind::Capture // and the runtime refusing a capture (`onFrameCapture`)
                 | EventKind::Userpromptopened // @ref LLP 1020.002 D9: the browser's own dialogs
                 | EventKind::Historyswipe // @ref LLP 1115.000 D5.5: the browser shows its own arrow
-                | EventKind::Swipe // @ref LLP 1057.001 §8.1: the web has no swipe of the platform's
-                | EventKind::Select => {}
+                | EventKind::Swipe | EventKind::Select => {} // @ref LLP 1057.001 §8.1 (swipe)
                 // The motion piece's: the swipe's holds, a pan's velocity.
                 EventKind::Swiperight
                 | EventKind::Swipeleft
@@ -1433,9 +1412,7 @@ impl Em<'_> {
             if self.row_actions.contains(&(h.action.0 as usize)) {
                 args.insert(0, scope.rows.clone().unwrap_or_else(|| "{}".into()));
             }
-            // Its arguments are evaluated in the action's commit (`.t`): one
-            // that traps refuses it, as the runner's handler evaluation does
-            // (LLP 1090 D1).
+            // Evaluated in the action's commit (`.t`) so a trap refuses it (LLP 1090 D1).
             let action = scope.operand(format!("a_{}", h.action.0));
             let handler = if args.is_empty() {
                 action
@@ -1461,25 +1438,34 @@ impl Em<'_> {
             }
             // The event family's binder (rt.js), imported only where a plan binds it.
             let bind = crate::events::binder(h.event).map(|b| format!(",{}", self.uses.rt(b)));
+            let handler = if filter_input && h.event == EventKind::Input {
+                format!("{}({e},{handler})", self.uses.rt("filterInput"))
+            } else {
+                handler
+            };
             let (bind, name) = (bind.unwrap_or_default(), h.event.name());
             let _ = write!(self.out, "{on}({e},\"{name}\",{handler}{bind});");
         }
-        // @ref LLP 1075.003 §3.7 — a tab's contents are made when it is first
-        // selected: a virtualized list's rows as well.
-        let panel = self.panels.binary_search(&exact_plan::NodesId(i)).is_ok();
         if panel {
             let tp = self.uses.rt("tp");
             let _ = write!(self.out, "{tp}({e},{e}=>{{");
         }
         let mut slot = None;
-        self.template_scope(status_owner || (panel && self.dev_reload), |em| {
-            if virtualized {
-                em.collection_children(i, &e, scope, &edges)
-            } else {
-                slot = em.mount_children(i, &parent_of_children, scope, !status_owner)?;
-                Ok(())
-            }
-        })?;
+        self.status_scope(
+            i,
+            &e,
+            status_owner,
+            panel && self.dev_reload,
+            scope,
+            |em, sc| {
+                if virtualized {
+                    em.collection_children(i, &e, sc, &edges)
+                } else {
+                    slot = em.mount_children(i, &parent_of_children, sc, !status_owner)?;
+                    Ok(())
+                }
+            },
+        )?;
         self.live_time(i, element, &e, scope)?;
         if panel {
             self.out.push_str("});");
@@ -1488,8 +1474,11 @@ impl Em<'_> {
     }
 }
 
-/// A drag's `url` or `files`: bound even when constant, for `drag.js`'s hooks
-/// to admit as the runner does on other hosts (LLP 1094.000 D1, D2).
+/// A drag's `url`, `files` or files and names: bound even when constant, for
+/// `drag.js`'s hooks to admit as the runner does on other hosts (LLP 1094.000
+/// D1, D2, D14).
 pub fn admitted_on_the_page(id: u16) -> bool {
-    id == PropId::DataTransferUrl as u16 || id == PropId::DataTransferFiles as u16
+    id == PropId::DataTransferUrl as u16
+        || id == PropId::DataTransferFiles as u16
+        || id == PropId::DataTransferEntries as u16
 }

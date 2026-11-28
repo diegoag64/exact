@@ -80,6 +80,7 @@ pub enum HttpScheduling {
     },
 }
 
+pub use crate::upload::StreamHead;
 pub use http::{CacheMode, Redirect};
 #[path = "request_preload.rs"]
 mod preload;
@@ -102,6 +103,8 @@ pub struct Request {
     /// Executor-local continuation token, not an HTTP request. The browser
     /// drains its module's microtasks; native hosts take source-owned worker work.
     pub continuation: Option<u64>,
+    /// Whether a continuation is local module/storage work eligible for `RequestClass::Local`.
+    pub local: bool,
     /// Portable storage operation; independent of HTTP and native closures.
     pub storage: Option<Vec<u8>>,
     /// A named surface capture or restore, executed by its owning presenter.
@@ -127,6 +130,11 @@ pub struct Request {
     pub socket: bool,
     /// Ordered WebSocket protocol names (LLP 1016.000); set with [`Request::protocols`].
     pub protocols: Vec<String>,
+    /// An HTTP stream whose 2xx response opens with a standalone `open` message
+    /// carrying the status and headers before any event or byte chunk (LLP
+    /// 1016.000 D12). Set by TypeScript's `fetch(url, {exactStream, exactStreamOpen: true})`
+    /// and [`Request::stream_open`].
+    pub stream_open: bool,
     /// An HTTP stream whose body, when it is not `text/event-stream`,
     /// arrives as bytes (LLP 1016.000, the byte stream of 2026-10-23): each
     /// [`Message`] is `binary`, the bytes read since the runner took the
@@ -302,6 +310,7 @@ impl Request {
                 max_response_bytes: 1 << 20,
             },
             continuation: None,
+            local: false,
             storage: None,
             surface: None,
             grants: None,
@@ -310,6 +319,7 @@ impl Request {
             headers: Vec::new(),
             body,
             stream: false,
+            stream_open: false,
             socket: false,
             protocols: Vec::new(),
             bytes: false,
@@ -400,12 +410,31 @@ impl Request {
             && self.body_from.is_none()
             && self.body_to.is_none()
     }
+    /// Local storage or JS module-turn continuation that does not touch the
+    /// network and may overlap plain HTTP `Read`s on `Target::Resource`
+    /// (LLP 1162 §8 Q2).
+    pub fn is_local_work(&self) -> bool {
+        self.http == HttpScheduling::Ordered
+            && (self.storage.is_some() || (self.continuation.is_some() && self.local))
+            && self.surface.is_none()
+            && !self.stream
+            && !self.socket
+            && self.listen.is_none()
+            && !self.is_process()
+            && self.long_poll.is_none()
+            && !self.upload_progress
+            && !self.is_native()
+            && !self.is_auth()
+            && self.body_from.is_none()
+            && self.body_to.is_none()
+    }
     /// A `GET`.
     pub fn get(url: &str) -> Request {
         Request {
             module: None,
             http: HttpScheduling::Ordered,
             continuation: None,
+            local: false,
             storage: None,
             surface: None,
             grants: None,
@@ -414,6 +443,7 @@ impl Request {
             headers: Vec::new(),
             body: Vec::new(),
             stream: false,
+            stream_open: false,
             socket: false,
             protocols: Vec::new(),
             bytes: false,
@@ -454,6 +484,7 @@ impl Request {
             module: None,
             http: HttpScheduling::Ordered,
             continuation: None,
+            local: false,
             storage: None,
             surface: None,
             grants: None,
@@ -462,6 +493,7 @@ impl Request {
             headers: vec![("content-type".into(), "application/json".into())],
             body: json.as_bytes().to_vec(),
             stream: false,
+            stream_open: false,
             socket: false,
             protocols: Vec::new(),
             bytes: false,
@@ -488,6 +520,7 @@ impl Request {
     pub fn storage(payload: Vec<u8>) -> Self {
         Self {
             storage: Some(payload),
+            local: true,
             ..Self::get("")
         }
     }
@@ -655,25 +688,25 @@ impl Request {
         self
     }
 
-    /// Held: the server may keep the reply until something changes, and no
-    /// clock waits on it (see [`Request::held`]). On anything but a plain
-    /// HTTP request it changes nothing.
+    /// Held: the server or data source may keep the reply until something
+    /// changes, and no clock waits on it (see [`Request::held`]; LLP 1016.000
+    /// D9, amended by LLP 1156.008.000 D4). Applies to plain HTTP requests and
+    /// explicit continuations; on anything else it changes nothing.
     pub fn held(mut self) -> Self {
         self.held = true;
         self
     }
 
     /// Whether no clock waits on this request: [`Request::held`] on a plain
-    /// HTTP request (not a stream, storage, a continuation, a surface, a
-    /// native call or an auth request, nor an upload, whose file is read
-    /// before it is sent).
+    /// HTTP request or an explicit continuation (not a stream, storage, a
+    /// surface, a native call or an auth request, nor an upload, whose file is
+    /// read before it is sent).
     pub fn is_held(&self) -> bool {
         self.held
             && !self.stream
             && self.body_from.is_none()
             && self.body_to.is_none()
             && self.storage.is_none()
-            && self.continuation.is_none()
             && self.surface.is_none()
             && !self.is_native()
             && !self.is_auth()
@@ -865,6 +898,7 @@ impl Request {
     pub fn continuation<S: crate::HostWork + ?Sized>(token: u64) -> Self {
         Self {
             continuation: Some(token),
+            local: S::LOCAL,
             ..Self::get("")
         }
     }
@@ -949,6 +983,10 @@ pub struct Message {
     /// A two-way socket's binary frame (LLP 1016.000 D7): its bytes, with
     /// `data` empty. `None` for text and for every server-sent event.
     pub binary: Option<Vec<u8>>,
+    /// The 2xx response head of a host-synthesized HTTP stream `open` event
+    /// (`Request::stream_open`, LLP 1016.000 D12). `None` for every other
+    /// message, including a server-sent `event: open`.
+    pub head: Option<Box<StreamHead>>,
 }
 
 /// One operation a mutation, or the socket's own mapper, stages on a
@@ -1131,6 +1169,9 @@ impl Outcome {
     pub fn summary(&self) -> String {
         match self {
             Outcome::Response(r) => text!("HTTP {}, {} bytes", r.status, r.body.len()),
+            Outcome::Message(m) if m.head.is_some() => {
+                text!("stream open, HTTP {}", m.head.as_deref().unwrap().status)
+            }
             Outcome::Message(m) if m.coalesced > 0 => {
                 text!("message, {} bytes, {} coalesced", m.data.len(), m.coalesced)
             }
@@ -1340,6 +1381,10 @@ pub enum RequestClass {
     Ordered,
     /// A plain HTTP request a resource's answer made: it does not wait for the reads before it.
     Read,
+    /// Local storage or module-turn work for a resource or background cleanup:
+    /// runs and drains beside plain HTTP `Read`s while staying FIFO with other
+    /// local work and behind earlier sends (LLP 1162 §8 Q2).
+    Local,
     /// A send of `plan.mutations[m]`, a `parallel` mutation: it does not wait for that mutation's other sends.
     Parallel(u32),
 }
@@ -1401,82 +1446,8 @@ impl std::fmt::Debug for RequestOut {
 }
 
 #[cfg(test)]
-mod summary_tests {
-    use super::*;
-
-    #[test]
-    fn a_summary_is_the_text_format_wrote() {
-        for (status, len) in [(200, 0), (404, 5), (u16::MAX, 70_000)] {
-            let outcome = Outcome::Response(Response {
-                status,
-                headers: vec![],
-                body: vec![0; len],
-            });
-            assert_eq!(outcome.summary(), format!("HTTP {status}, {len} bytes"));
-            let storage = Outcome::Storage(vec![1; len]);
-            assert_eq!(storage.summary(), format!("storage, {len} bytes"));
-            let captured = Outcome::Surface(SurfaceOutcome::Captured(vec![2; len]));
-            assert_eq!(captured.summary(), format!("surface captured, {len} bytes"));
-        }
-    }
-
-    #[test]
-    fn a_failure_summary_lowers_its_kind_as_unicode_would() {
-        for kind in [
-            FailureKind::Network,
-            FailureKind::Refused,
-            FailureKind::Unsupported,
-            FailureKind::Aborted,
-            FailureKind::Timeout,
-            FailureKind::NotFound,
-        ] {
-            // Every variant is listed: adding one breaks this match.
-            match kind {
-                FailureKind::Network
-                | FailureKind::Refused
-                | FailureKind::Unsupported
-                | FailureKind::Aborted
-                | FailureKind::Timeout
-                | FailureKind::NotFound => {}
-            }
-            let name = format!("{kind:?}");
-            assert!(name.is_ascii(), "{name}");
-            let outcome = Outcome::Failed {
-                kind,
-                message: "no".into(),
-            };
-            assert_eq!(outcome.summary(), format!("{}: no", name.to_lowercase()));
-        }
-    }
-}
-
-#[cfg(test)]
 #[path = "request_reply_tests.rs"]
 mod reply_tests;
-
-#[cfg(test)]
-mod scheduling_tests {
-    use super::*;
-
-    #[test]
-    fn http_is_ordered_until_the_source_explicitly_opts_in() {
-        for request in [
-            Request::get("https://example.test"),
-            Request::post_json("https://example.test", "{}"),
-            Request::continuation::<crate::host_work::TestWork>(1),
-            Request::storage(vec![]),
-        ] {
-            assert_eq!(request.http, HttpScheduling::Ordered);
-        }
-        let request = Request::get("https://example.test").independent_http(4096);
-        assert_eq!(
-            request.http,
-            HttpScheduling::Independent {
-                max_response_bytes: 4096
-            }
-        );
-    }
-}
 
 #[cfg(test)]
 #[path = "request_tests.rs"]

@@ -217,10 +217,9 @@ package final class ScrollPump: NSObject, UIScrollViewDelegate {
         armRest(after: Self.restDelay)
         p.leaves?.scrolled()
         p.menus.rehostPopovers()
-        // What this frame shows has its text before it commits. A pass
-        // follows only for work owed: a paragraph still without all its
-        // pixels, or a list's rows. A screen painted up front scrolls with
-        // none, and asks for no frames.
+        // Give pixels to what this frame shows before it commits. Queue a
+        // slice only for text within reach or pending rows. Every UIKit
+        // offset callback during a fling can otherwise queue another pass.
         if p.paintVisibleText() { textPending = true }
         guard textPending || !p.collections.fillPending.isEmpty else { return }
         scheduleAfterScroll()
@@ -239,6 +238,9 @@ package final class ScrollPump: NSObject, UIScrollViewDelegate {
             p.owners.publish()
         }
         presenter?.stickies.scrolled(nil); scrolled(nil)
+        #if os(iOS)
+        presenter?.textSelection.scrolled(scrollView)
+        #endif
     }
     // The page's element reveals (`IntoView.swift`).
     #if os(iOS)
@@ -250,7 +252,15 @@ package final class ScrollPump: NSObject, UIScrollViewDelegate {
     package func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         presenter?.elementScrolls.userScrolled(scrollView)
         if let session = presenter?.session { session.frameHealth.beginScroll(scrollView, session: session) }
+        #if os(iOS)
+        presenter?.textSelection.scrollWillBeginDragging(scrollView)
+        #endif
     }
+    #if os(iOS)
+    package func scrollViewWillEndDragging(_ scrollView: UIScrollView, withVelocity velocity: CGPoint, targetContentOffset: UnsafeMutablePointer<CGPoint>) {
+        if PinchLift.consume(for: scrollView) { targetContentOffset.pointee = scrollView.contentOffset }
+    }
+    #endif
     package func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) { if !decelerate { presenter?.session?.frameHealth.endScroll(scrollView) } }
     package func scrollViewDidEndDecelerating(_ scrollView: UIScrollView) { presenter?.session?.frameHealth.endScroll(scrollView) }
     package func scrollViewDidEndScrollingAnimation(_ scrollView: UIScrollView) { presenter?.elementScrolls.revealEnded(scrollView) }

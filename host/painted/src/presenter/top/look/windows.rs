@@ -288,6 +288,7 @@ pub(super) fn alert(
         menu: None,
         symbols: exact_kernel::SymbolSet::Fluent,
         symbol_weight: 400,
+        non_uniform_radius: false,
     }
 }
 
@@ -354,10 +355,12 @@ mod tests {
                     subtitle: None,
                     direction: exact_kernel::Direction::Ltr,
                     symbol: None,
+                    symbol_direction: exact_kernel::Direction::Ltr,
                     destructive: i == 1,
                     enabled: true,
                     cancel: i == 0,
                     checked: false,
+                    checkable: false,
                     opens: None,
                 })
                 .collect(),

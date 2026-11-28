@@ -43,10 +43,14 @@ fn log(line: &str) {
 }
 
 /// Load the artifact where the APK packages it and give it the primary GPU
-/// module, opened and initialized from `module`, before that module makes
-/// its device. Once a process; a failure is logged and the app draws to its
-/// window.
-pub(super) fn attach(module: &Path) {
+/// module (`artifact` empty), opened and initialized from `module`, before
+/// that module makes its device; on Windows only when VR was asked for
+/// ([`requested`]). Once a process; a failure is logged and the app draws to
+/// its window.
+pub(super) fn attach(artifact: &str, module: &Path) {
+    if !artifact.is_empty() {
+        return;
+    }
     #[cfg(windows)]
     if !requested() {
         return;
@@ -261,12 +265,13 @@ pub(crate) fn attached() -> bool {
     state() != 0
 }
 
-/// After the primary module made its device: where the runtime answered but
-/// made no session (its Vulkan device or session refused), the module made
-/// its ordinary device and the person is told why the game is flat.
+/// After the primary module (`artifact` empty) made its device: where the
+/// runtime answered but made no session (its Vulkan device or session
+/// refused), the module made its ordinary device and the person is told why
+/// the game is flat.
 #[cfg(windows)]
-pub(super) fn device_made() {
-    if matches!(HEADSET.get(), Some(Some(_))) && state() == 0 {
+pub(super) fn device_made(artifact: &str) {
+    if artifact.is_empty() && matches!(HEADSET.get(), Some(Some(_))) && state() == 0 {
         let why = status()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "the runtime made no session".into());
@@ -315,5 +320,18 @@ pub(crate) fn status() -> Option<String> {
     match HEADSET.get() {
         Some(Some(headset)) => Some(read_status(headset.status)),
         _ => None,
+    }
+}
+
+/// The window's lifecycle, given back to the canvas the headset's session
+/// drew once that session ends.
+#[cfg(windows)]
+impl super::Surfaces {
+    pub(crate) fn restore_desktop_canvas_lifecycle(&self) {
+        for canvas in self.canvases.values().filter(|c| c.artifact.is_empty()) {
+            let abi = &self.abis[&canvas.artifact];
+            abi.lifecycle(canvas.id, u32::from(!self.hidden));
+            abi.lifecycle(canvas.id, if self.interrupted { 2 } else { 3 });
+        }
     }
 }

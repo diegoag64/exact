@@ -33,11 +33,7 @@ extension NodeView {
     /// can be up to a device pixel smaller or larger (`PixelGridIOS.swift`,
     /// `PixelGridMac.swift`), and its text wraps at layout's width, not the
     /// drawn one.
-    #if os(iOS) || os(tvOS)
     package var layoutBounds: CGRect { CGRect(origin: laidOutBox.origin, size: grid?.layout.size ?? bounds.size) }
-    #else
-    package var layoutBounds: CGRect { CGRect(origin: bounds.origin, size: grid?.layout.size ?? bounds.size) }
-    #endif
     /// The frame layout sent, where the drawn one is on the pixel grid.
     package var laidOutFrame: CGRect { grid?.layout ?? frame }
 
@@ -69,13 +65,18 @@ extension NodeView {
 
     /// A content-box update can move content without changing the node's frame.
     func applyKernelContentBox(_ box: CGRect?, padding: [CGFloat?]?) {
+        let moved = kernelContentBox != box
         kernelContentBox = box; kernelPadding = padding
+        // Flow exclusion shapes are translated by `-contentBox().origin`, so a
+        // same-width origin shift invalidates the cached flow layout.
+        if moved, !flowShapes.isEmpty { cachedTextLayout = nil }
         layoutField(); layoutTextArea(); video?.layout(); layoutContent()
         #if os(iOS) || os(tvOS)
         setNeedsLayout(); setNeedsDisplay()
         #else
         layerPaintCache = nil
         needsLayout = true; needsDisplay = true
+        if moved, hasInlineLinkCursorRects { presenter?.noteInlineCursorRects(self) }
         #endif
     }
 

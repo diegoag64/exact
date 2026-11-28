@@ -81,7 +81,7 @@ package struct ScrollInsetsIOS: Equatable {
     package static func insets(terms: Terms, rows: Rows, held: [CGFloat] = [0, 0, 0, 0], band: [CGFloat],
                                platform: [CGFloat], consumed: [CGFloat] = [0, 0, 0, 0]) -> ScrollInsetsIOS {
         var content = [CGFloat](repeating: 0, count: 4), occupied = content
-        let containers = container(terms: terms, band: band)
+        let containers = terms.container(band: band)
         for e in 0..<4 {
             let reaches = terms.bandReaches[e]
             occupied[e] = max(containers[e], terms.keyboard[e], 0)
@@ -101,56 +101,24 @@ package struct ScrollInsetsIOS: Equatable {
                                horizontalIndicator: edgeInsets(follow(rows.horizontalIndicator, true)))
     }
 
-    /// D14's container term on each edge, top right bottom left: what Exact reserves there, else
-    /// the scroller's overlap with its owner's band where the band reaches it, and none on an edge
-    /// it ignores; what a native layout that clears the band may clear (D15).
-    package static func container(terms: Terms, band: [CGFloat]) -> [CGFloat] {
-        (0..<4).map { e in terms.container[e] ? terms.reserved[e] ?? (terms.bandReaches[e] ? band[e] : 0) : 0 }
-    }
-
-    /// D14's native `band` for `scroll`, top right bottom left: its frame's overlap with the unsafe
-    /// area of its owner's view, as UIKit gives that view, at most that area's depth on each edge
-    /// however small the scroller (D9). A scroll view's own `safeAreaInsets` do not serve: UIKit
+    /// D14's native `band` for `scroll`, top right bottom left, in the scroller's own coordinates,
+    /// where its insets are written: its bounds' overlap with the unsafe area of its owner's view, as
+    /// UIKit gives that view, at most that area's depth on each edge however small the scroller (D9),
+    /// so a scroller scaled under its owner takes the band at its own scale. A scroll view's own `safeAreaInsets` do not serve: UIKit
     /// gives a view none of the band past its superview's box, so a scroll view that reach outsets
     /// reads less than it overlaps (LLP 1123, the evidence row "Outset scroll view"). It reads the
     /// overlap at the current offsets of the scroll views above, and it holds Exact's own writes to
     /// the owner's controller, which D11's writers are to take out.
     package static func band(of scroll: UIView, in owner: UIView) -> [CGFloat] {
-        let frame = scroll.convert(scroll.bounds, to: owner), area = owner.safeAreaInsets
-        let safe = owner.bounds.inset(by: area)
-        let depth = { (value: CGFloat, most: CGFloat) in min(max(0, value), most) }
-        return [depth(safe.minY - frame.minY, area.top), depth(frame.maxX - safe.maxX, area.right),
-                depth(frame.maxY - safe.maxY, area.bottom), depth(safe.minX - frame.minX, area.left)]
+        let whole = scroll.convert(owner.bounds, from: owner), frame = scroll.bounds
+        let safe = scroll.convert(owner.bounds.inset(by: owner.safeAreaInsets), from: owner)
+        let depth = { (value: CGFloat, most: CGFloat) in min(max(0, value), max(0, most)) }
+        return [depth(safe.minY - frame.minY, safe.minY - whole.minY), depth(frame.maxX - safe.maxX, whole.maxX - safe.maxX),
+                depth(frame.maxY - safe.maxY, whole.maxY - safe.maxY), depth(safe.minX - frame.minX, safe.minX - whole.minX)]
     }
 
-    /// The kernel's terms for one scroller, each top right bottom left (`ScrollTerms`).
-    package struct Terms: Equatable {
-        package var reach: [CGFloat] = [0, 0, 0, 0]
-        package var reserved: [CGFloat?] = [nil, nil, nil, nil]
-        package var keyboard: [CGFloat] = [0, 0, 0, 0]
-        package var bandReaches: [Bool] = [true, true, true, true]
-        package var container: [Bool] = [true, true, true, true]
-
-        package init(reach: [CGFloat] = [0, 0, 0, 0], reserved: [CGFloat?] = [nil, nil, nil, nil],
-                     keyboard: [CGFloat] = [0, 0, 0, 0], bandReaches: [Bool] = [true, true, true, true],
-                     container: [Bool] = [true, true, true, true]) {
-            (self.reach, self.reserved, self.keyboard, self.bandReaches, self.container) = (reach, reserved, keyboard, bandReaches, container)
-        }
-
-        /// The terms the runner's `node` reply carries as `scrollTerms`, or `nil` for a box with
-        /// none or a reply that does not hold four of each. `reach` is D13's, which reach reads to
-        /// set the scroll view's frame, not an inset.
-        package init?(reply: [String: Any]) {
-            guard let object = reply["scrollTerms"] as? [String: Any] else { return nil }
-            let numbers = { (key: String) in (object[key] as? [Any])?.map { ($0 as? NSNumber).map { CGFloat($0.doubleValue) } } }
-            guard let reach = numbers("reach"), let reserved = numbers("reserved"), let keyboard = numbers("keyboard"),
-                  let reaches = object["bandReaches"] as? [Bool], let container = object["container"] as? [Bool],
-                  [reach.count, reserved.count, keyboard.count, reaches.count, container.count] == [4, 4, 4, 4, 4]
-            else { return nil }
-            self.init(reach: reach.map { $0 ?? 0 }, reserved: reserved, keyboard: keyboard.map { $0 ?? 0 },
-                      bandReaches: reaches, container: container)
-        }
-    }
+    /// The kernel's terms for one scroller, shared with AppKit's writer.
+    package typealias Terms = ScrollTerms
 
     /// What an author wrote on the scroller (D14's rows), each length top right bottom left.
     package struct Rows: Equatable {

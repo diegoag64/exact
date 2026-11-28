@@ -251,10 +251,11 @@ export function binarySourceInputs({files, directories, absent, links, inventori
     const root = roots.find(root => under(root.contains ?? root.path, path));
     return root ? { root: root.name, path: relative(root.path, path).split(sep).join('/') } : null;
   };
+  const order = (a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b));
   const capture = (rows, pathOf, rest) => rows.flatMap(row => {
     const at = located(pathOf(row));
     return at ? [{ ...at, ...rest(row) }] : [];
-  });
+  }).sort((a, b) => order(a.root, b.root) || order(a.path, b.path) || order(a.kind ?? '', b.kind ?? ''));
   // The receipt holds this as JSON: an undefined field is absent there too.
   return { version: 1, metadata: JSON.parse(JSON.stringify(metadata)),
     files: capture(files, file => file.path, file => ({ sha256: file.sha256 })),
@@ -277,13 +278,19 @@ function outputPath(path) {
 // Cargo follows directory links. Track their contents without reading outputs
 // through an alias or opening special files the baker may never use.
 // With no pre-bake snapshot, `since` rejects inputs whose change time cannot precede the bake.
-export function watchedDigest(paths, outputs, { inventory = false, since = Infinity, snapshots } = {}) {
+export function watchedDigest(paths, outputs, options) {
+  return digestWatches(paths, outputRoots(outputs), options);
+}
+
+// Reuse the resolved output roots within this scan. A later validation
+// (including the scans on both sides of Cargo) resolves them again.
+function digestWatches(paths, roots, { inventory = false, since = Infinity, snapshots } = {}) {
   const hash = createHash('sha256');
-  const excluded = outputs.map(outputPath), ancestors = new Set();
+  const ancestors = new Set();
   let stable = true;
   const changed = info => { if (info.ctimeMs >= since) stable = false; };
   const row = (...values) => hash.update(JSON.stringify(values) + '\n');
-  const visit = (path, top = false, atRoot = false, output = watchOutput(outputs, [path]), entry = {}) => {
+  const visit = (path, top = false, atRoot = false, output = watchOutput([], [path], roots), entry = {}) => {
     let info, link;
     try {
       info = lstatSync(path);
@@ -299,7 +306,7 @@ export function watchedDigest(paths, outputs, { inventory = false, since = Infin
       }
       if (inventory && atRoot && basename(path).startsWith('.') && info.isDirectory()) return;
       const real = realpathSync(path);
-      if (excluded.some(root => under(root, real))) { if (!inventory) row(path, 'output'); return; }
+      if (roots.some(root => under(root, real))) { if (!inventory) row(path, 'output'); return; }
       entry.directory = info.isDirectory();
       changed(info);
       if (link) changed(link);
@@ -391,12 +398,13 @@ function sourceInventory(app, outputs) {
  * omits their missing-file watches. */
 export function bakeSourceInputs(app, paths, outputs) {
   outputs = [...new Set(outputs.filter(Boolean).map(path => resolve(path)))];
-  const inventory = sourceInventory(app, outputs);
-  return {inputs:[...new Set(paths)].sort().map(path => ({path, sha256:watchedDigest([path], outputs)})), outputs, inventory};
+  const inventory = sourceInventory(app, outputs), roots = outputRoots(outputs);
+  return {inputs:[...new Set(paths)].sort().map(path => ({path, sha256:digestWatches([path], roots)})), outputs, inventory};
 }
 
 export function pendingSourceInputs(record) {
-  const changed = record.inputs.filter(({path, sha256}) => watchedDigest([path], record.outputs) !== sha256).map(({path}) => path);
+  const roots = outputRoots(record.outputs);
+  const changed = record.inputs.filter(({path, sha256}) => digestWatches([path], roots) !== sha256).map(({path}) => path);
   const inventory = record.inventory;
   if (watchedDigest(inventory.paths, inventory.outputs, {inventory:true}) !== inventory.sha256) changed.push('app source inventory');
   return changed;
@@ -557,6 +565,20 @@ export function unitDepInfo(message, workspace, metadata) {
       if (names(readFileSync(candidate, 'utf8'), candidate) && sameBytes(resolve(dirname(candidate), basename(file)), file)) return candidate;
     }
   }
+  const sameFile = (a, b) => {
+    if (a === b) return true;
+    const sa = statSync(a, { bigint: true }), sb = statSync(b, { bigint: true });
+    return sa.ino !== 0n && sa.dev === sb.dev && sa.ino === sb.ino;
+  };
+  const resolveMatch = (matches, targetName) => {
+    if (matches.length === 1) return matches[0].candidate;
+    if (matches.length > 1) {
+      const linked = matches.filter(m => m.linked);
+      if (linked.length === 1) return linked[0].candidate;
+      throw new Error(`ambiguous rustc unit dep-info for ${targetName}`);
+    }
+    return null;
+  };
   // Cargo copies libraries and executables out of deps, and aliases build scripts
   // in their build directory. Match the copied bytes; refuse ambiguous evidence.
   const custom = message.target.kind?.includes('custom-build');
@@ -576,10 +598,10 @@ export function unitDepInfo(message, workspace, metadata) {
       if (statSync(product).size !== bytes.length || !readFileSync(product).equals(bytes)) continue;
       const candidate = resolve(directory, unit + '.d');
       if (!existsSync(candidate)) continue;
-      if (names(readFileSync(candidate, 'utf8'), candidate)) matches.push(candidate);
+      if (names(readFileSync(candidate, 'utf8'), candidate)) matches.push({ candidate, linked: sameFile(product, file) });
     }
-    if (matches.length === 1) return matches[0];
-    if (matches.length > 1) throw new Error(`ambiguous rustc unit dep-info for ${message.target.name}`);
+    const found = resolveMatch(matches, message.target.name);
+    if (found) return found;
   }
   // Cargo 1.100 puts units under build/<package>/<hash>/out,
   // reporting only the copied product, including executables.
@@ -600,11 +622,11 @@ export function unitDepInfo(message, workspace, metadata) {
         const unit = extension ? name.slice(0, -extension.length) : name;
         const candidate = resolve(out, (executable || extension === '.wasm' ? unit : unit.replace(/^lib/, '')) + '.d');
         if (!existsSync(candidate) || statSync(product).size !== bytes.length || !readFileSync(product).equals(bytes)) continue;
-        if (names(readFileSync(candidate, 'utf8'), candidate)) matches.push(candidate);
+        if (names(readFileSync(candidate, 'utf8'), candidate)) matches.push({ candidate, linked: sameFile(product, file) });
       }
     }
-    if (matches.length === 1) return matches[0];
-    if (matches.length > 1) throw new Error(`ambiguous rustc unit dep-info for ${message.target.name}`);
+    const found = resolveMatch(matches, message.target.name);
+    if (found) return found;
   }
   const searched = metadata ? `; searched target directory ${metadata.target_directory}${buildDir !== targetDir ? ` and build directory ${metadata.build_directory}` : ''}` : '';
   const fix = builtAt ? `${metadata.build_directory} was built at ${builtAt}: delete it and build again` : 'rebuild the stale Cargo unit or use a private target directory';
@@ -672,17 +694,23 @@ export function fresh(product, dep, also = []) {
       if (dir && !roots.has(dir)) roots.set(dir, /^name\s*=\s*"([^"]+)"/m.exec(readFileSync(resolve(dir, 'Cargo.toml'), 'utf8'))?.[1]);
     }
     const built = statSync(product).mtimeMs;
+    // A build that backdates `product` to its start still lets build scripts write
+    // `out/` before Cargo writes `dep`, while catching later edits to `out/` and
+    // any source or `rerun-if-changed` edit made during the build.
+    const finished = Math.max(built, statSync(dep).mtimeMs);
     // A directory is watched whole, as Cargo scans one.
-    const newer = f => { const st = statSync(f); return st.mtimeMs > built || (st.isDirectory() && readdirSync(f).some(n => newer(resolve(f, n)))); };
+    const newerThan = (f, limit) => { const st = statSync(f); return st.mtimeMs > limit || (st.isDirectory() && readdirSync(f).some(n => newerThan(resolve(f, n), limit))); };
+    const newer = f => newerThan(f, built);
     if ([...also, ...manifestInputs(roots.keys())].some(newer)) return false;
     const byName = new Map([...roots].map(([dir, name]) => [name, dir]));
+    const rerun = [];
     for (const o of new Set(files.map(buildScriptDir).filter(Boolean))) {
       const name = /[\\/]build[\\/](.+?)(?:-[0-9a-f]+|[\\/][0-9a-f]+)$/.exec(o)?.[1];
       const dir = byName.get(name);
       const output = buildScriptOutput(o);
-      for (const m of readFileSync(output, 'utf8').matchAll(/^cargo:(?::)?rerun-if-changed=(.+)$/gm)) files.push(resolve(dir, m[1]));
+      for (const m of readFileSync(output, 'utf8').matchAll(/^cargo:(?::)?rerun-if-changed=(.+)$/gm)) rerun.push(resolve(dir, m[1]));
     }
-    return !files.some(newer);
+    return !rerun.some(newer) && !files.some(f => newerThan(f, buildScriptDir(f) ? finished : built));
   } catch { return false; }
 }
 

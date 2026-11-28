@@ -1,7 +1,7 @@
 // LLP 1094.000 D6, D8: the browser's drag of a draggable node, through the page's own `drag-out.js`, pan and swipe
 // glue and drag rules, in Chromium, Firefox and WebKit under Playwright's mouse: what the drag carries, what keeps it
 // from the node, a field's down turning it off until the next down, a swipe beside it, and another script's draggable,
-// in any case, left its own drag.
+// in any case, left its own drag; and the node's drag start and end around the page's own drop (D16).
 import { afterAll, beforeAll, expect } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { browserMissing } from '../../../scripts/agent-playwright.mjs';
@@ -37,6 +37,7 @@ ${rules}
     <div id="height2" style="height:50px;touch-action:none;background:#aaa"></div>
     <div id="clip2" style="height:60px;overflow:hidden"><div id="target2" style="width:100%;height:100%;box-sizing:border-box"><div id="handle2" style="height:100%;touch-action:none;background:#999"></div></div></div>
   </button>
+  <div id="zone" style="left:340px;top:400px;width:200px;height:100px"></div>
 </main>
 <script type="module">
   import { listen, writeDraggable } from './drag-out.js';
@@ -80,6 +81,18 @@ ${rules}
   }
   for (const el of document.querySelectorAll('[data-foreign]')) el.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/plain', el.id + "'s own"));
   if (!new URL(location.href).searchParams.has('waiting')) listen(document);
+  // The card hears its drag's start and end, as a target that binds them marks it; a zone takes the drop, and a later
+  // window listener may cancel the start.
+  window.sourceLog = []; window.cancelNext = false;
+  const card = byId('card');
+  card.exactDragEvents = true;
+  card.addEventListener('exactdragstart', () => sourceLog.push('start'));
+  card.addEventListener('exactdragend', (e) => sourceLog.push('end ' + e.detail.effect));
+  const zone = byId('zone');
+  zone.addEventListener('dragenter', (e) => { e.preventDefault(); sourceLog.push('enter'); });
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  zone.addEventListener('drop', (e) => { e.preventDefault(); sourceLog.push('drop'); });
+  window.addEventListener('dragstart', (e) => { if (cancelNext) e.preventDefault(); });
   window.addEventListener('dragstart', (e) => drags.push({ target: e.target.id, prevented: e.defaultPrevented,
     kinds: [...e.dataTransfer.items].map((i) => i.kind), text: e.dataTransfer.getData('text/plain'),
     uris: e.dataTransfer.getData('text/uri-list') }));
@@ -87,9 +100,18 @@ ${rules}
 </script>`;
 
 const waitingDragFixture = `
-  import { downForDrag, elementOf, lightDomDragPath, observeDragInput, pressedAt } from './drag-input.js';
+  import { downForDrag, dragPathFrom, elementOf, observeDragInput, pressedAt } from './drag-input.js';
+  import { loadOnce } from './load-once.js';
   const host = {}, views = new Map(), retiredViews = new WeakSet();
-  const loadAfterPaint = () => new Promise(() => {});
+  // The listener loads only when a test says, from a module graph of its own, as its bundle is
+  let loaded;
+  const loadAfterPaint = () => new Promise((resolve) => { loaded = resolve; });
+  export async function loadListener() {
+    const module = await import('./bundle/drag-out.js');
+    globalThis.exact = { ...globalThis.exact, writeDraggable: module.writeDraggable };
+    loaded(module.listen);
+    await host.dragOutModule;
+  }
   ${glueDeclarations(wasmSource, ['liveView', 'dragOutWait', 'waitingInput', 'waitingView',
     'loadDragOut', 'ancestorElements', 'waits', 'waitingDrag', 'writeDraggable'])}
   export function waitForDrag(card) {
@@ -106,7 +128,9 @@ beforeAll(() => {
     if (path === '/') return new Response(fixture, { headers: { 'content-type': 'text/html' } });
     if (path === '/waiting-drag.js') return new Response(waitingDragFixture, { headers: { 'content-type': 'text/javascript' } });
     if (path.startsWith('/assets/') || path === '/favicon.ico') return new Response('', { status: 404 });
-    return new Response(Bun.file(new URL('..' + path, import.meta.url)));
+    // `/bundle/` serves the host's modules again, as a second module graph, as the wasm target's two bundles each have
+    // their own copy of `drag-input.js`
+    return new Response(Bun.file(new URL('..' + path.replace(/^\/bundle\//, '/'), import.meta.url)));
   } });
 });
 afterAll(() => server?.stop(true));
@@ -205,6 +229,39 @@ for (const [engine, missing] of [['chromium', chromium().unavailable], ['firefox
     }
   }, 60_000);
 
+  // LLP 1094.000 D16: the node hears its drag's start before the page's own `dragenter` of it and its end after the
+  // drop, with the browser's `dropEffect`; a drag begun at a picture inside it is its own; a start a later listener
+  // cancels tells nothing.
+  need(engine, missing)(`${engine}: a draggable node hears its drag begin and end around the page's own drop`, async () => {
+    const browser = await suiteBrowser(engine);
+    try {
+      const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+      await page.goto(`http://127.0.0.1:${server.port}/`);
+      await page.waitForFunction('window.ready');
+      const run = async (from, to, cancel = false) => {
+        if (engine === 'webkit') {
+          await page.reload();
+          await page.waitForFunction('window.ready');
+        }
+        await page.evaluate((cancel) => { sourceLog.length = 0; cancelNext = cancel; }, cancel);
+        const a = await page.locator(from).boundingBox(), b = to && await page.locator(to).boundingBox();
+        await page.mouse.move(a.x + a.width / 2, a.y + a.height / 2);
+        await page.mouse.down();
+        // With no target, along the top, past the draggable box there, which takes no drop
+        await page.mouse.move(b ? b.x + b.width / 2 : 760, b ? b.y + b.height / 2 : 30, { steps: 20 });
+        await page.mouse.up();
+        await page.waitForTimeout(300);
+        return page.evaluate(() => [...sourceLog]);
+      };
+      expect(await run('#label', '#zone')).toEqual(['start', 'enter', 'drop', 'end copy']);
+      expect(await run('#label', null)).toEqual(['start', 'end none']);
+      expect(await run('#picture', '#zone')).toEqual(['start', 'enter', 'drop', 'end copy']);
+      expect(await run('#label', '#zone', true)).toEqual([]);
+    } finally {
+      await browser.close();
+    }
+  }, 60_000);
+
   // By a mouse the innermost takes the drag (LLP 1094.000 D8): a pan, a height drag or a transform drag inside a
   // draggable node, whose drag the browser dispatches at that node, and a pan over a plain image.
   // Firefox is not measured here (QUEUE.md).
@@ -294,13 +351,32 @@ need('chromium', chromium().unavailable).each([
   ['a script-owned wrapper moves into a frame’s shadow root', { move: 'wrapper', to: 'shadow' }],
   ['a script-owned wrapper moves into a frame’s shadow root while the wasm listener loads',
     { move: 'wrapper', to: 'shadow', waiting: true }],
-])('chromium: capture checks the image drag owner after %s', async (_, { move, to, waiting }) => {
+  ['the card’s fallback wrapper moves out of its slot within the card’s shadow root', { move: 'fallback', to: 'root' }],
+  ['the card’s fallback wrapper moves out of its slot within the card’s shadow root while the wasm listener loads',
+    { move: 'fallback', to: 'root', waiting: true }],
+  ['the card’s fallback wrapper moves into the same document’s body while the wasm listener loads',
+    { move: 'fallback', to: 'body', waiting: true }],
+  ['the card’s fallback wrapper moves into a frame', { move: 'fallback' }],
+  ['the card’s fallback wrapper moves into a frame while the wasm listener loads', { move: 'fallback', waiting: true }],
+  ['the image of a card with a fallback wrapper moves into a frame', { move: 'image', fallback: true }],
+  ['the image of a card with a fallback wrapper moves into a frame while the wasm listener loads',
+    { move: 'image', fallback: true, waiting: true }],
+  ['the card’s fallback wrapper moves out of its slot as its image moves into a frame', { move: 'both' }],
+  ['the card’s fallback wrapper moves out of its slot as its image moves into a frame while the wasm listener loads',
+    { move: 'both', waiting: true }],
+  ['the card’s fallback wrapper moved out of its slot at the press', { move: 'fallback', to: 'root', when: 'pointerdown' }],
+  ['the card’s fallback wrapper moved out of its slot at the press while the wasm listener loads',
+    { move: 'fallback', to: 'root', when: 'pointerdown', waiting: true }],
+  ['a script-owned wrapper moves into the card’s shadow root', { move: 'wrapper', to: 'root' }],
+  ['a script-owned wrapper moves into the card’s shadow root while the wasm listener loads',
+    { move: 'wrapper', to: 'root', waiting: true }],
+])('chromium: capture checks the image drag owner after %s', async (_, { move, to, waiting, fallback, when }) => {
   const browser = await suiteBrowser('chromium');
   try {
     const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
     await page.goto(`http://127.0.0.1:${server.port}/${waiting ? '?waiting' : ''}`);
     await page.waitForFunction('window.ready');
-    const draggable = await page.evaluate(async ({ move, to, waiting }) => {
+    const draggable = await page.evaluate(async ({ move, to, waiting, fallback, when }) => {
       const card = document.getElementById('card2'), image = document.getElementById('picture');
       card.replaceChildren(image);
       if (waiting) {
@@ -308,7 +384,15 @@ need('chromium', chromium().unavailable).each([
         waitForDrag(card);
       }
       let wrapper = null;
-      if (move !== 'image') {
+      if (fallback || move === 'fallback' || move === 'both') {
+        // `<slot name="unused"><div draggable="true"><slot></slot></div></slot>`, the image assigned to the inner slot
+        const unused = Object.assign(document.createElement('slot'), { name: 'unused' });
+        wrapper = document.createElement('div');
+        wrapper.draggable = true;
+        wrapper.append(document.createElement('slot'));
+        unused.append(wrapper);
+        card.attachShadow({ mode: 'open' }).append(unused);
+      } else if (move !== 'image') {
         wrapper = document.createElement('div');
         wrapper.draggable = true;
         if (move === 'card') {
@@ -317,23 +401,28 @@ need('chromium', chromium().unavailable).each([
         } else {
           wrapper.append(image);
           card.append(wrapper);
+          if (to === 'root') card.attachShadow({ mode: 'open' }).append(document.createElement('slot'));
         }
       }
       let destination = document.body;
-      if (to !== 'body') {
+      if (to === 'root') destination = card.shadowRoot;
+      else if (to !== 'body') {
         const frame = document.createElement('iframe');
         frame.hidden = true;
         document.body.append(frame);
         destination = frame.contentDocument.body;
         if (to === 'shadow') destination = destination.attachShadow({ mode: 'open' });
       }
-      const moved = { card, image, wrapper }[move];
-      window.addEventListener('dragstart', () => destination.append(moved), { capture: true, once: true });
+      const moved = { card, image, wrapper, fallback: wrapper, both: image }[move];
+      window.addEventListener(when ?? 'dragstart', () => {
+        if (move === 'both') card.shadowRoot.append(wrapper);
+        destination.append(moved);
+      }, { capture: true, once: true });
       image.addEventListener('dragstart', (event) => {
         window.imageDrag = {
           imageTarget: event.target === image,
           wrapperOnPath: !wrapper || event.composedPath().includes(wrapper),
-          moved: moved.parentNode === destination,
+          moved: moved.parentNode === destination && (move !== 'both' || wrapper.parentNode === card.shadowRoot),
           connected: image.isConnected,
           cardInDocument: card.ownerDocument === document,
           cancelled: event.defaultPrevented,
@@ -342,13 +431,142 @@ need('chromium', chromium().unavailable).each([
         event.stopPropagation();
       });
       return card.draggable;
-    }, { move, to, waiting });
+    }, { move, to, waiting, fallback, when });
     expect(draggable).toBe(!waiting);
     await drag(page, '#picture', [0, 20]);
+    // A card whose image stays in it drags as itself once the listener listens
+    const own = move === 'fallback' && !waiting;
     expect(await page.evaluate(() => window.imageDrag)).toEqual({
       imageTarget: true, wrapperOnPath: true, moved: true, connected: true,
-      cardInDocument: move !== 'card', cancelled: move !== 'wrapper', text: '',
+      cardInDocument: move !== 'card', cancelled: move !== 'wrapper' && !own, text: own ? 'card' : '',
     });
+  } finally {
+    await browser.close();
+  }
+});
+
+// The recorder a waiting card's observer added is the loaded listener's too, though the two bundles each have their own
+// copy of its module: a listener the page added while the card waited, which moves the fallback wrapper out of its slot
+// and the image into a frame, still runs after it once the listener has loaded.
+need('chromium', chromium().unavailable)('chromium: the drag path recorder outlasts the wasm handoff', async () => {
+  const browser = await suiteBrowser('chromium');
+  try {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    await page.goto(`http://127.0.0.1:${server.port}/?waiting`);
+    await page.waitForFunction('window.ready');
+    const draggable = await page.evaluate(async () => {
+      const card = document.getElementById('card2'), image = document.getElementById('picture');
+      card.replaceChildren(image);
+      const { waitForDrag, loadListener } = await import('./waiting-drag.js');
+      waitForDrag(card);
+      const unused = Object.assign(document.createElement('slot'), { name: 'unused' });
+      const wrapper = Object.assign(document.createElement('div'), { draggable: true });
+      wrapper.append(document.createElement('slot'));
+      unused.append(wrapper);
+      card.attachShadow({ mode: 'open' }).append(unused);
+      const frame = Object.assign(document.createElement('iframe'), { hidden: true });
+      document.body.append(frame);
+      const waiting = card.draggable;
+      window.addEventListener('dragstart', () => {
+        card.shadowRoot.append(wrapper);
+        frame.contentDocument.body.append(image);
+      }, { capture: true, once: true });
+      await loadListener();
+      image.addEventListener('dragstart', (event) => {
+        window.imageDrag = {
+          wrapperOnPath: event.composedPath().includes(wrapper),
+          moved: wrapper.parentNode === card.shadowRoot && image.ownerDocument !== document,
+          cancelled: event.defaultPrevented,
+        };
+        event.stopPropagation();
+      });
+      return [waiting, card.draggable];
+    });
+    expect(draggable).toEqual([false, true]);
+    await drag(page, '#picture', [0, 20]);
+    expect(await page.evaluate(() => window.imageDrag)).toEqual({ wrapperOnPath: true, moved: true, cancelled: true });
+  } finally {
+    await browser.close();
+  }
+});
+
+// The tree a waiting card's image drag is judged by is the one its dispatch began in, whatever a listener changed before:
+// a press's tree changed before the drag began gives way to the drag's, which a `dragstart` listener then changes.
+need('chromium', chromium().unavailable).each([
+  ['a slot above the card is swapped at the press, and its fallback wrapper moves out of its slot as the drag begins',
+    'reslot'],
+  ['the image changes owner after the press through the same nodes, by way of a slot', 'owner'],
+  ['its image is slotted into a closed shadow root', 'closed'],
+  ['its image is slotted through a slot forwarded into a nested root', 'nested'],
+])('chromium: a waiting card cancels its image drag after %s', async (_, change) => {
+  const browser = await suiteBrowser('chromium');
+  try {
+    const page = await browser.newPage({ viewport: { width: 800, height: 600 } });
+    await page.goto(`http://127.0.0.1:${server.port}/?waiting`);
+    await page.waitForFunction('window.ready');
+    await page.evaluate(async (change) => {
+      const card = document.getElementById('card2'), image = document.getElementById('picture');
+      card.replaceChildren(image);
+      const { waitForDrag } = await import('./waiting-drag.js');
+      waitForDrag(card);
+      const slot = (name) => Object.assign(document.createElement('slot'), name ? { name } : {});
+      const wrapper = Object.assign(document.createElement('div'), { draggable: true });
+      const changed = window.changed = [];
+      if (change === 'reslot') {
+        // The card in an outer host's slot, its image assigned to a slot in the card's fallback wrapper
+        const outer = document.createElement('div');
+        card.before(outer);
+        outer.append(card);
+        outer.attachShadow({ mode: 'open' }).append(slot('a'), slot('b'));
+        card.slot = 'a';
+        const unused = slot('unused');
+        wrapper.append(slot());
+        unused.append(wrapper);
+        card.attachShadow({ mode: 'open' }).append(unused);
+        window.addEventListener('pointerdown', () => {
+          card.slot = 'b';
+          changed.push(card.assignedSlot?.name);
+        }, { capture: true, once: true });
+        window.addEventListener('dragstart', () => {
+          card.shadowRoot.append(wrapper);
+          changed.push(wrapper.parentNode === card.shadowRoot);
+        }, { capture: true, once: true });
+      } else if (change === 'closed') {
+        card.attachShadow({ mode: 'closed' }).append(slot());
+      } else if (change === 'nested') {
+        // The card's slot is the light DOM of an element in its shadow root, assigned to that element's own slot
+        const inner = document.createElement('div');
+        inner.attachShadow({ mode: 'open' }).append(slot());
+        inner.append(slot());
+        card.attachShadow({ mode: 'open' }).append(inner);
+        changed.push(image.assignedSlot.assignedSlot?.getRootNode() === inner.shadowRoot);
+      } else {
+        // A script's wrapper in the card's light DOM, assigned to the card's outer slot, holding the image in a slot
+        // element of its own; once the press is heard the wrapper becomes the outer slot's fallback and the image the
+        // card's child, assigned to that same slot element
+        const outerSlot = slot('outer'), innerSlot = slot();
+        card.attachShadow({ mode: 'open' }).append(outerSlot);
+        innerSlot.append(image);
+        wrapper.append(innerSlot);
+        wrapper.slot = 'outer';
+        card.append(wrapper);
+        window.addEventListener('pointerdown', () => {
+          wrapper.removeAttribute('slot');
+          outerSlot.append(wrapper);
+          card.append(image);
+          changed.push(image.assignedSlot === innerSlot && wrapper.parentNode === outerSlot);
+        }, { once: true });
+      }
+      image.addEventListener('dragstart', (event) => {
+        window.imageDrag = { wrapperOnPath: event.composedPath().includes(wrapper), cancelled: event.defaultPrevented };
+        event.stopPropagation();
+      });
+    }, change);
+    await drag(page, '#picture', [0, 20]);
+    expect(await page.evaluate(() => window.changed)).toEqual(
+      { reslot: ['b', true], owner: [true], closed: [], nested: [true] }[change]);
+    expect(await page.evaluate(() => window.imageDrag))
+      .toEqual({ wrapperOnPath: change === 'reslot' || change === 'owner', cancelled: true });
   } finally {
     await browser.close();
   }

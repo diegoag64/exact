@@ -308,10 +308,8 @@ test('nested slot arms share mount code and keep each row and arm instance', asy
   for (const sites of [false, true]) {
     const traps = [];
     await pageFor(source, async (page, js) => {
-      if (!sites) {
-        expect(js.split('Only visible leaf').length - 1).toBeLessThanOrEqual(2);
-        for (let i = 0; i < layers; i++) expect(js.split(`"layer-${i}"`).length - 1).toBeLessThanOrEqual(2);
-      }
+      expect(js.split('Only visible leaf').length - 1).toBeLessThanOrEqual(2);
+      for (let i = 0; i < layers; i++) expect(js.split(`"layer-${i}"`).length - 1).toBeLessThanOrEqual(2);
       const leaf = page.getByTestId('leaf-9');
       expect(await leaf.getAttribute('aria-label')).toBe('row\0s0\0');
       const initial = await leaf.elementHandle();
@@ -385,7 +383,7 @@ component Suffix
   const reports = [];
   for (const sites of [false, true]) {
     await pageFor(source, async (page, js) => {
-      if (!sites) expect(js.split('"Row meter"')).toHaveLength(2);
+      expect(js.split('"Row meter"')).toHaveLength(2);
       expect(await page.getByLabel('Row meter').allTextContents()).toEqual([
         '(3)A[4]!', '(4)B1[5]!', '(5)C[6]!', '(6)A[7]!', '(7)B4[8]!', '(8)[9]!',
       ]);
@@ -544,7 +542,7 @@ component Card
   const traps = [];
   for (const sites of [false, true]) {
     await pageFor(source, async (page, js) => {
-      if (!sites) expect(js.split('"Shared numeric card"').length - 1).toBe(1);
+      expect(js.split('"Shared numeric card"').length - 1).toBe(1);
       const cards = page.getByLabel('Shared numeric card');
       const totals = ns => ns.map(n => `total ${n}again ${n}`);
       expect(await cards.allTextContents()).toEqual(totals([2, 6, 7, 5, 2]));
@@ -583,7 +581,7 @@ test('shared action code writes its own slot and reports the name of the failing
 `;
   for (const sites of [false, true]) {
     await pageFor(source, async (page, js) => {
-      expect(js.split('" results "').length - 1).toBe(sites ? 2 : 1);
+      expect(js.split('" results "').length - 1).toBe(1);
       await page.getByTestId('second').click();
       expect(await page.getByTestId('right').textContent()).toBe('Second results 2');
       expect(await page.getByTestId('left').textContent()).toBe('');
@@ -674,7 +672,7 @@ component Meter
   const reports = [];
   for (const sites of [false, true]) {
     await pageFor(source, async (page, js) => {
-      if (!sites) expect(js.split('"Slot meter"')).toHaveLength(2);
+      expect(js.split('"Slot meter"')).toHaveLength(2);
       expect(await page.getByLabel('Slot meter').allTextContents()).toEqual([
         'Before 2AAfter 2', 'Before 2BAgainAfter 2', 'Before 2CAfter 2',
       ]);
@@ -686,4 +684,249 @@ component Meter
     }, sites ? ['--sites'] : []);
   }
   expect(reports[0]).toEqual(reports[1]);
+}, 60000);
+
+test('components with state, branches and internal loops share one mount across nesting depths', async () => {
+  const source = `shape Item
+  id: string
+  name: string
+
+component App
+  state tab: string = "a"
+  state show: bool = true
+  state items: Item[] = [Item(id="1", name="One"), Item(id="2", name="Two")]
+  state opts: Item[] = [Item(id="x", name="Alpha"), Item(id="y", name="Beta")]
+  view
+    column
+      if show
+        column
+          for item in items key=item.id
+            Dropdown(id=\`d2-\${item.id}\`, title=item.name, options=opts)
+      if tab == "a"
+        column
+          if show
+            column
+              for item in items key=item.id
+                Dropdown(id=\`d3-\${item.id}\`, title=item.name, options=opts)
+
+component Dropdown
+  props
+    id: string
+    title: string
+    options: Item[]
+  state open: bool = false
+  state picked: string = "none"
+  action toggle
+    open = !open
+  action pick(name: string)
+    picked = name
+    open = false
+  view
+    column aria-label="Dropdown box"
+      button press=toggle testId=\`btn-\${id}\`
+        text \`\${title}:\${picked}\`
+      if open
+        column aria-label="Dropdown choice"
+          for opt in options key=opt.id
+            button press=pick(opt.name) testId=\`opt-\${id}-\${opt.id}\`
+              text opt.name
+`;
+  await pageFor(source, async (page, js) => {
+    expect(js.split('"Dropdown box"')).toHaveLength(2);
+    expect(js.split('"Dropdown choice"')).toHaveLength(2);
+    expect(await page.getByTestId('btn-d2-1').textContent()).toBe('One:none');
+    expect(await page.getByTestId('btn-d3-2').textContent()).toBe('Two:none');
+    await page.getByTestId('btn-d2-1').click();
+    await page.getByTestId('opt-d2-1-x').click();
+    expect(await page.getByTestId('btn-d2-1').textContent()).toBe('One:Alpha');
+    expect(await page.getByTestId('btn-d2-2').textContent()).toBe('Two:none');
+    expect(await page.getByTestId('btn-d3-1').textContent()).toBe('One:none');
+    await page.getByTestId('btn-d3-2').click();
+    await page.getByTestId('opt-d3-2-y').click();
+    expect(await page.getByTestId('btn-d3-2').textContent()).toBe('Two:Beta');
+    expect(await page.getByTestId('btn-d2-1').textContent()).toBe('One:Alpha');
+  });
+}, 60000);
+
+test('shared mounts cross match payload arms and inlined nested loops keep outer items', async () => {
+  const source = `shape Group
+  id: string
+  name: string
+  cells: string[]
+
+component App
+  state first = some("Ready")
+  state second = some("Next")
+  state groups: Group[] = [Group(id="a", name="A", cells=["1", "2"]), Group(id="b", name="B", cells=["3"])]
+  action swap
+    first = some("Done")
+    second = some("After")
+  view
+    column
+      button "Swap" press=swap testId="swap"
+      match first
+        case some(value)
+          Badge(label=value)
+        case none
+          text "Empty"
+      match second
+        case some(value)
+          Badge(label=value)
+        case none
+          text "Empty"
+      for group in groups key=group.id
+        column
+          for cell in group.cells key=cell
+            text \`\${group.name}:\${cell}\` testId=\`cell-\${group.id}-\${cell}\`
+
+component Badge
+  props
+    label: string
+  view
+    box aria-label="Shared badge"
+      text \`[\${label}]\`
+`;
+  await pageFor(source, async (page, js) => {
+    expect(js.split('"Shared badge"')).toHaveLength(2);
+    expect(await page.getByLabel('Shared badge').allTextContents()).toEqual(['[Ready]', '[Next]']);
+    expect(await page.getByTestId('cell-a-1').textContent()).toBe('A:1');
+    expect(await page.getByTestId('cell-a-2').textContent()).toBe('A:2');
+    expect(await page.getByTestId('cell-b-3').textContent()).toBe('B:3');
+    await page.getByTestId('swap').click();
+    expect(await page.getByLabel('Shared badge').allTextContents()).toEqual(['[Done]', '[After]']);
+  });
+}, 60000);
+
+test('virtualized rows keep outer item getters and nested owned state in DOM and logical text', async () => {
+  const source = `component App
+  state groups = range(80)
+  view
+    list virtualized=true height=160 estimated-item-height=40 testId="vlist"
+      for group in groups key=group
+        Row(group=group)
+
+component Row
+  props
+    group: number
+  state shown = group >= 50
+  derive tag = \`R\${group}\`
+  view
+    column height=40 testId=\`row-\${group}\`
+      for cell in ["X", "Y"] key=cell
+        text \`\${group}:\${cell}:\${tag}\` testId=\`cell-\${group}-\${cell}\`
+      if shown
+        Detail(group=group, tag=tag)
+
+component Detail
+  props
+    group: number
+    tag: string
+  state count = 1
+  derive label = \`\${tag}-D\${group}-\${count}\`
+  view
+    text label testId=\`detail-\${group}\`
+`;
+  await pageFor(source, async (page, js) => {
+    expect(await page.getByTestId('cell-0-X').textContent()).toBe('0:X:R0');
+    expect(await page.getByTestId('cell-0-Y').textContent()).toBe('0:Y:R0');
+    expect(await page.getByTestId('cell-1-X').textContent()).toBe('1:X:R1');
+    expect(js).not.toMatch(/const (\$a\d+)=\{\.\.\.\1\}/);
+    // Project an unmounted row above 50 through the compiled logical text callback.
+    const unmounted = await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="vlist"]');
+      const flatten = nodes => nodes.flatMap(([k, props, kids]) => [
+        ...(k === 1 && props.text != null ? [props.text] : []),
+        ...flatten(kids),
+      ]);
+      return flatten(el.$list.o.text(() => 60, () => 60));
+    });
+    expect(unmounted).toEqual(['60:X:R60', '60:Y:R60', 'R60-D60-1']);
+  });
+}, 60000);
+
+test('development builds (--sites and --dev-reload) share mounts and keep per-site data-site, perf counts, and each regions', async () => {
+  const source = `shape Opt
+  id: string
+  label: string
+
+component App
+  state leftMode = "a"
+  state rightMode = "b"
+  state opts: Opt[] = [Opt(id="x", label="Alpha"), Opt(id="y", label="Beta")]
+  action flipRight
+    rightMode = rightMode == "a" ? "b" : "a"
+  view
+    column
+      button "Flip right" press=flipRight testId="flip-right"
+      Card(id="left", mode=leftMode, opts=opts)
+        text "One"
+      Card(id="right", mode=rightMode, opts=opts)
+        text "Two"
+        text "Extra"
+
+component Card
+  props
+    id: string
+    mode: string
+    opts: Opt[]
+  slot
+  state count = 0
+  action bump
+    count = count + 1
+  view
+    column testId=\`card-\${id}\` aria-label="Dev shared card"
+      text \`\${id}:\${count}\` testId=\`val-\${id}\` color=(mode == "a" ? "#111111" : "#224488")
+      children
+      button "Bump" press=bump testId=\`bump-\${id}\`
+      for opt in opts key=opt.id
+        text \`\${id}-\${opt.label}\` testId=\`opt-\${id}-\${opt.id}\`
+`;
+  await pageFor(source, async (page, js) => {
+    expect(js.split('"Dev shared card"')).toHaveLength(2);
+    expect(js.split('"Bump"')).toHaveLength(2);
+    expect(js.split('Pc(')).toHaveLength(2);
+    expect(js.split('each(')).toHaveLength(2);
+
+    const cardSites = async id => ({
+      card: Number(await page.getByTestId(`card-${id}`).getAttribute('data-site')),
+      val: Number(await page.getByTestId(`val-${id}`).getAttribute('data-site')),
+      bump: Number(await page.getByTestId(`bump-${id}`).getAttribute('data-site')),
+      optX: Number(await page.getByTestId(`opt-${id}-x`).getAttribute('data-site')),
+      optY: Number(await page.getByTestId(`opt-${id}-y`).getAttribute('data-site')),
+      carry: await page.getByTestId(`card-${id}`).getAttribute('data-carry-type'),
+    });
+    const left = await cardSites('left');
+    const right = await cardSites('right');
+
+    // Distinct plan sites across instances, including after the variable-length slot.
+    expect(left.carry).toBe('View');
+    expect(right.carry).toBe('View');
+    expect(new Set([left.card, left.val, left.bump, left.optX, right.card, right.val, right.bump, right.optX]).size).toBe(8);
+    expect(left.optX).toBe(left.optY);
+    expect(right.optX).toBe(right.optY);
+    expect(right.bump - right.card).toBe(left.bump - left.card + 1);
+
+    // Install perf.js and verify evaluations attribute to the right site for both pf bindings and lowered Pc styles.
+    await page.evaluate(async () => {
+      const { install } = await import('/perf.js');
+      install(document.getElementById('exact-root'));
+    });
+    await page.getByTestId('bump-left').click();
+    await page.getByTestId('flip-right').click();
+    expect(await page.getByTestId('val-left').textContent()).toBe('left:1');
+    expect(await page.getByTestId('val-right').textContent()).toBe('right:0');
+    expect(await page.getByTestId('val-right').evaluate(el => getComputedStyle(el).color)).toBe('rgb(17, 17, 17)');
+
+    const report = await page.evaluate(async () => {
+      const { reply } = await import('/perf.js');
+      return reply(document.getElementById('exact-root'), {});
+    });
+    const bySite = new Map(report.sites.map(s => [s.site, s]));
+    expect(bySite.get(left.val).evaluated).toBeGreaterThanOrEqual(1);
+    expect(bySite.get(right.val).evaluated).toBeGreaterThanOrEqual(1);
+    expect(bySite.get(left.card).live).toBe(1);
+    expect(bySite.get(right.card).live).toBe(1);
+    expect(bySite.get(left.optX).live).toBe(2);
+    expect(bySite.get(right.optX).live).toBe(2);
+  }, ['--sites', '--dev-reload']);
 }, 60000);

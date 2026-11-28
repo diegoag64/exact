@@ -211,6 +211,16 @@ extension Presenter {
 
 extension NodeView {
     package override func mouseDown(with event: NSEvent) {
+        if let chain = holdPresenter?.mouseChain {
+            // A drag-only contact whose up never came ends before a new down goes its way
+            chain.endDragOnly()
+            // A first click AppKit gave this view for a drag reaches nothing else, through its up (LLP 1094.000 D5);
+            // one that no longer may drag arms nothing, unless the view now takes the click itself
+            if chain.takeFirstMouseDrag(event, at: self), !(Self.countsFirstMouse(event) || clicksThrough) {
+                chain.downDragOnly(self, event: event, arms: firstMouseDragsHere(event))
+                return
+            }
+        }
         let releases = TitleBarAreaMac.takesRelease(of: event, at: self)
         defer { if releases { TitleBarAreaMac.release(to: self) } }
         HeldState.input(at: self) // a press on a held node lets its hold go (HeldState.swift; the window's monitor, ExactViewMac)
@@ -276,6 +286,7 @@ extension NodeView {
         return false
     }
     package override func mouseDragged(with event: NSEvent) {
+        if let chain = holdPresenter?.mouseChain, chain.dragOnly != nil { _ = chain.drag(event); return }
         if contextClicked { return rightMouseDragged(with: event) }
         pointerDragged(event)
         let chain = holdPresenter?.mouseChain
@@ -299,6 +310,7 @@ extension NodeView {
         if canvasInput?.pointer(event, phase: "up") != true { super.rightMouseUp(with: event) }
     }
     package override func mouseUp(with event: NSEvent) {
+        if let chain = holdPresenter?.mouseChain, chain.dragOnly != nil { _ = chain.up(event); return }
         let chain = holdPresenter?.mouseChain, contact = chain?.bubbledPress
         defer { chain?.completed(contact, at: self) }
         if contextClicked { contextClicked = false; return rightMouseUp(with: event) }
@@ -556,10 +568,13 @@ extension NodeView {
     }
 
     /// A node that hears `drop`, `dragenter` or `dragleave` is a destination
-    /// for files, text and links dragged over it (FileDragMac.swift); one
-    /// that no longer does gives them back to whatever is under it.
+    /// for files, text and links dragged over it (FileDragMac.swift), unless
+    /// a scroller's clip view that is a destination holds it, which is then
+    /// the drag's one destination there (LLP 1094.000 D15); one that no
+    /// longer does gives them back to whatever is under it.
     func syncDropTypes() {
-        if !handlers.isDisjoint(with: FileDrag.events) { registerForDraggedTypes(FileDrag.types) } else { unregisterDraggedTypes() }
+        let clipped = (enclosingScrollView?.contentView as? DropClipView)?.isDestination == true
+        if !handlers.isDisjoint(with: FileDrag.events), !clipped { registerForDraggedTypes(FileDrag.types) } else { unregisterDraggedTypes() }
     }
 
     package override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { held ? [] : FileDrag.moved(self, sender) ?? [] }
@@ -573,8 +588,9 @@ extension NodeView {
     static func dropTarget(_ view: NSView) -> NodeView? {
         var next: NSView? = view
         while let view = next {
-            if let node = view as? NodeView, node.handlers.contains("drop"), !node.formDisabled, !node.inert { return node }
-            next = view.superview
+            let node = view as? NodeView
+            if let node, node.handlers.contains("drop"), !node.formDisabled, !node.inert { return node }
+            next = FileDrag.parent(of: view, node: node)
         }
         return nil
     }
@@ -607,7 +623,7 @@ extension NodeView {
     }
 
     /// A `DragEvent`'s point line: from the content box, and the modifiers held.
-    func dragLine(_ windowPoint: NSPoint) -> String {
+    package func dragLine(_ windowPoint: NSPoint) -> String {
         let point = local(windowPoint), box = contentBox()
         return "\(Double(point.x - box.minX)),\(Double(point.y - box.minY)),\(KeyCodes.held(NSEvent.modifierFlags))"
     }

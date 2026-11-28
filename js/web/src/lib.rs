@@ -174,6 +174,9 @@ pub struct Module {
     /// said once in the journal, and what is still to say.
     told_overlay: Vec<String>,
     overlay_notes: Vec<String>,
+    /// Module-level ambient clock / Math.random() taint (LLP 1195.000 D2.4).
+    ambient_clock: bool,
+    ambient_entropy: bool,
 }
 
 impl Module {
@@ -194,6 +197,8 @@ impl Module {
             background_out: false,
             told_overlay: Vec::new(),
             overlay_notes: Vec::new(),
+            ambient_clock: false,
+            ambient_entropy: false,
         }
     }
 
@@ -258,6 +263,7 @@ impl Module {
             ("store", store_pairs(&snapshot)),
             ("grants", grants),
             ("clock", store.clock_ms().into()),
+            ("epoch", store.epoch_at_zero().into()),
         ]);
         // Its next turn's request, should this one wait for its own timer.
         let resume = input.clone();
@@ -356,6 +362,16 @@ impl Module {
         // LLP 1069.005 D2: the realm's `crypto` drew entropy, as Hermes marks it.
         if response["entropy"] == true {
             store.observe_entropy();
+        }
+        // LLP 1195.000 D2.4: ambient clock reads and module-level taint.
+        if response["clockRead"] == true {
+            store.observe_clock();
+        }
+        if response["moduleClock"] == true {
+            self.ambient_clock = true;
+        }
+        if response["moduleEntropy"] == true {
+            self.ambient_entropy = true;
         }
         if let Some(reads) = response["reads"].as_array() {
             for name in reads {
@@ -477,6 +493,12 @@ impl Module {
             request.held = r["held"] == true;
             // `exactUploadProgress`: the page sends it with XMLHttpRequest.
             request.upload_progress = r["upload_progress"] == true;
+            // `exactStreamOpen` (LLP 1016.000 D12): the page delivers the 2xx head on open.
+            request.stream_open = match &r["stream_open"] {
+                Json::Null => false,
+                Json::Bool(b) => *b,
+                _ => return Err(unavailable("exactStreamOpen is true or false")),
+            };
             // `exactBodyFrom`: the page reads the file into the body.
             match &r["body_from"] {
                 Json::Null => {}
@@ -494,20 +516,27 @@ impl Module {
                 let n = u32::try_from(n).map_err(|_| unavailable("invalid response ceiling"))?;
                 request = request.independent_http(n);
             }
-            if r["stream"] == true {
+            let is_stream = r["stream"] == true;
+            if is_stream {
                 // The page opens it; its events come back as messages.
                 request = match Answer::stream(request) {
                     Answer::Later(request) => request,
                     Answer::Now(_) => unreachable!("a stream is a request"),
                 };
-                self.streams.insert(key, ());
             } else {
                 // What an app's abort names it by (`take_aborted`).
                 request.fetch = response["ticket"].as_u64();
-                self.waiting.insert(key, false);
             }
-            if let Some(why) = request.long_poll_refusal() {
+            if let Some(why) = request
+                .long_poll_refusal()
+                .or(request.stream_open_refusal())
+            {
                 return Err(unavailable(why));
+            }
+            if is_stream {
+                self.streams.insert(key, ());
+            } else {
+                self.waiting.insert(key, false);
             }
             Answer::Later(request)
         } else if response["tag"] == 0 {
@@ -550,6 +579,26 @@ fn outcome_json(outcome: Outcome) -> Result<Json, DataError> {
                 ("message", message.into()),
             ]),
         )]),
+        Outcome::Message(m) if m.head.is_some() => {
+            let head = m.head.as_deref().unwrap();
+            object([(
+                "message",
+                object([
+                    ("event", m.event.into()),
+                    ("id", m.id.into()),
+                    ("data", "".into()),
+                    ("coalesced", m.coalesced.into()),
+                    ("protocol", m.protocol.to_string().into()),
+                    (
+                        "head",
+                        object([
+                            ("status", head.status.into()),
+                            ("headers", pairs(&head.headers)),
+                        ]),
+                    ),
+                ]),
+            )])
+        }
         Outcome::Message(m) => object([(
             "message",
             object([
@@ -785,6 +834,10 @@ impl DataSource for Module {
         self.placement
     }
 
+    fn ambient_taint(&self, _source: &str) -> (bool, bool) {
+        (self.ambient_clock, self.ambient_entropy)
+    }
+
     /// The turn takes its snapshot now, from the store as committed (LLP
     /// 1027.002 D3, change 1), scoped to this module's own names; the
     /// loader's registry runs the token its way.
@@ -807,6 +860,7 @@ impl DataSource for Module {
             ("store", store_pairs(&snapshot)),
             ("grants", grants),
             ("clock", store.clock_ms().into()),
+            ("epoch", store.epoch_at_zero().into()),
         ]))
         .and_then(|bytes| json::parse(&bytes).map_err(|e| unavailable(e.to_string())))
         {

@@ -58,6 +58,9 @@ pub mod drag_out;
 mod drag_out_mouse_tests;
 #[cfg(test)]
 mod drag_out_tests;
+mod drag_source;
+#[cfg(test)]
+mod drag_source_tests;
 pub mod edit_menu;
 mod events;
 mod feedback;
@@ -129,8 +132,10 @@ mod height_drag_tests;
 mod hosted;
 mod images;
 mod links;
+mod owners;
 pub(crate) mod palette;
 pub mod preferences;
+mod reach;
 pub(crate) mod remote;
 mod requests;
 mod retained_action;
@@ -232,12 +237,10 @@ pub struct Presenter<D: DataSource> {
     pub(crate) host: Host<D>,
     /// The scroller the last wheel moved.
     last_wheel: Option<ViewId>,
-    /// Per snapping scroller, where its wheel would have put it unsnapped and
-    /// where it put it (`snap.rs`).
-    wheel_free: BTreeMap<ViewId, snap::WheelFree>,
-    /// Per scroller and axis (true: y), the snap area it was last found
-    /// resting on and the position (`snap.rs`).
-    snap_rested: BTreeMap<(ViewId, bool), (ViewId, f32)>,
+    /// Per snapping scroller, an unsettled fine-tick wheel gesture (`snap.rs`).
+    wheel_snap: BTreeMap<ViewId, snap::WheelSnap>,
+    /// The snap geometry each scroller last had a chance to settle in.
+    snap_layout: snap::Layouts,
     /// The display's clock while it owns time, given to every host (`clock.rs`)
     live_clock: Option<clock::Wall>,
     /// Pictures reach a display whose presents the host hears (`present.rs`).
@@ -309,6 +312,7 @@ pub struct Presenter<D: DataSource> {
     /// The text field typed into since it took the focus: its `change`
     /// fires on blur or Enter, HTML's commit (LLP 1069.001 D4).
     pub(crate) edited: Option<ViewId>,
+    filtering_field: Option<ViewId>,
     /// Each text field's selection (x2apps codeedit #2), kept for the value
     /// it indexes, focused or not: the next key there edits at it.
     pub(crate) fields: BTreeMap<ViewId, field::FieldMark>,
@@ -612,6 +616,7 @@ impl<D: DataSource> Presenter<D> {
             region,
             Some(text.clone()),
             (painted_boot && !assets.is_selected()).then_some((&mut images, scale)),
+            false,
         )?;
         // @ref LLP 1115.000 D10.3 — a hairline is one device pixel of this.
         let error = error.or(host.set_display_scale(f64::from(scale)));
@@ -641,6 +646,7 @@ impl<D: DataSource> Presenter<D> {
         // Initial selected layout and asset metadata/integrity accepted.
         // Decoded pixels and their natural dimensions arrive together later.
         // Only now may the app's queued requests reach its executor.
+        host.install_presence();
         let start_executor = services.start_executor;
         let executor = host.executor_with(start_executor);
         if let Some(note) = executor.note() {
@@ -650,8 +656,8 @@ impl<D: DataSource> Presenter<D> {
         brush.canvases.drawings = host.canvas_snapshots().clone();
         let mut p = Presenter {
             last_wheel: None,
-            wheel_free: BTreeMap::new(),
-            snap_rested: BTreeMap::new(),
+            wheel_snap: BTreeMap::new(),
+            snap_layout: Default::default(),
             host,
             executor,
             start_executor,
@@ -682,6 +688,7 @@ impl<D: DataSource> Presenter<D> {
             autofocus_from: None,
             disabled_blur: Vec::new(),
             edited: None,
+            filtering_field: None,
             fields: BTreeMap::new(),
             field_history: Default::default(),
             field_drag: None,
@@ -882,11 +889,11 @@ impl<D: DataSource> Presenter<D> {
 
     /// Whether the picture is stale.
     pub fn dirty(&self) -> bool {
-        // A hold no picture has carried owes one, to carry it to a present
-        // (LLP 1003.001 D9).
+        // A hold no picture has carried owes one (LLP 1003.001 D9).
         self.dirty
             || self.picture_dirty
             || !self.surfaces.captures.is_empty()
+            || self.surfaces.has_pending_readback(self.host.kernel())
             || self.host.holds_uncarried()
             || self.host.press_picture_owed()
             || self.host.runner().canvas_owed(&|_| true)
@@ -917,7 +924,7 @@ impl<D: DataSource> Presenter<D> {
 
     /// A display needs another animation or GPU canvas frame.
     pub fn wants_display_frames(&self) -> bool {
-        self.wants_frames() || self.surfaces.has_rendered_canvas()
+        self.wants_frames() || self.surfaces.wants_rendered_frame(self.host.kernel())
     }
 
     /// The viewport changed.
@@ -943,17 +950,18 @@ impl<D: DataSource> Presenter<D> {
     /// stale.
     pub(crate) fn after_commit(&mut self) -> Option<String> {
         self.dirty |= self.brush.paint_epoch != Some(self.host.kernel().epoch());
+        self.sync_accent_seed();
         self.finish_commit()
     }
 
     fn finish_commit(&mut self) -> Option<String> {
         let error = self.service_commit();
+        self.drag_committed();
         self.size_controls();
         // This turn consumes the reports now. Only refinement left over may
         // wake another turn; waking here makes an idle list redraw forever.
         self.schedule_collections();
         let refined = crate::traced(c"exact refine collections", || self.refine_collections());
-        self.resnap_scrollers();
         let geometry = self.refresh_transform_geometry();
         self.sync_surface();
         error.or(refined).or(geometry)
@@ -1116,6 +1124,7 @@ impl<D: DataSource> Presenter<D> {
         }
         // Hidden windows service commits without painting. Invalidate kept rows
         // and maintain measured text here so neither waits for a display frame.
+        self.advance_snap_layout();
         let dirty = self.host.row_dirty.take_changes();
         self.brush.rows_dirty(self.host.kernel(), dirty);
         self.text.borrow_mut().maintain();
@@ -1172,6 +1181,7 @@ impl<D: DataSource> Presenter<D> {
         if renewed.is_empty() {
             return None;
         }
+        self.renew_reach(&renewed);
         for id in &renewed {
             self.ime_forget(*id);
             self.field_history.invalidate(*id);
@@ -1184,6 +1194,7 @@ impl<D: DataSource> Presenter<D> {
                 self.window_focus = None;
             }
             self.scroll_end.forget(*id);
+            self.wheel_snap.remove(id);
             self.dirty |= self.scroll.remove(id).is_some();
         }
         self.renew_scroll_anchors(&renewed);
@@ -1432,36 +1443,6 @@ impl<D: DataSource> Presenter<D> {
         let e = self.host.set_delivery_from_compat(json);
         let after = self.after_commit();
         e.or(after)
-    }
-
-    /// A motion frame.
-    pub fn tick(&mut self, now_ms: f64) {
-        let animating = self.arrange.is_some()
-            || self.group.is_some()
-            || self.focus.is_some()
-            || self.brush.moving()
-            || self.bars_ripple_moving()
-            || self.surface_ripple_moving()
-            || self.stage_moving();
-        let (layout, paint) = self.host.tick_effects(now_ms);
-        self.release_overdue();
-        if layout {
-            self.hatches.stale = true;
-            self.dirty = true;
-            self.clamp_scroll();
-            self.queue_collections();
-            if let Some(error) = self.refresh_transform_geometry() {
-                self.host.log(error);
-            }
-        }
-        self.tick_arrange(self.host.now());
-        self.tick_field_drag(self.host.now());
-        self.step_glides(now_ms);
-        self.step_zooms(now_ms);
-        if let Some(error) = self.deliver_scroll_ends() {
-            self.host.log(error);
-        }
-        self.dirty |= paint || animating;
     }
 
     /// The box of a node, if painted.

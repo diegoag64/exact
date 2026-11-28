@@ -76,7 +76,11 @@ pub fn shadow_box(stage: &XrStage) -> Option<ShadowBox> {
 /// inserted a `Shadows` resource, whose filter, strength and softness stand;
 /// its layer count, size and box are the profile's. `stage`: where the game
 /// places its world in a headset.
-pub(crate) fn clamp(input: &mut crate::FrameInput<'_>, authored_shadows: bool, stage: Option<&XrStage>) {
+pub(crate) fn clamp(
+    input: &mut crate::FrameInput<'_>,
+    authored_shadows: bool,
+    stage: Option<&XrStage>,
+) {
     let _ = authored_shadows;
     if let Some(sun) = &mut input.sun {
         // A measurement's switch (`xr-debug`): the frame without the sun's shadow.

@@ -71,17 +71,19 @@ pub(super) struct Contact {
     kept: Option<bool>,
 }
 impl<D: DataSource> Presenter<D> {
-    pub(super) fn input_live(&self, key: NodeKey) -> bool {
+    pub(super) fn input_allowed(&self, key: NodeKey) -> bool {
         let Some(node) = self.host.kernel().node_by_key(key) else {
             return false;
         };
-        if !self.alert_allows(node.id)
-            || self.host.route_visibility(node.id).1
-            || self.brush.region_blocks_action(node.id)
-        {
+        self.alert_allows(node.id)
+            && !self.host.route_visibility(node.id).1
+            && !self.brush.region_blocks_action(node.id)
+    }
+    pub(super) fn input_live(&self, key: NodeKey) -> bool {
+        if !self.input_allowed(key) {
             return false;
         }
-        let mut at = Some(node.id);
+        let mut at = self.host.kernel().node_by_key(key).map(|n| n.id);
         while let Some(id) = at {
             let Some(node) = self.host.kernel().node(id) else {
                 return false;
@@ -594,8 +596,42 @@ impl<D: DataSource> Presenter<D> {
             self.queue_collections();
             return Ok(false);
         }
-        if hit.is_some_and(|hit| !self.input_live(hit)) {
-            return Ok(false);
+        if let Some(hit_key) = hit.filter(|hit| !self.input_live(*hit)) {
+            // A disabled target cannot press or focus, but a drag starting on it
+            // can still reach a live ancestor `pan` (LLP 1133.008 D8 item 6).
+            if !self.input_allowed(hit_key) {
+                return Ok(false);
+            }
+            let Some(pan) = self.pan_candidate(hit_key) else {
+                return Ok(false);
+            };
+            let mut pan_velocity = VelocityTracker::new();
+            pan_velocity.push(event_ms / 1000., Value::new(x as f64, y as f64));
+            self.contact = Some(Contact {
+                hit: None,
+                activation: None,
+                candidate: Some(pan),
+                rest: Vec::new(),
+                origin: (x, y),
+                position: (x, y),
+                last_ms: now_ms,
+                event_ms,
+                hold: None,
+                pinch: None,
+                group: false,
+                panning: false,
+                pan_velocity,
+                retained: None,
+                feedback: None,
+                press_activates: false,
+                focus_before_down: None,
+                focus_blocked: false,
+                canvas: None,
+                touch: (false, false),
+                kept: None,
+            });
+            self.set_collection_interaction(view);
+            return Ok(true);
         }
         let mut rest = hit.map_or_else(Vec::new, |hit| self.candidates(hit));
         // A swipe yields the edge the system's own gesture starts from.
@@ -1306,7 +1342,7 @@ impl<D: DataSource> Presenter<D> {
             let at = self
                 .hit(x, y)
                 .and_then(|id| self.host.kernel().node(id).map(|n| n.key));
-            if at == contact.hit {
+            if contact.hit.is_some() && at == contact.hit {
                 if let Some(retained) = &contact.retained {
                     if let Some(target) = &retained.press {
                         self.retained_press_target(target, now_ms);

@@ -99,7 +99,11 @@ public final class ExactModuleContext: @unchecked Sendable {
     // has the hatch table (before its hatches are called), and what each token calls.
     typealias FramesFn = @convention(c) (UnsafeMutableRawPointer?, UInt64, Int32) -> Void
     typealias AfterFn = @convention(c) (UnsafeMutableRawPointer?, UInt64, Double) -> Void
+    typealias AssetFn = @convention(c) (UnsafeMutableRawPointer?, UnsafePointer<UInt8>?, UInt32, UnsafeMutablePointer<UInt8>?, UInt32) -> UInt32
     var framesFn: FramesFn?, afterFn: AfterFn?, coalescingAfterFn: AfterFn?
+    private let assetLock = NSLock()
+    private var assetFn: AssetFn?
+    func setAssetFn(_ fn: AssetFn?) { assetLock.withLock { assetFn = fn } }
     var ticks: [UInt64: (ExactFrame) -> Void] = [:], afters: [UInt64: () -> Void] = [:]
     private var nextToken: UInt64 = 1
 
@@ -180,6 +184,27 @@ public final class ExactModuleContext: @unchecked Sendable {
     /// `native.watch(path)` is asked again. Any thread.
     public func wrote(_ path: String = "app:/data") {
         changed(path.hasPrefix("app:/") ? path : "app:/" + path)
+    }
+
+    /// Resolve an `app:/` path (`app:/data/...`, `app:/cache/...`, `app:/tmp/...`) inside session storage (LLP 1156.008.000 D6.6).
+    public func file(_ path: String) -> URL? { ExactExtensions.file(path, self) }
+
+    /// Resolve a declared asset under `assets/` from the active generation (embedded, dev, or OTA), or `nil` if absent/invalid (LLP 1067.001). Any thread once connected.
+    public func asset(_ path: String) -> URL? {
+        guard let fn = assetLock.withLock({ assetFn }) else { return nil }
+        let input = Array(path.utf8)
+        guard !input.isEmpty else { return nil }
+        var cap = 256
+        for _ in 0..<3 {
+            var buf = [UInt8](repeating: 0, count: cap)
+            let needed = input.withUnsafeBufferPointer { s in
+                buf.withUnsafeMutableBufferPointer { d in Int(fn(host, s.baseAddress, UInt32(s.count), d.baseAddress, UInt32(d.count))) }
+            }
+            guard needed > 0 else { return nil }
+            if needed <= cap { return String(bytes: buf.prefix(needed), encoding: .utf8).map(URL.init(fileURLWithPath:)) }
+            cap = needed
+        }
+        return nil
     }
 }
 
@@ -1101,6 +1126,9 @@ private let moduleWillQuit: @convention(c) (UnsafeMutableRawPointer?, UnsafeMuta
 // after the session's module is made; then each moment is one call.
 private let moduleConnect: @convention(c) (UnsafeMutableRawPointer?, UnsafeRawPointer?) -> Void = { raw, table in
     guard let m = module(raw), let table else { return }
+    let asset = table.load(as: UInt32.self) >= 216
+        ? table.load(fromByteOffset: 208, as: UnsafeRawPointer?.self).map { unsafeBitCast($0, to: ExactModuleContext.AssetFn.self) } : nil
+    m.context.setAssetFn(asset)
     m.hatches = ExactHatches(host: m.context.host, table: table)
     m.context.diagnostics.recordFn = m.hatches?.recordFn
     m.context.framesFn = m.hatches?.framesFn

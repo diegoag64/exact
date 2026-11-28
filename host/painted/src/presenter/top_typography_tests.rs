@@ -133,10 +133,12 @@ fn the_dialog_and_the_menu_keep_materials_metrics() {
         subtitle: None,
         direction: exact_kernel::Direction::Ltr,
         symbol: None,
+        symbol_direction: exact_kernel::Direction::Ltr,
         destructive: false,
         enabled: true,
         cancel,
         checked: false,
+        checkable: false,
         opens: None,
     };
     let alert = |rows: Vec<Row>| Plan::Alert {

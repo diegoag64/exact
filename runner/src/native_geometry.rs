@@ -7,7 +7,7 @@
 //! resource declares: the shape chooses what is read, a quantity the host does not have is
 //! `none` in an `option` field (never 0), and a field the source does not have is refused.
 
-use crate::geometry::view_of;
+use crate::geometry::{view_of, PageBox, PageBoxRead, PageSpace};
 use crate::DataError;
 use exact_kernel::style::calc::Family;
 use exact_kernel::style::targets::{Kind, NativeTarget};
@@ -282,8 +282,50 @@ pub fn geometry(kernel: &Kernel, id: &str, space: &Space, inactive: bool, genera
         Hosted {
             regions: regions_fact(kernel, &laid, space, inactive),
             keyboard: keyboard_fact(kernel, &laid, space),
-            chrome: chrome_fact(kernel.owner_chrome(laid.view)),
+            chrome: chrome_fact(kernel.owner_chrome(laid.view), |r| {
+                rect_in(kernel, &laid, space, r)
+            }),
         },
+    )
+}
+
+/// What `exactGeometry` reads of the node `id` names where the page lays out, as on the web's
+/// wasm target: the box the page draws, through `read`, its size and its frame in `space`, `none`
+/// there where the page cannot place it, as in a transformed node's border box. Its observations
+/// and margins are `none` until the web's owners report them, and what only a native host has is
+/// `none` (LLP 1123 D6, D17). A node that is gone or has no box is unavailable.
+pub fn page_geometry(
+    kernel: &Kernel,
+    id: &str,
+    space: &Space,
+    generation: u64,
+    read: PageBoxRead,
+) -> Fact {
+    let space = match space {
+        Space::Owner => PageSpace::Owner,
+        Space::Window => PageSpace::Window,
+        Space::Node(node) => PageSpace::Node(view_of(kernel, node)),
+    };
+    let Some(PageBox { size, frame }) = view_of(kernel, id).and_then(|view| read(view, space))
+    else {
+        return unavailable(generation);
+    };
+    let size = Fact::Record(vec![
+        ("width", Fact::Number(size[0])),
+        ("height", Fact::Number(size[1])),
+    ]);
+    let frame = frame.map_or(Fact::Absent, |[x, y, w, h]| Fact::rect(x, y, w, h));
+    Fact::Record(
+        GEOMETRY_FIELDS
+            .iter()
+            .map(|&name| match name {
+                "available" => (name, Fact::Bool(true)),
+                "generation" => (name, Fact::Number(generation as f64)),
+                "size" => (name, size.clone()),
+                "frame" => (name, frame.clone()),
+                _ => (name, Fact::Absent),
+            })
+            .collect(),
     )
 }
 
@@ -401,7 +443,7 @@ pub fn templates(source: &str) -> Vec<Fact> {
                     ("near", Fact::Absent),
                     ("away", Fact::Absent),
                 ]),
-                chrome: chrome_fact(Some(Default::default())),
+                chrome: chrome_fact(Some(Default::default()), Some),
             };
             let absent = Hosted {
                 regions: Fact::Absent,
@@ -560,11 +602,16 @@ fn region_fact(r: &ReservedRegion, frame: Fact) -> Fact {
 }
 
 /// D6's `chrome`: what the box's owner's host reported of it, `none` where it reported none, as
-/// outside every owner. A quantity the host does not have is `none`, as the tvOS overscan and the
-/// Mac's auxiliary areas are until those hosts report them (stage 4).
-fn chrome_fact(chrome: Option<OwnerChrome>) -> Fact {
+/// outside every owner. A quantity the host does not have is `none`, as the tvOS overscan is until
+/// tvOS reports it; an auxiliary area is placed in the request's space by `place`, `none` where it
+/// cannot be placed there.
+fn chrome_fact(chrome: Option<OwnerChrome>, place: impl Fn([f64; 4]) -> Option<[f64; 4]>) -> Fact {
     let Some(c) = chrome else {
         return Fact::Absent;
+    };
+    let area = |a: Option<[f32; 4]>| match a.and_then(|r| place(r.map(f64::from))) {
+        Some([x, y, w, h]) => Fact::rect(x, y, w, h),
+        None => Fact::Absent,
     };
     let edge = c.vertical_bar_edge.map(|e| Fact::Str(e.name().to_string()));
     Fact::Record(vec![
@@ -574,8 +621,8 @@ fn chrome_fact(chrome: Option<OwnerChrome>) -> Fact {
             c.sidebar_available.map_or(Fact::Absent, Fact::Bool),
         ),
         ("overscan", Fact::Absent),
-        ("auxiliaryTopLeftArea", Fact::Absent),
-        ("auxiliaryTopRightArea", Fact::Absent),
+        ("auxiliaryTopLeftArea", area(c.auxiliary_top_left)),
+        ("auxiliaryTopRightArea", area(c.auxiliary_top_right)),
     ])
 }
 

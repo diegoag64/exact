@@ -63,7 +63,10 @@ const SHARED: [(&str, &str); 3] = [
 /// What each eye reads from its own row of the eyes' block.
 const PER_EYE: [(&str, &str); 4] = [
     ("frame.view_proj", "frame.eye_view_proj[mv_eye]"),
-    ("frame.inverse_view_proj", "frame.eye_inverse_view_proj[mv_eye]"),
+    (
+        "frame.inverse_view_proj",
+        "frame.eye_inverse_view_proj[mv_eye]",
+    ),
     ("frame.camera_alpha.xyz", "frame.eye_camera[mv_eye].xyz"),
     ("frame.view_depth", "frame.eye_view_depth[mv_eye]"),
 ];
@@ -101,11 +104,14 @@ pub(crate) fn multiview_source(source: &str) -> String {
 pub(crate) fn tone_source(source: &str) -> String {
     let text = multiview_source(source);
     assert!(text.contains("var hdr: texture_2d<f32>;"));
-    text.replace("var hdr: texture_2d<f32>;", "var hdr: texture_2d_array<f32>;")
-        .replace(
-            "textureLoad(hdr, vec2<i32>(p.xy), 0)",
-            "textureLoad(hdr, vec2<i32>(p.xy), mv_eye, 0)",
-        )
+    text.replace(
+        "var hdr: texture_2d<f32>;",
+        "var hdr: texture_2d_array<f32>;",
+    )
+    .replace(
+        "textureLoad(hdr, vec2<i32>(p.xy), 0)",
+        "textureLoad(hdr, vec2<i32>(p.xy), mv_eye, 0)",
+    )
 }
 
 /// Each `@vertex` and `@fragment` function takes the view index first and
@@ -122,8 +128,14 @@ fn entry_points(text: &str) -> String {
             out.push_str(rest);
             return out;
         };
-        let name = at + rest[at..].find("fn ").expect("an entry point is a function");
-        let open = name + rest[name..].find('(').expect("an entry point has parameters");
+        let name = at
+            + rest[at..]
+                .find("fn ")
+                .expect("an entry point is a function");
+        let open = name
+            + rest[name..]
+                .find('(')
+                .expect("an entry point has parameters");
         let mut depth = 0;
         let mut close = open;
         for (i, c) in rest[open..].char_indices() {
@@ -275,12 +287,21 @@ mod tests {
     use super::*;
 
     fn eyes() -> [Eye; 2] {
-        let reference = glam::camera::rh::view::look_at_mat4(Vec3::new(0.0, 1.6, 0.0), Vec3::new(0.0, 0.9, -1.0), Vec3::Y);
+        let reference = glam::camera::rh::view::look_at_mat4(
+            Vec3::new(0.0, 1.6, 0.0),
+            Vec3::new(0.0, 0.9, -1.0),
+            Vec3::Y,
+        );
         // A headset's asymmetric eyes, 64 mm apart.
-        let proj = |l: f32, r: f32| frustum(l * 0.05, r * 0.05, 0.9 * 0.05, 0.8 * 0.05, 0.05, 100.0);
+        let proj =
+            |l: f32, r: f32| frustum(l * 0.05, r * 0.05, 0.9 * 0.05, 0.8 * 0.05, 0.05, 100.0);
         let eye = |x: f32, p: Mat4| {
             let view = Mat4::from_translation(Vec3::new(-x, 0.0, 0.0)) * reference;
-            Eye { view, proj: p, camera: view.inverse().w_axis.truncate() }
+            Eye {
+                view,
+                proj: p,
+                camera: view.inverse().w_axis.truncate(),
+            }
         };
         [eye(-0.032, proj(1.0, 0.8)), eye(0.032, proj(0.8, 1.0))]
     }
@@ -300,7 +321,10 @@ mod tests {
                         let c = shared * p.extend(1.0);
                         let n = c.truncate() / c.w;
                         assert!(c.w > 0.0, "{p} is in front of the shared apex");
-                        assert!(n.x.abs() <= 1.0 + 1e-4 && n.y.abs() <= 1.0 + 1e-4, "{p} -> {n}");
+                        assert!(
+                            n.x.abs() <= 1.0 + 1e-4 && n.y.abs() <= 1.0 + 1e-4,
+                            "{p} -> {n}"
+                        );
                         assert!((-1e-4..=1.0 + 1e-4).contains(&n.z), "{p} -> depth {}", n.z);
                     }
                 }
@@ -312,7 +336,10 @@ mod tests {
     fn eye_words_follow_the_frame_uniform() {
         let eyes = eyes();
         let words = eye_words(&eyes);
-        assert_eq!(&words[16..32], &(eyes[1].proj * eyes[1].view).to_cols_array());
+        assert_eq!(
+            &words[16..32],
+            &(eyes[1].proj * eyes[1].view).to_cols_array()
+        );
         assert_eq!(&words[68..71], &eyes[1].camera.to_array());
         assert_eq!(UNIFORM_FLOATS, 296);
     }

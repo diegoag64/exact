@@ -29,13 +29,12 @@ import { writers } from './writers.mjs';
 import { namesStream } from './stream-names.mjs';
 import { bundleHostModule, localImports, stageHostGlue, writeFalse } from './glue.mjs';
 import { gateAgent } from './agent-gate.mjs';
-import { contentName, contentNames, languageHead, splitLanguages } from './content-names.mjs';
-import { buildEditor, buildFlow, buildMarkdown, buildModule, buildMotion, moduleSourceDirs, moduleSources, undeclaredRustData, fresh, frameAnswer, frameFixture, frameURL, leafTaken, moduleGrants, webCompiler, inspectHooked, withInspectHooks, withoutDev, withRuntimeStamp, sizeWarning, entrySizeReport } from './module.mjs';
+import { contentName, contentNames, inlineScript, languageHead, splitLanguages } from './content-names.mjs';
+import { buildEditor, buildFlow, buildMarkdown, buildModule, buildMotion, moduleSourceDirs, moduleSources, undeclaredRustData, fresh, recordFrameAssets, frameAnswer, frameFixture, frameURL, leafTaken, moduleGrants, webCompiler, inspectHooked, withInspectHooks, withoutDev, withRuntimeStamp, sizeWarning, entrySizeReport } from './module.mjs';
 import { appDigest, developmentStore } from '../../scripts/agent-launch.mjs';
 import { productionManifestImports, settingLines } from '../../js/bake/src/__exact_env.mjs';
 import { colorSchemeMeta, interfaceStyle, launchBackground, schemeHead, withInterfaceStyle, withLook } from '../web/look.mjs';
 import { copyStaticTreeIfPresent } from '../web/serve.mjs';
-
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
 const args = process.argv.slice(2);
@@ -54,7 +53,8 @@ try { installedFileDependencies(appDir); } catch (error) { console.error(`error:
 const manifest = readManifest(appDir, app);
 const framePath = opt('--frame');
 const frame = framePath && !framePath.startsWith('--') && resolve(appDir, framePath);
-const siteBase = frame && args.includes('--serve-frame') ? frameURL(basename(frame, '.contract')) + '/' : manifest.host?.web?.base ?? "/";
+const servedFrame = frame && args.includes('--serve-frame');
+const siteBase = servedFrame ? frameURL(basename(frame, '.contract')) + '/' : manifest.host?.web?.base ?? "/";
 if (siteBase !== "/" && opt("--plan")) throw new Error("host.web.base: native update bakes require /; build the standalone JS site without --plan");
 // Bun's runtime transpiler cache keys a module by its text and keeps the
 // imports this build's mount resolver gives it (below), so the same file at
@@ -84,7 +84,7 @@ const out = resolve(opt('--out') ?? defaultOut);
 const sizes = args.includes('--sizes');
 // `--dev` (host/web-js/dev.mjs): typed state checkpoint hooks that ordinary
 // and production builds neither emit nor link.
-const devReload = args.includes('--dev');
+const devReload = args.includes('--dev') || !!servedFrame;
 if (production && devReload) { console.error('--production and --dev are mutually exclusive'); process.exit(2); }
 // Its app.ts copy loses a development build's only grant lines (`configure`), which reads the trust.
 if (production && (process.env.EXACT_UPDATE_TRUST ?? 'production') !== 'production') { console.error(`--production builds under EXACT_UPDATE_TRUST=production, not ${process.env.EXACT_UPDATE_TRUST}`); process.exit(2); }
@@ -121,7 +121,7 @@ if (rust && (process.env.EXACT_RUST_PLACEMENT ?? manifest.rust?.platforms?.web?.
 // Rust one (LLP 1027.002), the Rust module answers what it owns and the
 // TypeScript module the rest (ts-data.js, rust-data.js). A synthetic plan
 // over another app's sources (`--data`) asks the Rust module only.
-const ts = existsSync(resolve(appDir, 'app.ts')) && !(rust && opt('--data'));
+const ts = existsSync(resolve(appDir, 'app.ts')) && !(rust && opt('--data')); if (!ts && !existsSync(resolve(appDir, 'app.ts'))) rmSync(resolve(appDir, '.exact/typescript-inputs.json'), { force: true });
 const fixture = frameFixture(appDir, frame);
 if (fixture && !ts) { console.error(`error: ${fixture} supplies TypeScript answers and needs the app's app.ts`); process.exit(1); }
 const appTypes = ts && (frame || (opt('--contract') && !opt('--plan') && !opt('--data') && resolve(input) !== resolve(appDir, 'app.contract')));
@@ -197,12 +197,14 @@ const { gpuModules, webGpuArtifacts, copyShaders, shaderWatchRoots } = await imp
 const { gpuView, gpuWorkspaceInputs, unregisteredSurfaces } = await import('../../scripts/app-shells.mjs');
 const declaredGpu = gpuModules(manifest, 'web');
 const hasGpuArtifacts = existsSync(gpuLib) || declaredGpu.length > 0;
+const frameGpuCrates = [];
 let gpuSurfaces = existsSync(gpuLib) ? null : [];
 if (hasGpuArtifacts && prerequisitesOnly) webGpuArtifacts(resolveApp(app), null, { check: true });
 if (hasGpuArtifacts && !checkOnly && !prerequisitesOnly) {
   const target = resolveApp(app), cache = resolve(target.target, 'web-js-gpu', target.name);
   const crates = [...(existsSync(gpuLib) ? [['gpu', target.crate('gpu')]] : []),
     ...declaredGpu.map(({ name }) => [`gpu/${name}`, target.crate(`gpu-${name}`)])];
+  if (servedFrame) frameGpuCrates.push(...crates.map(([, crate]) => crate));
   const gpuInputs = shaderWatchRoots(target).filter(existsSync);
   try {
     for (const module of [...(existsSync(gpuLib) ? [null] : []), ...declaredGpu]) {
@@ -322,7 +324,8 @@ if (ts && unregistered.length && !captured.facts.exported.includes('draw')) {
 const plan = readFileSync(resolve(gen, 'app.js'), 'utf8'), contentFiles = {}, languages = splitLanguages(plan, contentFiles, out);
 const runtime = ['rt.js', 'clock.js', 'resources.js', 'tree.js', 'events.js', 'pieces.js', 'mount.js', 'strings.js', 'request-send.js', 'presence-bindings.js', 'rows.js', 'resource-inspection.js', 'rt-link.js', 'generation-reload.js', 'elements.js', 'editor.js', 'live-time.js', 'font-family.js', 'observers.js', 'grid.js', 'overlay.js', 'roster.js', 'router.js', 'route-pattern.js', 'schedule.js', 'each.js', 'timer-waits.js', 'timer-observations.js', 'budget.js', 'shape.js', 'pointer.js', 'document.js', 'media.js', 'links.js', 'commands.js', 'focus.js', 'backdrop.js', 'persist.js', 'chosen.js', 'modes.js', 'follow.js', 'zoom.js', 'portal.js', 'beat.js', 'regions.js', 'declarations.js', 'said.js', 'held.js', 'uploads.js', 'lower.js'];
 if (languages) runtime.push('language-assets.js', 'chosen-language.js', 'fetch-table.js', 'sha256.js');
-for (const f of runtime) cpSync(resolve(here, (f === 'timer-observations.js' || f === 'sha256.js') ? '../web/' + f : f), resolve(gen, f));
+const stageJs = (from, to = from) => writeFileSync(resolve(gen, to), localImports(readFileSync(resolve(here, from), 'utf8')));
+for (const f of runtime) stageJs((f === 'timer-observations.js' || f === 'sha256.js') ? '../web/' + f : f, f);
 if (siteBase !== '/') {
   // Specialize the URL boundaries only. Root builds keep the ordinary runtime's bytes.
   writeFileSync(resolve(gen, 'site.js'), readFileSync(resolve(here, 'site.js'), 'utf8').replace('__EXACT_SITE_BASE__', JSON.stringify(siteBase)));
@@ -339,7 +342,7 @@ export { canonical, locationOf };`],
     ['router.js', 'projectRoots(history, location => Navigate ? (Navigate(location), true) : false, say, After, hostBack, hostGo, href => { const match = matchRoute(canonical(href)); return match !== null && !Routes[match[0]].notfound; }, canonical);',
       'projectRoots(history, location => Navigate ? (Navigate(appLocation(location)), true) : false, say, After, hostBack, location => hostGo(appLocation(location)), href => { const match = matchRoute(canonical(appLocation(href))); return match !== null && !Routes[match[0]].notfound; }, siteCanonical);'],
     ['router.js', 'url: top[5] ? `${top[2]}#${top[5]}` : top[2]', 'url: siteLocation(top[5] ? `${top[2]}#${top[5]}` : top[2])'],
-    ['router.js', '[e[0], e[2]]', '[e[0], siteLocation(e[2])]'],
+    ['router.js', '[e[0], e[2]]', '[e[0], siteLocation(e[2])]'], ['router.js', 'map(d => [d.url, d.tab])', 'map(d => [siteLocation(d.url), d.tab])'],
     ['router.js', 'shown[2] + href : a.href', 'siteLocation(shown[2]) + href : a.href'],
     ['router.js', 'm = matchRoute(canonical(to))', 'm = matchRoute(canonical(appLocation(to)))'],
     ['router.js', 'canonical(to) === shown?.[2]', 'canonical(appLocation(to)) === shown?.[2]'],
@@ -562,9 +565,11 @@ if (rustLinked) {
   moduleStorage = rustGrantSet.entries.some(([, , grant]) => ['fs-read', 'fs-write', 'sqlite-open'].includes(grant?.[0]));
 }
 // The granted secrets: a launch whose store holds one passes over a store reader's build-time answer (store-reader.js).
-// A page whose app grants none ships none of it.
+// A page whose app grants none ships none of it. Plain two-word `secret.keep <name>` lines are recorded separately for
+// authored-test seeding (LLP 1018.000 D2), excluding presence-locked grants.
 const secretNames = [...new Set([...tsGrantSet.entries, ...rustGrantSet.entries].filter(([, , grant]) => grant?.[0] === 'secret-keep').map(([, , grant]) => grant[1]))];
-writeFileSync(resolve(gen, 'admission-data.js'), `import {createGrantSet} from './admission.js';export const tsGrantSet=createGrantSet(${JSON.stringify(tsGrantSet)}),rustGrantSet=createGrantSet(${JSON.stringify(rustGrantSet)});\n`);
+const plainSecretNames = [...new Set([...tsGrantSet.entries, ...rustGrantSet.entries].map(([, source]) => grantWords(source)).filter(w => w.length === 2 && w[0] === 'secret.keep').map(w => w[1]))];
+writeFileSync(resolve(gen, 'admission-data.js'), `import {createGrantSet} from './admission.js';export const tsGrantSet=createGrantSet(${JSON.stringify(tsGrantSet)}),rustGrantSet=createGrantSet(${JSON.stringify(rustGrantSet)}),plainSecretGrants=${JSON.stringify(plainSecretNames)};\n`);
 // The app's launch modules that have a web service.
 const launchWeb = launchModules(appDir, manifest, ['web']);
 if (launchWeb.length) {
@@ -624,7 +629,8 @@ writeFileSync(resolve(gen, 'main.js'), [
   // its own lines below use and what production glue reads from `globalThis.exact` (`journal`, `clock`: arrange.js;
   // `views`: media-glue.js; `viewId`: navigation.js; `After`: motion.js); the agent adapter, inspect and the dev
   // loop read the rest, so a development page names them too.
-  `import { data, journal, clock, commit, inflight, Views, viewId, After, Clocked, R, resolvedLocale, Resources${production ? '' : ', agentMode, advance, heldAsks, heldReplies, Mutations, writeRecords, goTo'} } from './rt.js';`,
+  `import { data, journal, clock, commit, inflight, Views, viewId, After, Clocked, R, resolvedLocale, Resources${production ? '' : ', DEVELOPMENT_STORE, Kept, agentMode, advance, heldAsks, heldReplies, Mutations, writeRecords, goTo'} } from './rt.js';`,
+  ...(!production ? [`if (DEVELOPMENT_STORE) globalThis.__exactSeedStored?.(Kept('state'), Kept('secret'), ${JSON.stringify(plainSecretNames)});`] : []),
   `data.appId = ${JSON.stringify(readManifest(appDir, app).app.id)};`,
   `data.keepSurfaceAnswers = ${!tsGrantSet.keepsNoAnswers && !rustGrantSet.keepsNoAnswers};`,
   ...(secretNames.length ? [`import { install as secrets } from './store-reader.js'; secrets(${JSON.stringify(secretNames)});`] : []),
@@ -641,9 +647,9 @@ writeFileSync(resolve(gen, 'main.js'), [
     // The zone's offset follows the clock (habits F6): a timer, a `then` or the agent's `clock` that finds the offset
     // at its instant changed (a DST change, a new zone) answers `exactTime` again first (LLP 1027.000.000 D2).
     "let told = reportTime(clock.now)[1];",
-    "Clocked.push(() => { const o = reportTime(clock.now)[1]; if (o === told) return; told = o; commit(() => { for (const r of Resources) if (r.source === 'exactTime') R(r); }, 'time'); });",
+    "Clocked.push(() => { const o = reportTime(clock.now)[1]; if (o === told) return; told = o; commit(() => { for (const r of Resources) if (r.source === 'exactTime' || r.clock) R(r); }, 'time'); });",
   ] : []),
-  ...(ts ? ["import './ts-link.js';", ...(seamLazy ? [
+  ...(ts ? ["import './ts-link.js';", ...(!production ? ["import './ts-seed.js';"] : []), ...(seamLazy ? [
     "import { seam } from './ts-load.js';",
     'const loadSeam = seam(data, inflight, journal, clock);',
   ] : [`import { install as ts${production ? '' : ', watchState'} } from './ts-data.js';`, `ts(data, ${JSON.stringify(rustSources)}${pageModules ? ", () => import('./native.js')" : ''});`, "import { answering } from './ts-fetch.js';"])] : []),
@@ -663,7 +669,7 @@ writeFileSync(resolve(gen, 'main.js'), [
   "const start = () => {",
   "  const state = app();",
   ...(launchWeb.length ? ["  marks.mounted();"] : []),
-  ...(devReload ? ["  finishDev();"] : []),
+  ...(devReload ? ["  finishDev(); globalThis.__exactDevFirstCommit?.();"] : []),
   `  globalThis.exact = Object.assign(globalThis.exact ?? {}, { ready: true, journal, clock, views: Views, viewId, After${production ? '' : ', advance, commit, data, state, inflight, heldAsks, heldReplies, resources: Resources, mutations: Mutations, writes: writeRecords'} });`,
   // A development page counts its work and samples its frames (LLP 1079); the agent adapter, only when the agent drives it,
   // else its passive reads, which the dev loop's attach bridge loads once a person allows an agent (LLP 1012.000 D2).
@@ -698,11 +704,8 @@ writeFileSync(resolve(gen, 'main.js'), [
   // own location, since a page made per request is served where it was made.
   `const named = typeof document === 'object' && document.querySelector('script[type=\"application/vnd.exact.checkpoint\"]${languages ? '' : '[data-src]'}');`,
   languages ? "const answers = named && renderedAnswers(named);" : "const answers = named && (globalThis.exact?.answers ?? fetch(named.dataset.src).then(r => r.ok ? r.text() : null, () => null)).then(t => { named.textContent = t ?? JSON.stringify({ location: location.pathname, time: 0, answers: [] }); });"] : ['const sheet = null, answers = null;']),
-  // Under the driver a TypeScript source draws the launch seed's stream (LLP 1069.005 D2b), from its first answer:
-  // the first render waits for the stream's module, which no other page loads before it needs storage.
-  ...(ts && !production && languages ? ["import {agentSeed, agentStream} from './storage-environment.js';",
-    "if (agentMode() && !globalThis.__exactRender) { const seed = agentSeed(); if (seed !== null) answering.entropy = Object.assign(agentStream(seed, 'typescript'), {seed}); }",
-    "const seeded = null;"] : ts && !production ? ["const seeded = agentMode() && !globalThis.__exactRender && import('./storage-environment.js').then(env => { const seed = env.agentSeed(); if (seed !== null) answering.entropy = Object.assign(env.agentStream(seed, 'typescript'), { seed }); });"] : ['const seeded = null;']),
+  // Agent random streams initialize synchronously in ts-seed.js before app.ts evaluates (LLP 1195.000 D2.5).
+  'const seeded = null;',
   ...(!languages ? ["const waits = [fonts, sheet, answers, seeded].filter(Boolean);"] : []),
   `if ((sheet || answers || seeded${languages ? " || inLanguage" : ""}) && !fonts) { (globalThis.exact ??= {}).ready = new Promise(r => { booted = r; });${production ? '' : ' clock.agent = agentMode();'} }`,
   languages ? "const go = (f, module) => Promise.all([answers, Promise.race([Promise.all([fonts, sheet, seeded, module]), globalThis.exact.languageLaunch.deadline])]).then(() => inLanguage(f)).catch(e => { const l = globalThis.exact.languageLaunch; l?.finish(); l?.report('adoption failed: ' + e, document.documentElement.lang); throw e; });" : "const go = f => waits.length ? Promise.all(waits).then(f) : f();",
@@ -710,7 +713,7 @@ writeFileSync(resolve(gen, 'main.js'), [
   // began at after each commit, before a frame shows it, until agent.js, which loads after the first render, takes it
   // (its `register`): never left on the browser's clock, nor turned on the compositor first (LLP 1069.001: a spinner
   // follows the agent's clock), as the wasm host holds each commit's at once.
-  ...(production ? [] : ["if (agentMode()) { const early = (globalThis.exact ??= {}).early = new WeakMap(); After.push(globalThis.exact.holdEarly = () => { for (const a of document.getAnimations()) if (!early.has(a) && a.playState === 'running' && (!a.timeline || a.timeline instanceof DocumentTimeline)) { early.set(a, clock.now); a.pause(); a.currentTime = 0; } }); }"]),
+  ...(production ? [] : ["if (agentMode()) { const early = (globalThis.exact ??= {}).early = new WeakMap(); After.push(globalThis.exact.holdEarly = () => { for (const a of document.getAnimations()) if (!early.has(a) && a.playState === 'running' && a.timeline instanceof DocumentTimeline) { early.set(a, clock.now); a.pause(); a.currentTime = 0; } }); }"]),
   ...(rustLinked ? [
     // Rust data: loaded after first pixel, asked synchronously once ready; a plan with a resource that has no compiled
     // value waits for it. Counted in flight, so `clock settle` waits for the source to be ready.
@@ -734,8 +737,7 @@ writeFileSync(resolve(gen, 'main.js'), [
   // `prepareChunks`, below, writes their names here as Rolldown renders the entry.
   `for (const name of __EXACT_DEFERRED_CHUNKS__) document.head.append(Object.assign(document.createElement('link'), { rel: 'modulepreload', fetchPriority: 'low', href: new URL(name, ${args.includes('--inline') ? 'document.baseURI' : 'import.meta.url'}).href }));`,
 ].join('\n'));
-for (const f of ['agent.js', 'check.js', 'perf.js', 'seam.js', 'rust-data.js', 'canvas-capture.js', 'list.js', 'list-text.js', 'facts.js', 'output.js', 'store.js', 'fetches.js', 'modules.js', 'declared-values.js', 'permissions.js', 'sheets.js', 'samples.js', 'wakes.js', 'reach.js', 'devices.js', 'members.js', 'arrival.js', 'calls.js', 'update.js', 'spans.js', 'package-session.js', 'views.js', 'pictures.js', 'markdown.js', 'symbols.js', 'motion.js', 'drag-target.js', 'transform.js', 'svg-transform.js', 'dataset.js', 'format.js', 'format-locale.js', 'hatches.js', 'arrange.js', 'reorder.js', 'flow.js', 'native.js', 'shared.js', 'store-reader.js', 'iframes.js', 'list-items.js', 'button-fill.js']) cpSync(resolve(here, f), resolve(gen, f));
-for (const file of ['modules.js', 'symbols.js']) writeFileSync(resolve(gen, file), localImports(readFileSync(resolve(here, file), 'utf8')));
+for (const f of ['agent.js', 'check.js', 'perf.js', 'seam.js', 'ts-seed.js', 'rust-data.js', 'canvas-capture.js', 'list.js', 'list-text.js', 'facts.js', 'output.js', 'store.js', 'fetches.js', 'modules.js', 'declared-values.js', 'permissions.js', 'sheets.js', 'samples.js', 'wakes.js', 'reach.js', 'devices.js', 'members.js', 'arrival.js', 'calls.js', 'update.js', 'spans.js', 'package-session.js', 'views.js', 'pictures.js', 'markdown.js', 'symbols.js', 'motion.js', 'drag-target.js', 'transform.js', 'svg-transform.js', 'dataset.js', 'format.js', 'format-locale.js', 'hatches.js', 'arrange.js', 'reorder.js', 'flow.js', 'native.js', 'shared.js', 'store-reader.js', 'iframes.js', 'list-items.js', 'button-fill.js']) stageJs(f);
 const checkpointSource = readFileSync(resolve(here, 'page-checkpoint.js'), 'utf8'), checkpointFaultImport = "import { checkpointFaults } from '../web/faults.js';";
 if (!checkpointSource.includes(checkpointFaultImport)) throw new Error('page-checkpoint.js no longer imports checkpointFaults');
 writeFileSync(resolve(gen, 'page-checkpoint.js'), localImports(production ? checkpointSource.replace(checkpointFaultImport, 'const checkpointFaults = () => [];') : checkpointSource));
@@ -766,8 +768,13 @@ if (siteBase !== '/') {
   writeFileSync(file, "import { siteHref } from './site.js';\n" + code.replace(boundary, 'span.href = siteHref(href.trim());'));
 }
 
-const grantNames = Object.keys(await import('../web/grant-admission.js'))
-  .filter(name => !['isCloudMetadata', 'isLocalNetwork'].includes(name));
+const [grantModule, networkModule] = await Promise.all([
+  import('../web/grant-admission.js'),
+  import('../web/navigation/network.js'),
+]);
+const networkNames = Object.keys(grantModule)
+  .filter(name => name in networkModule && Object.is(grantModule[name], networkModule[name]));
+const grantNames = Object.keys(grantModule).filter(name => !networkNames.includes(name));
 writeFileSync(resolve(gen, 'grant-network.js'), await bundleHostModule(root, 'navigation/network.js', { production }));
 // A production page whose every grant set is empty (no TypeScript grant, no Rust module, no native module, no page
 // module, no declared source) admits nothing, and says so without the parser (LLP 1047.002 D3): each export of admission answers as it
@@ -797,7 +804,7 @@ const emptyGrantAdmission = () => {
   return ['// Generated: the grant admission of a page that admits nothing (LLP 1047.002 D3). Every set is the empty set the compiler normalized.',
     `const EMPTY = Object.freeze({ ...${JSON.stringify(tsGrantSet)}, entries: Object.freeze([]) });`,
     ...grantNames.map(name => `export const ${name} = ${answers[name]};`),
-    "export { isCloudMetadata, isLocalNetwork } from './grant-network.js';"].join('\n');
+    ...(networkNames.length ? [`export { ${networkNames.join(', ')} } from './grant-network.js';`] : [])].join('\n');
 };
 // The agent adapter reads its own copies of the modules it shares with the
 // entry: a module lives in one chunk, so what only the agent reads from
@@ -821,16 +828,16 @@ const uploadsImport = "import { ledger, requestKey } from './uploads.js';";
 // 1047.002 D3).
 const storageGrants = tsGrantSet.entries.some(([, , grant]) => ['fs-read', 'fs-write', 'sqlite-open'].includes(grant?.[0]));
 const storageFlag = 'const STORAGE_GRANTED = true;';
-const tsData = readFileSync(resolve(here, 'ts-data.js'), 'utf8');
+const tsData = localImports(readFileSync(resolve(here, 'ts-data.js'), 'utf8'));
 for (const line of [uploadsImport, storageFlag, streamImport]) if (!tsData.includes(line)) throw new Error(`host/web-js/ts-data.js: build.mjs replaces a line it no longer has: ${line}`);
-if (ts) writeFileSync(resolve(gen, 'ts-data.js'), (seamLazy ? "import './held-hooks.js';\n" : '') + tsData.replace("'__APP_TS__'", () => JSON.stringify(pageAppTs))
+if (ts) writeFileSync(resolve(gen, 'ts-data.js'), localImports((seamLazy ? "import './held-hooks.js';\n" : '') + tsData.replace("'__APP_TS__'", () => JSON.stringify(pageAppTs))
   .replace(uploadsImport, streams ? uploadsImport : "import { data as runtime } from './rt.js'; const ledger = runtime.uploads, requestKey = () => undefined;")
   .replace(streamImport, streams ? streamImport : 'Promise.reject(new Error("this page was built without the stream reader"))')
   .replace(storageFlag, production && !storageGrants ? 'const STORAGE_GRANTED = false;' : storageFlag)
   .replace('const appId = source.appId;', `const appId = ${JSON.stringify((await import('../../scripts/app.mjs')).readManifest(appDir, app).app.id)};`)
   .replace('__AUTH_IMPORT__', auth ? "import { install as signIn } from './auth.js';" : '')
-  .replace('__AUTH_INSTALL__', auth ? `signIn(${JSON.stringify(grants)}, () => asking);` : '')
-  .replace("'__FETCH_MODULE__'", JSON.stringify(fetchRefused ? './ts-fetch-refused.js' : './ts-fetch.js')));
+  .replace('__AUTH_INSTALL__', auth ? `signIn(${JSON.stringify(grants)}, () => asking, () => activeCall());` : '')
+  .replace("'__FETCH_MODULE__'", JSON.stringify(fetchRefused ? './ts-fetch-refused.js' : './ts-fetch.js'))));
 writeFileSync(resolve(gen, 'grant-admission.js'), admitsNothing ? emptyGrantAdmission() : await bundleHostModule(root, 'grant-admission.js', { production }));
 // With nothing admitted no request leaves the page's origin, so the driver's faults (LLP 1103), which fail a request
 // that would have gone out, have nothing to fail: `fetchWith` keeps its asset path and loses faults.js.
@@ -856,24 +863,11 @@ writeFileSync(resolve(gen, 'admission.js'), localImports(stubbed));
 if (fetchRefused) writeFileSync(resolve(gen, 'ts-fetch-refused.js'), [
   '// Generated: `fetch` for sources with no network grant (LLP 1047.002 D3): the app\'s own assets, else the refusal by name.',
   "import { fetchWith } from './admission.js'; import { ordinary, owned, fetchReply, STREAM_REFUSAL } from './ts-fetch.js'; import { tsGrantSet } from './admission-data.js';",
-  'export const fetch = (input, init) => init?.exactStream !== undefined ? owned(Promise.reject(new TypeError(STREAM_REFUSAL))) : fetchReply(ordinary(() => fetchWith(tsGrantSet, input, init)));', ''].join('\n'));
+  `export const fetch = (input, init) => init?.exactStream !== undefined ? owned(Promise.reject(new TypeError(STREAM_REFUSAL))) : init?.exactStreamOpen !== undefined && init.exactStreamOpen !== false ? owned(Promise.reject(new TypeError(init.exactStreamOpen === true ? "exactStreamOpen reports an HTTP stream's response head on open: give exactStream too" : "exactStreamOpen is true or false"))) : fetchReply(ordinary(() => fetchWith(tsGrantSet, input, init)));`, ''].join('\n'));
 const tsFetch = readFileSync(resolve(here, 'ts-fetch.js'), 'utf8');
 if (!tsFetch.includes(refusalLine)) throw new Error(`host/web-js/ts-fetch.js: build.mjs replaces a line it no longer has: ${refusalLine}`);
 writeFileSync(resolve(gen, 'ts-fetch.js'), streams ? tsFetch : tsFetch.replace(refusalLine, `export const STREAM_REFUSAL = ${JSON.stringify(STREAM_REFUSAL)};`));
-cpSync(resolve(here, 'ts-body-from.js'), resolve(gen, 'ts-body-from.js'));
-for (const f of ['ts-link.js', 'ts-load.js']) cpSync(resolve(here, f), resolve(gen, f));
-cpSync(resolve(here, 'ts-stream.js'), resolve(gen, 'ts-stream.js'));
-cpSync(resolve(here, 'ts-sqlite.js'), resolve(gen, 'ts-sqlite.js'));
-cpSync(resolve(here, 'auth.js'), resolve(gen, 'auth.js'));
-writeFileSync(resolve(gen, 'files.js'), localImports(readFileSync(resolve(here, 'files.js'), 'utf8')));
-cpSync(resolve(here, 'url.js'), resolve(gen, 'url.js'));
-cpSync(resolve(here, 'sounds.js'), resolve(gen, 'sounds.js'));
-cpSync(resolve(here, 'wakelock.js'), resolve(gen, 'wakelock.js'));
-writeFileSync(resolve(gen, 'drag.js'), localImports(readFileSync(resolve(here, 'drag.js'), 'utf8')));
-cpSync(resolve(here, 'orientationlock.js'), resolve(gen, 'orientationlock.js'));
-cpSync(resolve(here, 'transport.js'), resolve(gen, 'transport.js'));
-cpSync(resolve(here, 'clockin.js'), resolve(gen, 'clockin.js'));
-cpSync(resolve(here, 'midi.js'), resolve(gen, 'midi.js'));
+for (const f of ['ts-body-from.js', 'ts-link.js', 'ts-load.js', 'ts-stream.js', 'ts-sqlite.js', 'auth.js', 'files.js', 'url.js', 'sounds.js', 'wakelock.js', 'drag.js', 'orientationlock.js', 'transport.js', 'clockin.js', 'midi.js']) stageJs(f);
 // The server bundle a JavaScript render runs (render.mjs), one script per VM context.
 let renderOrigin;
 try { const u = new URL(manifest.app?.origin); if (['http:', 'https:'].includes(u.protocol)) renderOrigin = u.origin; } catch { /* No configured origin. */ }
@@ -1020,11 +1014,11 @@ const scopedModule = (code, id) => {
   // I/O refused, as the wasm target's realm refuses it, and code from a
   // string, which throws as on Hermes (`eval`, which no import may bind, is imported under a fresh name below).
   const bound = ['fetch', 'Date', 'Math', 'Intl', 'setTimeout', 'setInterval', 'requestAnimationFrame', 'requestIdleCallback',
-    'clearTimeout', 'clearInterval', 'cancelAnimationFrame', 'cancelIdleCallback', 'performance', 'scheduler', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'crypto', 'AbortSignal',
+    'clearTimeout', 'clearInterval', 'cancelAnimationFrame', 'cancelIdleCallback', 'performance', 'scheduler', 'process', 'crypto', 'AbortSignal',
     'Function', 'Promise', 'queueMicrotask', 'Response', 'exactHost'];
-  // The DOM and Node's globals are absent, as on Hermes (js/bake/src/typescript.mjs `packageRefusals`).
+  // The DOM, unshimmed Node globals, and absent I/O constructors match Hermes (LLP 1195.000 D1.3, D1.4).
   const absent = ['window', 'self', 'frames', 'parent', 'top', 'opener', 'document', 'navigator', 'location', 'history', 'localStorage', 'sessionStorage',
-    'indexedDB', 'HTMLElement', 'Element', 'getComputedStyle', 'customElements', 'alert', 'process', 'Buffer', 'global'];
+    'indexedDB', 'HTMLElement', 'Element', 'getComputedStyle', 'customElements', 'alert', 'Buffer', 'global', 'XMLHttpRequest', 'WebSocket', 'EventSource'];
   // The stage's normalized configuration, never one found beside the file: a
   // mount's own `tsconfig.json` may extend a file outside the mount.
   const transformed = transformSync(id, code, { tsconfig: resolve(tsStage, '__exact_tsconfig.json'),
@@ -1222,7 +1216,7 @@ const prepareChunks = { name: 'exact-prepare-chunks', renderChunk(code, chunk, _
 } };
 {
   const b = await rolldown({ ...bundleOptions, input: resolve(gen, 'main.js'), ...(ts ? { tsconfig: resolve(tsStage, '__exact_tsconfig.json') } : {}), transform: { ...bundleOptions.transform, define: { ...bundleOptions.transform.define, ...versionDefines, 'import.meta.exactPageAdmits': 'undefined', 'globalThis.__exactRender': 'false' } },
-    plugins: [...scopedPlugins(), contentNames(contentFiles, exactModule), prepareChunks], logLevel: 'warn', onLog });
+    plugins: [...scopedPlugins(), contentNames(contentFiles, exactModule), prepareChunks, ...(args.includes('--inline') ? [inlineScript()] : [])], logLevel: 'warn', onLog });
   // In a development reload build, put the TypeScript data module and every
   // helper it imports in one chunk the page really loads. Its emitted bytes,
   // rather than watcher filenames or source mtimes, are the logic revision.
@@ -1321,7 +1315,7 @@ ${languageScript}${webHead(manifest)}<div id="exact-root"${manifest.audio_sessio
 ${webAudioSession(manifest, contentFiles['audio-session.js'])}${args.includes('--inline')
   // The entry, marked so a renderer finds it (page.rs `js_entry`); an inline one names the external one, which a rendered
   // page's capture script imports.
-  ? `<script type="module" data-entry="./${contentFiles['app.js']}">${readFileSync(resolve(out, contentFiles['app.js']), 'utf8').replaceAll('</script', '<\\/script')}</script>`
+  ? `<script type="module" data-entry="./${contentFiles['app.js']}">${readFileSync(resolve(out, contentFiles['app.js']), 'utf8')}</script>`
   : `<script type="module" data-entry src="./${contentFiles['app.js']}"></script>`}
 `);
 if (production && !opt('--plan')) {
@@ -1389,14 +1383,13 @@ if (pageModules) {
     devLogic.push(['native', createHash('sha256').update(JSON.stringify(files.sort(([a], [b]) => a.localeCompare(b)))).digest('hex')]);
   }
 }
-copyStaticTreeIfPresent(resolve(appDir, 'assets'), resolve(out, 'assets'));
-// Copy each imported package's declared web assets from the capture, to /assets/<package>/<path> (LLP 1154 D2;
-// js/bake/src/typescript.mjs `capturedSources`).
+if (servedFrame) await recordFrameAssets(gen, appDir, manifest, rustLinked && builtModule(), frameGpuCrates);
+else for (const tree of ['assets', 'deck']) copyStaticTreeIfPresent(resolve(appDir, tree), resolve(out, tree));
+// Copy each imported package's declared web assets from the capture, to /assets/<package>/<path> (LLP 1154 D2).
 if (ts) for (const { name, path, file } of (await import(resolve(root, 'js/bake/src/typescript.mjs'))).capturedAssets(tsStage)) {
   mkdirSync(dirname(resolve(out, 'assets', name, path)), { recursive: true });
   cpSync(file, resolve(out, 'assets', name, path));
 }
-copyStaticTreeIfPresent(resolve(appDir, 'deck'), resolve(out, 'deck'));
 if (devReload) writeFileSync(resolve(out, '.exact-dev-logic.json'), JSON.stringify({ version: 1, modules: devLogic.sort(([a], [b]) => a.localeCompare(b)) }) + '\n');
 if (storageLazy) writeLazyModules(storageLazy);
 // The plan beside the pages: a render server (either renderer) reads it.
@@ -1469,7 +1462,7 @@ if (pages.length && how === 'rust') {
   // repository has its own, LLP 1153 D1.4): the development profile, which the Linux host an agent drives shares.
   const renderApp = resolveApp(appDir);
   const r = spawnSync('cargo', ['run', ...injectedProfiles(renderApp), '--profile', 'host-dev', '-q', '-p', `${app}-${renderAt}`, '--bin', bin, '--', '--plan', plan, '--name', manifest.name, ...(manifest.app?.origin ? ['--origin', manifest.app.origin] : []), '--shell', resolve(out, 'index.html'), '--build'],
-    { cwd: renderApp.workspace, encoding: 'utf8', maxBuffer: 256 << 20, env: { ...process.env, CARGO_TARGET_DIR: renderApp.target, EXACT_UPDATE_TRUST: 'development' } });
+    { cwd: renderApp.workspace, encoding: 'utf8', maxBuffer: 256 << 20, env: { ...process.env, TZ: 'UTC', CARGO_TARGET_DIR: renderApp.target, EXACT_UPDATE_TRUST: 'development' } });
   let docs;
   try { docs = renderEntryPages(bin, r); } catch (e) { console.error(e.message); process.exit(1); }
   const files = buildPageFiles(out, docs, routes);
@@ -1481,7 +1474,7 @@ if (pages.length && how === 'rust') {
   writeCrawlerFiles(out, docs, manifest.app?.origin, routes);
   console.log(`${out}: ${pages.length} pages rendered by ${bin}`);
 } else if (pages.length && how === 'js') {
-  const r = spawnSync('bun', [resolve(here, 'render.mjs'), out, '--build'], { cwd: root, stdio: 'inherit' });
+  const r = spawnSync('bun', [resolve(here, 'render.mjs'), out, '--build'], { cwd: root, stdio: 'inherit', env: { ...process.env, TZ: 'UTC' } });
   if (r.status !== 0) process.exit(1);
 } else if (how !== 'none' && routes.length) {
   writeCrawlerFiles(out, [], null, routes, siteBase); // robots.txt alone: no page made at build to list

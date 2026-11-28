@@ -161,6 +161,36 @@ extension NavigationHost: NavigationHosting {
         return route.contentViewport
     }
 
+    /// An ordered direct child of a box for scroll-edge discovery, including flat leaves that
+    /// draw as bare `CALayer`s instead of `NodeView`s.
+    enum FlowChild {
+        case view(NodeView)
+        case leaf(FlatLeaf)
+
+        var view: NodeView? { if case .view(let node) = self { node } else { nil } }
+        /// Drawn rect in the parent box's coordinates (matches `NodeView.frame` on the pixel grid).
+        var frame: CGRect {
+            switch self {
+            case .view(let node): node.frame
+            case .leaf(let leaf): leaf.frame
+            }
+        }
+    }
+
+    /// `parent`'s direct children in authored order, including flat leaves when `parent` holds any.
+    static func orderedChildren(of parent: NodeView) -> [FlowChild] {
+        let views = parent.childNodes
+        if let presenter = parent.presenter, let ids = presenter.flats.children(of: parent.id) {
+            let live = Dictionary(views.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            return ids.compactMap { id -> FlowChild? in
+                if let view = live[id] { return .view(view) }
+                if let leaf = presenter.flats.leaves[id] { return .leaf(leaf) }
+                return nil
+            }
+        }
+        return views.map(FlowChild.view)
+    }
+
     /// Follow neutral wrappers only while the named scroller remains the first content at their top
     static func topScroller(_ start: NodeView, target: NodeView?) -> NodeView? {
         guard let target else { return nil }
@@ -170,10 +200,16 @@ extension NavigationHost: NavigationHosting {
                   CATransform3DIsIdentity(node.layer.transform),
                   !node.overflowClips, node.clipPath == nil,
                   node.contentBox().minY <= 0.5 else { return nil }
-            let children = node.container.subviews.compactMap { $0 as? NodeView }.filter(flowingTopContent)
-            guard let first = children.first, abs(first.frame.minY - node.contentBox().minY) < 1,
-                  children.allSatisfy({ $0 === first || $0.frame.minY >= first.frame.maxY - 0.5 }) else { return nil }
-            node = first
+            let children = orderedChildren(of: node).filter { child in
+                switch child {
+                case .view(let view): flowingTopContent(view)
+                case .leaf(let leaf): leaf.isInFlow
+                }
+            }
+            guard let first = children.first, case .view(let firstView) = first,
+                  abs(firstView.frame.minY - node.contentBox().minY) < 1,
+                  children.allSatisfy({ $0.view === firstView || $0.frame.minY >= firstView.frame.maxY - 0.5 }) else { return nil }
+            node = firstView
         }
         return target.scrollView == nil ? nil : target
     }
@@ -227,19 +263,24 @@ extension NavigationHost: NavigationHosting {
     func barButtonItem(_ node: NodeView) -> (bar: UINavigationBar, item: UIBarButtonItem, of: UINavigationItem)? {
         guard !ExactEnv.authoredChrome else { return nil }
         let testId = node.props["testId"]
-        for route in controllers.values {
-            guard let controller = route.navigationController, controller.topViewController === route, barShows(controller),
+        func match(_ items: [UIBarButtonItem]) -> UIBarButtonItem? {
+            items.first(where: { ($0.target as? BarPress)?.id == node.id })
+                ?? items.first(where: { $0.target == nil && testId != nil && $0.accessibilityIdentifier == testId })
+        }
+        // Check active dialog sheet bars first so a presented sheet wins over the covered route beneath (LLP 1156.008.000 D6.3).
+        for dialog in shownDialogBars {
+            guard let controller = dialog.controller, let nav = dialog.navigationController,
+                  controller.presentedViewController == nil, nav.presentedViewController == nil else { continue }
+            let items = (controller.navigationItem.leftBarButtonItems ?? []) + (controller.navigationItem.rightBarButtonItems ?? [])
+            if let item = match(items) { return (nav.navigationBar, item, controller.navigationItem) }
+        }
+        for key in controllers.keys.sorted() {
+            guard let route = controllers[key], let controller = route.navigationController,
+                  controller.topViewController === route, controller.presentedViewController == nil,
+                  route.presentedViewController == nil, barShows(controller),
                   route.viewIfLoaded?.window != nil else { continue }
             let items = (route.navigationItem.leftBarButtonItems ?? []) + (route.navigationItem.rightBarButtonItems ?? [])
-            guard let item = items.first(where: { ($0.target as? BarPress)?.id == node.id })
-                    ?? items.first(where: { $0.target == nil && testId != nil && $0.accessibilityIdentifier == testId }) else { continue }
-            return (shownBar(of: controller), item, route.navigationItem)
-        }
-        // A dialog's sheet bar (DialogBarIOS.swift).
-        for dialog in shownDialogBars {
-            guard let controller = dialog.controller, let nav = dialog.navigationController else { continue }
-            let items = (controller.navigationItem.leftBarButtonItems ?? []) + (controller.navigationItem.rightBarButtonItems ?? [])
-            if let item = items.first(where: { ($0.target as? BarPress)?.id == node.id }) { return (nav.navigationBar, item, controller.navigationItem) }
+            if let item = match(items) { return (shownBar(of: controller), item, route.navigationItem) }
         }
         return nil
     }
@@ -298,6 +339,7 @@ extension NavigationHost: NavigationHosting {
         guard !ExactEnv.authoredChrome, let id = node.props["id"], id == container?.props["navigationBack"] else { return nil }
         for route in controllers.values where backButtonID(route.projectedSource) == node.id {
             guard let nav = route.navigationController, nav.topViewController === route, barShows(nav),
+                  nav.presentedViewController == nil, route.presentedViewController == nil,
                   route.viewIfLoaded?.window != nil else { continue }
             return shownBar(of: nav)
         }

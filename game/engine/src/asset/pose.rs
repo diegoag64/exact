@@ -46,11 +46,32 @@ mod shown_tests {
 
     #[test]
     fn a_pose_is_blended_on_the_tick_it_stepped_and_held_after() {
-        let p = Pose { previous: vec![0.0; 10], local: vec![1.0; 10], stepped: Some(7), ..Default::default() };
-        assert_eq!(p.shown(7), (&[0.0; 10][..], &[1.0; 10][..]), "the tick it stepped: from the last pose to this one");
-        assert_eq!(p.shown(8), (&[1.0; 10][..], &[1.0; 10][..]), "a tick held: this pose, still");
-        let unstepped = Pose { previous: vec![0.0; 10], local: vec![1.0; 10], ..Default::default() };
-        assert_eq!(unstepped.shown(3).0, &[0.0; 10][..], "a pose no step wrote is drawn as it was given");
+        let p = Pose {
+            previous: vec![0.0; 10],
+            local: vec![1.0; 10],
+            stepped: Some(7),
+            ..Default::default()
+        };
+        assert_eq!(
+            p.shown(7),
+            (&[0.0; 10][..], &[1.0; 10][..]),
+            "the tick it stepped: from the last pose to this one"
+        );
+        assert_eq!(
+            p.shown(8),
+            (&[1.0; 10][..], &[1.0; 10][..]),
+            "a tick held: this pose, still"
+        );
+        let unstepped = Pose {
+            previous: vec![0.0; 10],
+            local: vec![1.0; 10],
+            ..Default::default()
+        };
+        assert_eq!(
+            unstepped.shown(3).0,
+            &[0.0; 10][..],
+            "a pose no step wrote is drawn as it was given"
+        );
     }
 }
 

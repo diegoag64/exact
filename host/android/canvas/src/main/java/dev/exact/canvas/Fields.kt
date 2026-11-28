@@ -74,12 +74,34 @@ internal class FieldText(context: Context) : EditText(unadjusted(context)) {
      * what its author named it; null while that tree does not have it. The field reports itself, as any `EditText`
      * does: this only says where, and by what name. */
     var stand: Access.Stand? = null
-    override fun performAccessibilityAction(action: Int, arguments: android.os.Bundle?): Boolean =
-        stand?.node?.performCustom(action) == true || super.performAccessibilityAction(action, arguments)
+    override fun performAccessibilityAction(action: Int, arguments: android.os.Bundle?): Boolean {
+        if (stand?.node?.performCustom(action) == true) return true
+        if (keyListener == null && action == android.view.accessibility.AccessibilityNodeInfo.ACTION_SET_TEXT) return false
+        return super.performAccessibilityAction(action, arguments)
+    }
 
     override fun onInitializeAccessibilityNodeInfo(info: android.view.accessibility.AccessibilityNodeInfo) {
         super.onInitializeAccessibilityNodeInfo(info)
+        if (keyListener == null) {
+            info.isEditable = false
+            info.removeAction(android.view.accessibility.AccessibilityNodeInfo.AccessibilityAction.ACTION_SET_TEXT)
+        }
         stand?.place(info)
+    }
+
+    override fun getAutofillType(): Int =
+        if (keyListener == null) AUTOFILL_TYPE_NONE else super.getAutofillType()
+
+    override fun autofill(value: android.view.autofill.AutofillValue?) {
+        if (keyListener == null) return
+        super.autofill(value)
+    }
+
+    override fun onTextContextMenuItem(id: Int): Boolean {
+        if (keyListener == null && (id == android.R.id.cut || id == android.R.id.paste ||
+                id == android.R.id.pasteAsPlainText || id == android.R.id.replaceText ||
+                id == android.R.id.undo || id == android.R.id.redo)) return false
+        return super.onTextContextMenuItem(id)
     }
 
     /** Bold Text's step is in the weight the field is given ([unadjusted]): a change of the device's font weight
@@ -171,6 +193,7 @@ internal class Fields(context: Context) : FrameLayout(context) {
         var look: IntArray? = null
         /** The count of the person's edits here, and the last told to exact2. */
         var edits = 0
+        var answered = 0
         var edited = false
         var moved = false
         /** Whether its text composes, as exact2 was last told. */
@@ -180,6 +203,11 @@ internal class Fields(context: Context) : FrameLayout(context) {
         /** What the action key says it does ([Native.fieldAction]'s numbers), and whether Enter breaks a line. */
         var action = 0
         var multiline = false
+        /** The input type [style] last chose from the field's look, even while read-only clears `text.inputType`. */
+        var rawInputType = 0
+        /** Whether the field is read-only (`READONLY`) or suppresses the soft keyboard (`READONLY` or `NO_KEYBOARD`). */
+        var readonly = false
+        var noKeyboard = false
         /** The colours of its caret and of its handles, and those its drawables were last given. */
         var caret = 0
         var accent = 0
@@ -194,12 +222,14 @@ internal class Fields(context: Context) : FrameLayout(context) {
 
     private val fields = HashMap<Int, Field>()
     private val byView = HashMap<View, Field>()
+    private val fieldVis = android.graphics.RectF()
     private val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
     /** The reader is changing a field itself (a value exact2 told, a focus it asked for): nothing to tell back. */
     private var quiet = false
     /** The field that holds the focus, and the one exact2 asked the focus for before it was told of it. */
     private var focused: Field? = null
     private var wanted = 0
+    private var wantedKeyboard = true
     private var scheduled = false
     private var flushing = false
     /** `x_log_fields=1` (exact2's EXACT_LOG_FIELDS): each edit told to exact2, with the composing region, to the log. */
@@ -272,6 +302,7 @@ internal class Fields(context: Context) : FrameLayout(context) {
     fun adopted(by: ExactView) {
         view = by
         away = false
+        by.nativeOrigins.tracksFields = fields.isNotEmpty()
         for (f in fields.values) f.dirty = true
     }
 
@@ -300,7 +331,7 @@ internal class Fields(context: Context) : FrameLayout(context) {
             var f = fields[id]
             // A view made for a field exact2 already knows (the activity was made again) starts at exact2's count
             // of its edits, and so takes the value told with it.
-            if (f == null) f = make(id, generation).also { it.edits = w[i + 12] }
+            if (f == null) f = make(id, generation).also { it.edits = w[i + 12]; it.answered = it.edits }
             // Its node is another row's item now (LLP 1078): the view starts over, with nothing of the last one's.
             else if (f.generation != generation) renew(f, generation)
             val placed = w[i + 2] and PLACED != 0
@@ -326,7 +357,10 @@ internal class Fields(context: Context) : FrameLayout(context) {
             position(f)
             // The value answers the field's newest edit, or it is older than what the person has typed since.
             val current = w[i + 12] == f.edits
-            if (current && value != f.text.text.toString()) replace(f, value)
+            if (current) {
+                if (value != f.text.text.toString()) replace(f, value, f.answered != f.edits)
+                if (!f.composing) f.answered = f.edits
+            }
             val rev = w[look + 15]
             if (rev != f.select) {
                 f.select = rev
@@ -336,7 +370,8 @@ internal class Fields(context: Context) : FrameLayout(context) {
             i = end
         }
         if (fields.size > seen.size) for (f in fields.values.filter { !seen.contains(it.id) }) release(f)
-        if (wanted != 0) fields[wanted]?.let { focus(it.id) }
+        view?.nativeOrigins?.tracksFields = fields.isNotEmpty()
+        if (wanted != 0) fields[wanted]?.let { focus(it.id, wantedKeyboard) }
         if (log && fields.size != had) Log.i(TAG, "fields: ${w[0]} told, $had held before, ${(System.nanoTime() - began) / 1000} us")
     }
 
@@ -468,14 +503,24 @@ internal class Fields(context: Context) : FrameLayout(context) {
      * limits, not the app's: its `maxlength`, and the characters its keyboard's kind admits (a number field's key
      * listener drops a "." the app sets, and the caret was then put past the end of what was left: a crash, seen on
      * a Pixel with Shelf's own test of its pages field). */
-    private fun replace(f: Field, value: String) {
+    private fun replace(f: Field, value: String, filtered: Boolean) {
         val e = f.text.editableText ?: return
         val old = e.toString()
         val start = f.text.selectionStart; val end = f.text.selectionEnd
-        val at = { o: Int ->
-            if (o < 0) value.length
-            else if (o <= old.length && value.endsWith(old.substring(o))) value.length - (old.length - o)
-            else min(o, value.length)
+        var prefix = 0
+        val limit = min(old.length, value.length)
+        while (prefix < limit && old[prefix] == value[prefix]) prefix++
+        var suffix = 0
+        while (suffix < limit - prefix && old[old.lastIndex - suffix] == value[value.lastIndex - suffix]) suffix++
+        val oldEnd = old.length - suffix
+        val newEnd = value.length - suffix
+        fun at(offset: Int) = when {
+            offset < 0 -> value.length
+            !filtered -> if (offset <= old.length && value.endsWith(old.substring(offset)))
+                value.length - (old.length - offset) else min(offset, value.length)
+            offset <= prefix -> offset
+            offset < oldEnd -> min(offset, newEnd)
+            else -> newEnd + (offset - oldEnd)
         }
         quiet = true
         try {
@@ -486,7 +531,7 @@ internal class Fields(context: Context) : FrameLayout(context) {
             e.filters = filters
             val n = e.length
             val a = min(at(start), n); val b = min(at(end), n)
-            f.text.setSelection(min(a, b), max(a, b))
+            if (filtered) f.text.setSelection(a, b) else f.text.setSelection(min(a, b), max(a, b))
         } finally { quiet = false }
         if (f.text.isFocused) imm.restartInput(f.text)
         // Where the caret is now, for the app's next `input`.
@@ -503,7 +548,7 @@ internal class Fields(context: Context) : FrameLayout(context) {
 
     private fun renew(f: Field, generation: Int) {
         f.generation = generation
-        f.edits = 0; f.edited = false; f.moved = false; f.select = 0; f.composing = false
+        f.edits = 0; f.answered = 0; f.edited = false; f.moved = false; f.select = 0; f.composing = false
         quiet = true
         // A new text and a new history: nothing of the last item's is undone into this one.
         try { f.text.setText("") } finally { quiet = false }
@@ -529,8 +574,65 @@ internal class Fields(context: Context) : FrameLayout(context) {
         val what = w[at]; val keyboard = w[at + 1]; val enter = w[at + 3]
         val text = f.text
         f.multiline = what and MULTILINE != 0
+        val fixed = what and READONLY != 0
+        val wasNoKeyboard = f.noKeyboard
         val type = inputType(what, keyboard, w[at + 2])
-        if (text.inputType != type) text.inputType = type
+        val typeChanged = f.rawInputType != type
+        f.rawInputType = type
+        // Read-only: it shows and selects, and takes no key and no keyboard. With no key listener its input type is
+        // TYPE_NULL, and a TextView then selects nothing (`textCanBeSelected`), so it is made selectable as a
+        // read-only TextView is: it focuses, selects and copies, and offers no cut and no paste. Guard redundant
+        // setters while read-only so unrelated style updates do not restart input or clear selection; input-type
+        // changes while read-only still preserve focus and selection. Leaving read-only restores the key listener,
+        // interaction flags, focus and selection `setTextIsSelectable(false)` clears.
+        val clearPassword = {
+            if (what and PASSWORD == 0 && text.transformationMethod is android.text.method.PasswordTransformationMethod)
+                text.transformationMethod = null
+        }
+        if (fixed) {
+            val wasFocused = text.isFocused
+            val selStart = text.selectionStart; val selEnd = text.selectionEnd
+            if (typeChanged) {
+                clearPassword()
+                text.inputType = type
+            }
+            if (text.keyListener != null) text.keyListener = null
+            val needSelect = !text.isTextSelectable
+            if (needSelect || typeChanged) {
+                if (needSelect) text.setTextIsSelectable(true)
+                else if (text.movementMethod !is android.text.method.ArrowKeyMovementMethod)
+                    text.movementMethod = android.text.method.ArrowKeyMovementMethod.getInstance()
+                if (wasFocused && f.flags and INERT == 0 && !text.isFocused) text.requestFocus()
+                if (selStart >= 0 && selEnd >= 0) {
+                    val n = text.length()
+                    text.setSelection(selStart.coerceIn(0, n), selEnd.coerceIn(0, n))
+                }
+            }
+        } else if (f.readonly || text.isTextSelectable) {
+            val wasFocused = text.isFocused
+            val selStart = text.selectionStart; val selEnd = text.selectionEnd
+            text.setTextIsSelectable(false)
+            clearPassword()
+            text.inputType = type
+            text.movementMethod = android.text.method.ArrowKeyMovementMethod.getInstance()
+            text.isClickable = true
+            text.isLongClickable = true
+            if (f.flags and INERT == 0) {
+                text.isFocusable = true
+                text.isFocusableInTouchMode = true
+                if (wasFocused && !text.isFocused) text.requestFocus()
+            }
+            if (selStart >= 0 && selEnd >= 0) {
+                val n = text.length()
+                text.setSelection(selStart.coerceIn(0, n), selEnd.coerceIn(0, n))
+            }
+        } else if (text.inputType != type) {
+            clearPassword()
+            text.inputType = type
+        }
+        f.readonly = fixed
+        f.noKeyboard = fixed || keyboard == NO_KEYBOARD
+        if (f.noKeyboard && !wasNoKeyboard && text.isFocused) hide()
         // Its type after its input type, which sets a password in a monospace face.
         face(text, fl(w[at + 11]), w[at + 12], what and ITALIC != 0, fl(w[at + 13]), fl(w[at + 14]), family, axes, features)
         f.action = when {
@@ -565,10 +667,7 @@ internal class Fields(context: Context) : FrameLayout(context) {
         if (text.hint?.toString() != placeholder) text.hint = placeholder
         val off = what and DISABLED != 0
         if (text.isEnabled == off) text.isEnabled = !off
-        // Read-only: it shows and selects, and takes no key and no keyboard.
-        val fixed = what and READONLY != 0
-        if (fixed) text.keyListener = null
-        text.showSoftInputOnFocus = !fixed && keyboard != NO_KEYBOARD
+        text.showSoftInputOnFocus = !f.noKeyboard
         val hints = hints(autocomplete)
         text.importantForAutofill = if (autocomplete == "off") View.IMPORTANT_FOR_AUTOFILL_NO else View.IMPORTANT_FOR_AUTOFILL_AUTO
         text.setAutofillHints(*hints)
@@ -606,7 +705,7 @@ internal class Fields(context: Context) : FrameLayout(context) {
 
     private fun position(f: Field) {
         val inert = f.flags and INERT != 0
-        if (f.text.isFocusable == inert) {
+        if (f.text.isFocusable == inert || f.text.isFocusableInTouchMode == inert) {
             // A field that is covered while it holds the focus (a route was pushed over its own) gives the focus up
             // itself, before it stops being focusable. Left to the platform, a view that can no longer hold the
             // focus drops it with the keyboard still up and still connected to it: the page on top then sat under
@@ -625,14 +724,19 @@ internal class Fields(context: Context) : FrameLayout(context) {
             f.text.translationX = 0f; f.text.translationY = 0f
             return
         }
-        val g = if (f.group != 0) view?.group(f.group) else null
-        f.atX = (f.x + (g?.translationX ?: 0f)).roundToInt().toFloat()
-        f.atY = (f.y + (g?.translationY ?: 0f)).roundToInt().toFloat()
+        val gx = if (f.group != 0) view?.groupOffsetX(f.group) ?: 0f else 0f
+        val gy = if (f.group != 0) view?.groupOffsetY(f.group) ?: 0f else 0f
+        f.atX = (f.x + gx).roundToInt().toFloat()
+        f.atY = (f.y + gy).roundToInt().toFloat()
         // The port is the field's box within its clip: Android gives a drag to the frontmost view under it that takes
         // drags, and looks no further than that view's children, so a port larger than its field would keep a drag
         // from the fields under it (LLP 1094.001 D5)
         var left = f.atX; var top = f.atY; var right = f.atX + f.w; var bottom = f.atY + f.h
-        if (f.clipW >= 0f) {
+        if (f.group != 0 && view?.hasParentGroup(f.group) == true &&
+            view?.fieldVisible(f.node, f.w.toFloat(), f.h.toFloat(), fieldVis) == true) {
+            if (fieldVis.isEmpty) { left = 0f; top = 0f; right = 0f; bottom = 0f }
+            else { left = fieldVis.left; top = fieldVis.top; right = fieldVis.right; bottom = fieldVis.bottom }
+        } else if (f.clipW >= 0f) {
             left = max(left, f.clipX); top = max(top, f.clipY)
             right = min(right, f.clipX + f.clipW); bottom = min(bottom, f.clipY + f.clipH)
         }
@@ -650,16 +754,26 @@ internal class Fields(context: Context) : FrameLayout(context) {
 
     // The focus and the keyboard.
 
-    /** exact2 asks the keyboard for field [id] ([Requests], kind 6): the field takes the focus and its keyboard
-     * shows. A field the reader has not been told of yet takes it when it is. */
-    fun focus(id: Int) {
-        val f = fields[id] ?: run { wanted = id; return }
-        wanted = 0
+    /** exact2 asks focus for field [id] ([Requests], kind 6): the field takes the focus and shows its keyboard when
+     * [keyboard] is true and the field accepts one; otherwise any open keyboard is hidden without blurring the field.
+     * A field the reader has not been told of yet takes it when it is. */
+    fun focus(id: Int, keyboard: Boolean = true) {
+        val f = fields[id] ?: run { wanted = id; wantedKeyboard = keyboard; return }
         if (!f.text.isFocused) {
             quiet = true
-            try { f.text.requestFocus() } finally { quiet = false }
+            val took = try { f.text.requestFocus() } finally { quiet = false }
+            if (!took) {
+                wanted = id; wantedKeyboard = keyboard
+                if (!keyboard || f.noKeyboard) hide()
+                return
+            }
         }
-        if (android.os.Build.VERSION.SDK_INT >= 30) f.text.windowInsetsController?.show(WindowInsets.Type.ime()) else Legacy.showKeyboard(f.text)
+        wanted = 0
+        if (keyboard && !f.noKeyboard) {
+            if (android.os.Build.VERSION.SDK_INT >= 30) f.text.windowInsetsController?.show(WindowInsets.Type.ime()) else Legacy.showKeyboard(f.text)
+        } else {
+            hide()
+        }
     }
 
     /** exact2 says no hosted field holds the focus: the one that did lets go of it and the keyboard goes. Where

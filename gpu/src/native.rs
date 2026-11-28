@@ -128,25 +128,9 @@ pub fn load(
 fn create_gpu(
     requirements: &[crate::grants::Requirements],
 ) -> Result<crate::Gpu, crate::DeviceFailure> {
-    // A provider that owns the Vulkan objects (a headset's runtime) makes them.
-    #[cfg(target_os = "android")]
-    if let Some(made) = crate::vulkan::create_gpu(requirements) {
+    #[cfg(any(target_os = "android", windows))]
+    if let Some(made) = crate::vulkan::headset_gpu(requirements) {
         return made;
-    }
-    // On a PC (docs/quest.md, "PC VR on Windows") a provider that refused
-    // leaves the window its ordinary device: the provider is cleared and
-    // the reason logged, and the host hears that no session was made.
-    #[cfg(windows)]
-    match crate::vulkan::create_gpu(requirements) {
-        Some(Ok(gpu)) => return Ok(gpu),
-        Some(Err(e)) => {
-            crate::vulkan::log(&format!(
-                "the headset's device failed ({e}); the window makes its own"
-            ));
-            // SAFETY: null clears the provider.
-            unsafe { crate::vulkan::set_provider(std::ptr::null()) };
-        }
-        None => {}
     }
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::PRIMARY,
@@ -263,6 +247,7 @@ pub fn create_headless(name: &str) -> u32 {
 pub fn poll_input_before_draw(id: u32) {
     with(|m| {
         if let Some(i) = m.instances.get_mut(&id) {
+            i.poll_input = true;
             i.surface.poll_input_before_draw();
         }
     });
@@ -321,6 +306,7 @@ pub fn storage_path(bytes: &[u8]) -> Option<std::path::PathBuf> {
 /// wgpu's own thread-locals may already be gone by then, and dropping a device
 /// without them aborts the process.
 pub fn unload() {
+    crate::wake::unload();
     let module = MODULE.with(|m| m.borrow_mut().take());
     drop(module);
 }
@@ -589,6 +575,16 @@ pub fn sync() -> u32 {
     }
 }
 
+/// Snapshot `id`'s retained Metal children texture into `previous` and wait
+/// for GPU reads to finish before the host overwrites it (LLP 1008 §9). 0 on success.
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+pub fn prepare_texture_metal(id: u32) -> u32 {
+    match with(|m| m.prepare_texture_metal(id)) {
+        Some(true) => 0,
+        _ => 1,
+    }
+}
+
 /// The canvas's children as a Metal texture the host rendered, imported as
 /// it is (LLP 1008 §9). 0 on success.
 ///
@@ -609,24 +605,10 @@ pub unsafe fn texture_from_metal(id: u32, width: u32, height: u32, raw: *mut c_v
 /// 1014, nested canvases). 0 on success, 2 on success when the surface wants
 /// another frame, 1 on failure, 3 when the device is unavailable.
 pub fn readback(id: u32, width: f32, height: f32, scale: f32, now_ms: f64, out: &mut [u8]) -> u32 {
-    let frame = Frame {
-        width,
-        height,
-        scale,
-        now_ms,
-        children_generation: 0,
-        seekable: false,
-        period_ms: 0.0,
-        shader_generation: 0,
-        headroom: 1.0,
-    };
-    match with(|m| m.readback_into(id, &frame, out)).flatten() {
-        Some(true) => 2,
-        Some(false) => 0,
-        None if with(|m| m.instances.contains_key(&id) && m.gpu().is_none()).unwrap_or(false) => 3,
-        None => 1,
-    }
+    capture(id, width, height, scale, now_ms, Some(out))
 }
+
+pub use crate::readback::{capture, enable_frame_samples, sampled_frame};
 
 /// Current instance policy: bit 0 promises alpha one; bit 1 requests SDR;
 /// bit 2 discards the retained picture.
@@ -850,14 +832,9 @@ pub fn on_presented(callback: Option<extern "C" fn()>) {
     crate::frame::on_presented(callback);
 }
 
-/// Where canvas `id`'s immersive subject stands ([`Module::xr_focus`]).
-pub fn xr_focus(id: u32) -> Option<[f32; 3]> {
-    with(|m| m.xr_focus(id)).flatten()
-}
-
-/// How canvas `id` drew its last stereo frame ([`Module::xr_stereo_mode`]).
-pub fn xr_stereo_mode(id: u32) -> &'static str {
-    with(|m| m.xr_stereo_mode(id)).unwrap_or("none")
+/// Register the presenter's callback for [`crate::SurfaceWaker::wake`]; `None` removes and drains it.
+pub fn on_wake(callback: Option<extern "C" fn()>) {
+    crate::wake::on_wake(callback);
 }
 
 /// Drop a canvas's surface.
@@ -1179,6 +1156,14 @@ macro_rules! module {
             $crate::native::sync()
         }
 
+        /// Snapshot `id`'s retained Metal children texture into `previous` and
+        /// wait for GPU reads to complete before overwriting it (LLP 1008 §9).
+        #[cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))]
+        #[no_mangle]
+        pub extern "C" fn gpu_prepare_texture_metal(id: u32) -> u32 {
+            $crate::native::prepare_texture_metal(id)
+        }
+
         /// The canvas's children as a Metal texture the host rendered (LLP
         /// 1008 §9): imported as it is. 0 on success.
         ///
@@ -1387,6 +1372,27 @@ macro_rules! module {
         #[no_mangle]
         pub extern "C" fn gpu_retier() { $crate::native::retier(); }
 
+        /// Retain presented pixels for an Apple agent drive. Called before creating its canvases.
+        #[no_mangle]
+        pub extern "C" fn gpu_enable_frame_samples() { $crate::native::enable_frame_samples(); }
+
+        /// Present to the agent's offscreen target while the window has no drawable.
+        #[no_mangle]
+        pub extern "C" fn gpu_render_offscreen(id: u32, w: f32, h: f32, scale: f32, at: f64) -> u32 {
+            $crate::native::capture(id, w, h, scale, at, None)
+        }
+
+        /// Copy the settled frame into gpu_out_ptr. Zero means no readable frame.
+        /// # Safety
+        /// `size` receives width, height and flags (bit 0: RGBA16F, 1: P3, 2: opaque).
+        #[no_mangle]
+        pub unsafe extern "C" fn gpu_sample_frame(id: u32, size: *mut [u32; 3]) -> usize {
+            let Some(size) = (unsafe { size.as_mut() }) else { return 0 };
+            let Some((dimensions, pixels)) = $crate::native::sampled_frame(id) else { return 0 };
+            *size = dimensions;
+            EXACT_GPU_OUT.with(|b| { *b.borrow_mut() = pixels; b.borrow().len() })
+        }
+
         /// Output address, valid until the next carry, published, agent, messages or error call.
         #[no_mangle]
         pub extern "C" fn gpu_out_ptr() -> *const u8 { EXACT_GPU_OUT.with(|b| b.borrow().as_ptr()) }
@@ -1452,6 +1458,12 @@ macro_rules! module {
         #[no_mangle]
         pub extern "C" fn gpu_on_presented(callback: Option<extern "C" fn()>) {
             $crate::native::on_presented(callback)
+        }
+
+        /// The presenter's callback for `SurfaceWaker::wake` (LLP 1009 D12); null removes and drains it.
+        #[no_mangle]
+        pub extern "C" fn gpu_on_wake(callback: Option<extern "C" fn()>) {
+            $crate::native::on_wake(callback)
         }
 
         /// Drop a canvas's surface.

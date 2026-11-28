@@ -7,7 +7,9 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36], application = android.app.Application::class)
+// Allow SDK 35 (JDK 17+) and SDK 36 (for apps with minimumOS 16); Gradle pins `robolectric.enabledSdks`
+// to `max(35, minSdk)` so each build runs once on the lowest supported SDK.
+@Config(minSdk = 35, maxSdk = 36, application = android.app.Application::class)
 class ModuleRosterTest {
     @Test fun bakedTagsHaveFactories() {
         val required = System.getProperty("exact.module.tags")?.split(',') ?: return

@@ -5,20 +5,10 @@
 import UIKit
 import ExactKit
 
-/// A split rule the owner read (`SplitRead`), decoded.
-struct HeardSplit {
-    let read: SplitRead
-    let rule: StackSplit?
-    init(_ read: SplitRead, rule: StackSplit?? = nil) {
-        self.read = read
-        self.rule = rule ?? StackSplit(json: read.json)
-    }
-}
-
 extension NavigationHost {
     /// The runner's rule for the stack whose first route is `root`
-    /// (`Runtime.stackSplit`): nil for one that pushes, under the agent's own
-    /// chrome too; `.none` while the runner is busy and cannot answer. It is
+    /// (`Runtime.stackSplit`), where the device admits its split (`admitted`): nil for a
+    /// stack that pushes, under the agent's own chrome too; `.none` while the runner is busy and cannot answer. It is
     /// the answer the last applied batch that could change it carried
     /// (`Batch.split`), so main does not wait on the owner for it, as at a
     /// transition's end while a reply's pump builds a page (LLP 1072 T2). A
@@ -33,13 +23,20 @@ extension NavigationHost {
         guard !ExactEnv.authoredChrome, let root, let session = presenter.session else { return .some(nil) }
         // The tab or window can have a custom primary. An explicit split
         // still uses the runner's row associations when it finds a list.
-        let requested = tabWantsSplit(root) ? StackSplit(list: nil, width: nil, rows: [:]) : nil
+        let requested = tabWantsSplit(root) ? StackSplit(asked: true, list: nil, width: nil, rows: [:]) : nil
         let retained = split?.list.stackRoutes.first === root ? split?.listNode ?? 0 : 0
-        if let heard = heardSplit, heard.read.view == root.node.id, heard.read.retained == retained { return .some(heard.rule ?? requested) }
+        if let heard = heardSplit, heard.read.view == root.node.id, heard.read.retained == retained { return .some(Self.admitted(heard.rule) ?? requested) }
         guard let read = session.runtime.on(busy: nil, { session.runtime.readSplit(root.node.id, retained: retained, sequence: session.runtime.sequence.newest) }) else { return nil }
         heardSplit = HeardSplit(read)
-        return .some(heardSplit?.rule ?? requested)
+        return .some(Self.admitted(heardSplit?.rule) ?? requested)
         #endif
+    }
+
+    /// The runner's rule where the device admits its split, for a stack outside a tab: an iPad's splits where the
+    /// root route asks or the rule finds a list whose rows push (LLP 1127 D19); any other device's only where the
+    /// route asks, since UIKit builds no split an app did not make (D1, D13).
+    static func admitted(_ rule: StackSplit?, idiom: UIUserInterfaceIdiom = UIDevice.current.userInterfaceIdiom) -> StackSplit? {
+        rule?.asked == true || idiom == .pad ? rule : nil
     }
 
     #if os(iOS)
@@ -80,11 +77,13 @@ extension NavigationHost {
 
     func startSplit(_ split: SplitIOS, first: [RouteController]) {
         let list = split.list, detail = split.detail
-        prepareRoutes(Array(first.prefix(1)), in: list)
+        let firstDetail = first.dropFirst().first
+        prepareRoutes(Array(first.prefix(1)), in: list, splitDetail: .incoming(firstDetail))
         prepareRoutes(Array(first.dropFirst()), in: detail)
         // The detail's column keeps its bar, the empty detail's too (LLP 1127 D7)
         detail.setNavigationBarHidden(!barShows(detail), animated: false)
         split.show(first, animated: false)
+        syncSplitBack(split, splitDetail: .incoming(firstDetail))
         for nav in [list, detail] { watchPops(nav) }
     }
 
@@ -108,7 +107,8 @@ extension NavigationHost {
     /// while UIKit moves neither them nor the columns (`changing`). Returns
     /// whether a lifted header or a column move holds the projection.
     func syncSplit(_ split: SplitIOS, _ stack: [RouteController], animated: Bool) -> Bool {
-        prepareRoutes(Array(stack.prefix(1)), in: split.list)
+        let firstDetail = stack.dropFirst().first
+        prepareRoutes(Array(stack.prefix(1)), in: split.list, splitDetail: .incoming(firstDetail))
         prepareRoutes(Array(stack.dropFirst()), in: split.detail)
         let top = split.detailRoutes.last
         let changingRoutes = !split.shown.elementsEqual(stack, by: ===)
@@ -117,6 +117,7 @@ extension NavigationHost {
         let location = stack.count > 1 ? stack.last.flatMap { split.rule?.locations[$0.node.id] } : nil
         let relocated = location != nil && split.topLocation != nil && location != split.topLocation && stack.last === split.detailRoutes.last
         guard split.show(stack, animated: animated, relocated: relocated) else { return split.moving }
+        syncSplitBack(split, splitDetail: .incoming(firstDetail))
         split.topLocation = location
         if changingRoutes { lastTransition = "idle" }
         // A press that opened a detail may hand its control's focus to the arriving route's first autofocus (PressHandoffIOS)
@@ -157,9 +158,11 @@ extension NavigationHost {
             }
             return
         }
-        prepareRoutes(Array(routes.prefix(1)), in: columns.list)
+        let firstDetail = routes.dropFirst().first
+        prepareRoutes(Array(routes.prefix(1)), in: columns.list, splitDetail: .incoming(firstDetail))
         prepareRoutes(Array(routes.dropFirst()), in: columns.detail)
         guard columns.show(routes, animated: false) else { tabsHeld = true; return }
+        syncSplitBack(columns, splitDetail: .incoming(firstDetail))
         columns.pressedRows = columns.pressedRows.filter { id, _ in routes.contains { $0.node.id == id } }
         columns.sidebarRow = detailRow(columns, in: columns.rule, base: routes.dropFirst().first)
         if let list = columns.listNode { presenter.groupedLists?.sync(changed: [list]) }
@@ -199,6 +202,7 @@ extension NavigationHost {
     /// which routes are live (`routesShown`) and a sync its move held follow.
     func splitChanged() {
         guard let split else { return }
+        syncSplitBack(split)
         // Nested, N1's bar is UIKit's; N0's shows the top of the column on top (`showBar`)
         if !split.nested { showBar(split.detail, animated: false) }
         showBar(split.list, animated: false)
@@ -251,7 +255,7 @@ extension NavigationHost {
         guard let split else { return ([], []) }
         let columns = split.showing, over = presenter.modalHost.routes
         if over.isEmpty { return columns }
-        return ([], over.allSatisfy { $0.kind == "modal" } ? columns.beside + columns.under : [])
+        return ([], over.allSatisfy { NavigationRules.sheetLike($0.kind) } ? columns.beside + columns.under : [])
     }
 
     /// Each route the split shows beside the stack's top or under a pane

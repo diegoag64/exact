@@ -45,6 +45,7 @@ mod provenance;
 pub(crate) mod readers;
 mod regions;
 mod replacement;
+mod root_fit;
 mod segments;
 mod session_update;
 pub(crate) mod targets;
@@ -61,8 +62,8 @@ pub(crate) use block::{apply as apply_block, publication_start, Blocks};
 pub use block::{BlockAxis, BlockMeasure, BlockShown, HostBlock};
 pub(crate) use cover::{
     apply as apply_cover, chain_changed as cover_chain_changed,
-    children_changed as cover_children_changed, contributed_padding as cover_padding,
-    style_changed as cover_style_changed,
+    children_changed as cover_children_changed, contributed_padding as cover_padding, is_room,
+    restyle as restyle_cover, room_moves, style_changed as cover_style_changed,
 };
 pub use cover::{credited_edges, HostCover};
 pub use edge_bar::BarEdgeEffect;
@@ -393,11 +394,13 @@ pub struct Kernel {
     detached: bool,
     /// List rows mounted out of their port that hold an animation waiting
     /// for the row to show (`-exact-animation-trigger: view`, LLP 1055 D13).
-    pub(crate) awaiting: crate::id::IdSet<ViewId>,
+    pub(crate) awaiting: crate::id::IdSet<NodeKey>,
     /// The measurer's revision its symbols were last measured under, `None`
     /// before this kernel's measurer measured any: a new one asks about
     /// every symbol again (`measure_symbols`).
     symbol_revision: Option<u64>,
+    /// Paragraphs whose inline-image box changed outside a commit (`inline_image_resized`).
+    pub(crate) inline_image_paragraphs: Vec<NodeKey>,
     /// This kernel as a holder of wide colours, for the table's sweep.
     wide: crate::style::wide::Holder,
 }
@@ -496,6 +499,7 @@ impl Kernel {
             detached: false,
             awaiting: Default::default(),
             symbol_revision: None,
+            inline_image_paragraphs: Vec::new(),
             wide: Default::default(),
         }
     }
@@ -664,17 +668,14 @@ impl Kernel {
             // the shell too. No failed derived cache is reused on recovery.
             self.layout = Some(Box::new(LayoutTree::rebuild(&mut self.arena)));
         }
-        let counted = result.is_ok() && region.provisional_chrome;
-        if counted {
-            self.provisional_layouts += 1;
-        }
+        let provisional = region.provisional_chrome;
         let mut result = result?;
         // Top-layer subtrees are independent of the region's publication.
         if let Err(e) = self.lay_out_blocks(slot, &mut result.shell) {
             self.layout = Some(Box::new(LayoutTree::rebuild(&mut self.arena)));
             return Err(e.into());
         }
-        if !counted && engine(&mut self.layout).provisional_chrome() {
+        if provisional || engine(&mut self.layout).provisional_chrome() {
             self.provisional_layouts += 1;
         }
         Ok(result)
@@ -753,6 +754,8 @@ impl Kernel {
         self.imply_blocks();
         engine(&mut self.layout).present_heights(&self.arena, presented);
         // The root, then each subtree a host gave a block (LLP 1115.002 D8.2).
+        // The root in the window's aspect-fit guide, where a host fits it to one (LLP 1123 D16)
+        let offer = self.root_offer(slot, offer);
         let first = self.lay_out_roots(slot, offer);
         // Measure every observation again after a pass that failed, whose frames no receipt names
         if first.is_err() {
@@ -1081,6 +1084,8 @@ impl Kernel {
             (!self.on_demand).then(|| Box::new(LayoutTree::new()) as Box<dyn LayoutMirror>);
         self.selectors.clear();
         self.receipts.clear();
+        self.awaiting.clear();
+        self.inline_image_paragraphs.clear();
         self.incarnation += 1;
         self.epoch += 1;
         self.wide_changed();
@@ -1115,6 +1120,7 @@ impl Kernel {
             detached: self.detached,
             awaiting: Default::default(),
             symbol_revision: None,
+            inline_image_paragraphs: Vec::new(),
             wide: Default::default(),
         }
         .published()
@@ -1140,6 +1146,8 @@ mod cover_tests;
 mod measure_block_tests;
 #[cfg(test)]
 mod presented_height_tests;
+#[cfg(test)]
+mod root_fit_tests;
 #[cfg(test)]
 mod top_layer_tests;
 

@@ -1,4 +1,4 @@
-use super::super::items;
+use super::super::received::items;
 use super::*;
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -7,17 +7,54 @@ fn types(text: &str, url: &str) -> Vec<&'static str> {
     let lifts = Lifts::default();
     lifts.held.set(Some(Press { seat: 1, serial: 2 }));
     let lift = Lift {
+        id: 7,
         text: text.into(),
         url: url.into(),
         files: Vec::new(),
+        assets: exact_painted::image::Assets::embedded(PathBuf::new()),
+        app: None,
         picture: None,
         hotspot: (0., 0.),
     };
     assert!((lifts.lifter().lift)(lift), "a held press takes the lift");
-    let Some(Command::Lift { offers, .. }) = lifts.take() else {
+    let Some(Command::Lift { offers, lift, .. }) = lifts.take() else {
         panic!("the lift waits to go");
     };
+    assert_eq!(lift, 7, "the lift goes by the presenter's number");
     offers.iter().map(|(mime, _)| *mime).collect()
+}
+
+/// LLP 1094.000 D16: Wayland's `enter` names an offer, not its source, so
+/// the window knows its own lift's offer by the lift's own type, unique in
+/// and among processes: another client's offer, an enter before the lift's
+/// own, or another lift's, is no lift's.
+#[test]
+fn the_windows_own_lift_is_known_by_its_own_type_alone() {
+    let (first, second) = (own_type(), own_type());
+    assert_ne!(first, second);
+    let pid = std::process::id();
+    assert!(
+        first.starts_with(&format!("application/x-exact-lift-{pid}-")),
+        "{first}"
+    );
+    let offer = |types: &[&str]| types.iter().map(|t| t.to_string()).collect::<Vec<_>>();
+    let waiting = [first.as_str(), second.as_str()];
+    let foreign = offer(&[TEXTS[0], URI_LIST]);
+    assert_eq!(
+        offered(waiting.into_iter(), &foreign),
+        None,
+        "another client's drag"
+    );
+    let another_process = offer(&[TEXTS[0], &format!("application/x-exact-lift-{}-0", pid + 1)]);
+    assert_eq!(
+        offered(waiting.into_iter(), &another_process),
+        None,
+        "another Exact app's"
+    );
+    assert_eq!(
+        offered(waiting.into_iter(), &offer(&[TEXTS[0], &second])),
+        Some(1)
+    );
 }
 
 #[test]
@@ -38,9 +75,12 @@ fn a_lift_offers_its_text_and_its_link_by_their_own_types() {
 fn a_lift_with_no_left_press_held_is_declined() {
     let lifts = Lifts::default();
     let lift = Lift {
+        id: 7,
         text: "Fuji".into(),
         url: String::new(),
         files: Vec::new(),
+        assets: exact_painted::image::Assets::embedded(PathBuf::new()),
+        app: None,
         picture: None,
         hotspot: (0., 0.),
     };
@@ -135,4 +175,151 @@ fn an_icon_at_a_fractional_scale_is_shown_at_its_size_in_points() {
         (33, 22),
         "the picture and the gained pixel, to whole points"
     );
+}
+
+/// A key request the listener holds, its copies made: its pipe closes,
+/// with no key, once its registration has not answered by 10 seconds after
+/// the later of the request and the copies' end, and the registration is
+/// told, so a key that comes later is stopped; a key that came in time goes
+/// out with GTK's terminal NUL by that deadline.
+#[test]
+fn a_key_request_closes_by_its_deadline_whatever_its_registration_does() {
+    let held = |registration: Registration, requested: Instant| {
+        let staging = Staging::new(
+            Vec::new(),
+            exact_painted::image::Assets::embedded(PathBuf::new()),
+            None,
+        );
+        staging.made(Default::default());
+        let (reader, writer) = std::io::pipe().unwrap();
+        assert!(super::super::nonblocking(&reader));
+        let answer = Arc::new(Mutex::new(registration));
+        let keyed = Keyed {
+            pipe: std::fs::File::from(std::os::fd::OwnedFd::from(writer)),
+            requested,
+            staging,
+            answer: answer.clone(),
+        };
+        (Keys { keyed: vec![keyed] }, reader, answer)
+    };
+    let open = |reader: &mut std::io::PipeReader| {
+        let mut byte = [0; 1];
+        !matches!(reader.read(&mut byte), Ok(0))
+    };
+    let now = Instant::now();
+    let expired = now + DEADLINE + Duration::from_secs(1);
+
+    let (mut keys, mut reader, answer) = held(Registration::Waiting, now);
+    assert!(keys.settle(now).is_empty());
+    assert!(open(&mut reader), "the registration still has time");
+    assert!(keys.settle(expired).is_empty());
+    assert!(
+        !open(&mut reader),
+        "its time ended: the target reads the pipe's end"
+    );
+    assert!(
+        matches!(*answer.lock().unwrap(), Registration::Abandoned),
+        "a key that comes later is stopped"
+    );
+
+    let later = now + Duration::from_secs(5);
+    let (mut keys, mut reader, _) = held(Registration::Waiting, later);
+    assert!(keys.settle(expired).is_empty());
+    assert!(
+        open(&mut reader),
+        "a request after the copies has its own 10 seconds"
+    );
+
+    let transfer = exact_painted::file_transfer::Transfer {
+        key: "1a2b".into(),
+        connection: 1,
+    };
+    let (mut keys, _reader, _) = held(Registration::Answered(Some(transfer)), now);
+    let mut sends = keys.settle(now);
+    assert_eq!(sends.len(), 1);
+    assert_eq!(&*sends[0].bytes, b"1a2b\0");
+    assert!(sends[0].deadline > now + DEADLINE - Duration::from_secs(1));
+    sends[0].key = None;
+}
+
+/// A key goes only by its deadline, though its pipe is ready after it, and
+/// is stopped only when not all its characters went: the terminal NUL alone
+/// failing, as when the target stops reading after the key, leaves a key the
+/// receiver takes.
+#[test]
+fn a_key_goes_by_its_deadline_and_is_kept_once_its_characters_went() {
+    let sending = |at: usize| {
+        let (reader, writer) = std::io::pipe().unwrap();
+        assert!(super::super::nonblocking(&writer));
+        let sending = Sending {
+            pipe: std::fs::File::from(std::os::fd::OwnedFd::from(writer)),
+            bytes: b"1a2b\0".as_slice().into(),
+            at,
+            deadline: Instant::now() + Duration::from_secs(60),
+            key: Some(exact_painted::file_transfer::Transfer {
+                key: "1a2b".into(),
+                connection: 1,
+            }),
+        };
+        (sending, reader)
+    };
+    let now = Instant::now();
+    let (mut whole, reader) = sending(4);
+    drop(reader);
+    whole.write(&|| now);
+    assert_eq!(
+        (whole.at, whole.deadline <= now),
+        (4, true),
+        "its NUL failed, which ends it"
+    );
+    assert_eq!(
+        whole.unfinished_key(),
+        None,
+        "a key without its NUL is taken"
+    );
+    whole.key = None;
+    let (mut cut, reader) = sending(2);
+    drop(reader);
+    cut.write(&|| now);
+    assert_eq!(
+        cut.unfinished_key().map(|t| t.key.as_str()),
+        Some("1a2b"),
+        "a key cut short is stopped"
+    );
+    cut.key = None;
+
+    let (mut late, _reader) = sending(0);
+    let deadline = late.deadline;
+    late.write(&|| deadline);
+    assert_eq!(late.at, 0, "a ready pipe hears nothing past the deadline");
+    late.write(&|| now);
+    assert_eq!(late.at, 5, "before it, the key and its NUL go in one write");
+
+    // The deadline passes during a pass: the write after it does not start
+    let (reader, writer) = std::io::pipe().unwrap();
+    assert!(super::super::nonblocking(&writer));
+    let mut long = Sending {
+        pipe: std::fs::File::from(std::os::fd::OwnedFd::from(writer)),
+        bytes: vec![b'.'; 1 << 20].into(),
+        at: 0,
+        deadline: now + Duration::from_secs(10),
+        key: None,
+    };
+    let reads = std::cell::Cell::new(0);
+    let deadline = long.deadline;
+    let clock = || {
+        reads.set(reads.get() + 1);
+        if reads.get() == 1 {
+            now
+        } else {
+            deadline
+        }
+    };
+    long.write(&clock);
+    assert!(
+        long.at > 0 && long.at <= 1 << 16,
+        "one write, then the clock passed the deadline: {}",
+        long.at
+    );
+    drop(reader);
 }

@@ -40,6 +40,11 @@ class DragOutTest {
             lateinit var saved: File
             @JvmStatic @Implementation fun __staticInitializer__() {}
             @JvmStatic @Implementation fun journal(line: String) { lines += line }
+            /** The lifts the platform began, and those it began no drag for (LLP 1094.000 D16). */
+            val began = ArrayList<Int>()
+            val refused = ArrayList<Int>()
+            @JvmStatic @Implementation fun liftBegan(lift: Int) { began += lift }
+            @JvmStatic @Implementation fun liftEnded(lift: Int, taken: Boolean) { if (!taken) refused += lift }
             @JvmStatic @Implementation fun assetRoot(): String? = null
             @JvmStatic @Implementation fun openApp(path: String): android.os.ParcelFileDescriptor? =
                 if (path == "app:/data/saved.txt" && saved.isFile) android.os.ParcelFileDescriptor.open(saved, android.os.ParcelFileDescriptor.MODE_READ_ONLY) else null
@@ -50,10 +55,11 @@ class DragOutTest {
      * step. */
     @Test fun theRequestReadsAsThePresenterWritesIt() {
         val words = intArrayOf(7, 10, 20, 30, 40, 15, 25, 1, 4, 1768584518, 21, 1886680168, 791624307, 1835104357, 778398832,
-            795701091, 49, 2, 12, 1702064993, 1630499700, 1735290926, 15, 980447329, 1952539695, 778186593, 6710384)
+            795701091, 49, 2, 12, 1702064993, 1630499700, 1735290926, 5, 1852845665, 103, 15, 980447329, 1952539695, 778186593,
+            6710384, 9, 1702129486, 1685073523, 102, 3)
         val ask = DragOut.read(intArrayOf(99) + words, 1)
         assertEquals(DragOut.Ask(7, Rect(10, 20, 40, 60), Point(15, 25), true, "Fuji", "https://example.com/1",
-            listOf("assets/a.png", "app:/data/b.pdf")), ask)
+            listOf(DragOut.Dragged("assets/a.png", "a.png"), DragOut.Dragged("app:/data/b.pdf", "Notes.pdf")), 3), ask)
     }
 
     @Test fun aShippedFileAnAppFileTheUrlAndTheTextAreItsItems() {
@@ -61,7 +67,8 @@ class DragOutTest {
         File(assets, "assets/fuji.png").writeText("png")
         Journal.saved.writeText("saved")
 
-        val clip = DragOut.clip(context, "Mount Fuji", "https://example.com/1016", listOf("assets/fuji.png", "app:/data/saved.txt"))!!
+        val clip = DragOut.clip(context, "Mount Fuji", "https://example.com/1016",
+            listOf(DragOut.Dragged("assets/fuji.png", "fuji.png"), DragOut.Dragged("app:/data/saved.txt", "saved.txt")))!!
 
         assertEquals(4, clip.itemCount)
         val authority = "${context.packageName}.exact.files"
@@ -69,6 +76,7 @@ class DragOutTest {
         assertEquals(authority, clip.getItemAt(0).uri.authority)
         assertEquals(listOf("shipped", "assets", "fuji.png"), clip.getItemAt(0).uri.pathSegments)
         assertEquals(listOf("app", "data", "saved.txt"), clip.getItemAt(1).uri.pathSegments)
+        assertNull("a file offered under its own name carries none", clip.getItemAt(0).uri.query)
         assertEquals("https://example.com/1016", clip.getItemAt(2).text)
         assertNull("a URL is no content to open", clip.getItemAt(2).uri)
         assertEquals("Mount Fuji", clip.getItemAt(3).text)
@@ -79,14 +87,34 @@ class DragOutTest {
         assertEquals(listOf<String>(), Journal.lines)
     }
 
+    /** A named file's URI still names its source, which types it, and carries the name it is offered under, which the
+     * provider answers as its display name and the drag's label shows (LLP 1094.000 D14). */
+    @Test fun aNamedFileIsOfferedUnderItsName() {
+        shadowOf(android.webkit.MimeTypeMap.getSingleton()).addExtensionMimeTypeMapping("jpg", "image/jpeg")
+        File(assets, "assets/apple/1016.jpg").apply { parentFile!!.mkdirs(); writeText("jpeg") }
+        val clip = DragOut.clip(context, "", "", listOf(DragOut.Dragged("assets/apple/1016.jpg", "Mount Fuji & Hakone?.jpg")))!!
+        val uri = clip.getItemAt(0).uri
+        assertEquals(listOf("shipped", "assets", "apple", "1016.jpg"), uri.pathSegments)
+        assertEquals("Mount Fuji & Hakone?.jpg", uri.getQueryParameter("name"))
+        assertEquals("Mount Fuji & Hakone?.jpg", clip.description.label)
+        assertTrue(clip.description.hasMimeType("image/jpeg"))
+        val provider = org.robolectric.Robolectric.setupContentProvider(Files::class.java, uri.authority)
+        provider.query(uri, null, null, null, null).use { row ->
+            row.moveToFirst()
+            assertEquals("Mount Fuji & Hakone?.jpg", row.getString(row.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME)))
+        }
+        assertEquals("image/jpeg", provider.getType(uri))
+        assertEquals("jpeg", provider.openFile(uri, "r").use { android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes().decodeToString() })
+    }
+
     /** A missing file, one outside the assets that exists, and an unknown scheme are left out and journaled; with
      * nothing else, there is no drag, and with no file there is no label. */
     @Test fun aFileTheAppDoesNotHaveIsLeftOut() {
         File(context.filesDir, "outside.txt").writeText("not shipped")
         val refused = listOf("assets/missing.png", "../outside.txt", "file:///etc/hosts", "app:/data/gone")
-        assertNull(DragOut.clip(context, "", "", refused))
+        assertNull(DragOut.clip(context, "", "", refused.map { DragOut.Dragged(it, it.substringAfterLast('/')) }))
         assertEquals(refused.map { "drag: $it could not be read: the app has no such file, so the drag leaves it out" }, Journal.lines)
-        val clip = DragOut.clip(context, "kept", "", listOf("assets/missing.png"))!!
+        val clip = DragOut.clip(context, "kept", "", listOf(DragOut.Dragged("assets/missing.png", "missing.png")))!!
         assertEquals("kept", clip.getItemAt(0).text.toString())
         assertNull("other windows see the label before any drop", clip.description.label)
     }
@@ -98,7 +126,7 @@ class DragOutTest {
         val view = View(context)
         val clip = DragOut.clip(context, "Mount Fuji", "", emptyList())!!
         val activity = org.robolectric.Robolectric.buildActivity(android.app.Activity::class.java).get()
-        val start = { DragOut.start(activity, view, Rect(0, 0, 10, 10), Point(5, 5), clip) }
+        val start = { DragOut.start(activity, view, Rect(0, 0, 10, 10), Point(5, 5), clip, DragOut.Lift(1, activity)) }
         val notBegun = "drag: not begun: the finger held for it lifted before its shadow was drawn"
         val tried = "drag: the platform began no drag: another drag is under way, or the view left its window"
         fun touch(action: Int, at: Long, pointers: Int = 1) {
@@ -144,20 +172,24 @@ class DragOutTest {
         val clip = DragOut.clip(context, "Mount Fuji", "", emptyList())!!
         fun touch(action: Int, at: Long) = DragOut.touched(android.view.MotionEvent.obtain(at, at, action, 0f, 0f, 0))
 
+        Journal.began.clear(); Journal.refused.clear()
         touch(android.view.MotionEvent.ACTION_DOWN, 1); DragOut.held(1)
-        DragOut.start(activity, view, Rect(0, 0, view.width, view.height), Point(5, 5), clip)
+        DragOut.start(activity, view, Rect(0, 0, view.width, view.height), Point(5, 5), clip, DragOut.Lift(1, activity))
         touch(android.view.MotionEvent.ACTION_UP, 1); touch(android.view.MotionEvent.ACTION_DOWN, 2)
         HeldCopy.held.removeAt(0)()
         assertEquals(listOf("drag: not begun: the finger held for it lifted before its shadow was drawn"), Journal.lines)
 
         DragOut.held(2)
-        DragOut.start(activity, view, Rect(0, 0, 2560, 1600), Point(5, 5), clip)
+        DragOut.start(activity, view, Rect(0, 0, 2560, 1600), Point(5, 5), clip, DragOut.Lift(2, activity))
         assertTrue(HeldCopy.sizes.last().let { it.x * it.y <= 1024 * 1024 })
+        assertEquals("nothing begun before the copy arrives", emptyList<Int>(), Journal.began)
         HeldCopy.held.removeAt(0)()
         assertEquals("one more line would be a drag not begun", 1, Journal.lines.size)
+        assertEquals("the lift that began is told, once its call returned", listOf(2), Journal.began)
+        assertEquals("the lift whose finger lifted first is told it began no drag", listOf(1), Journal.refused)
 
         // While the window has yet to hear an earlier drag's end, none begins.
-        DragOut.start(activity, view, Rect(0, 0, 10, 10), Point(5, 5), clip) { true }
+        DragOut.start(activity, view, Rect(0, 0, 10, 10), Point(5, 5), clip, DragOut.Lift(3, activity)) { true }
         HeldCopy.held.removeAt(0)()
         assertEquals(DragOut.UNHEARD, Journal.lines.last())
         touch(android.view.MotionEvent.ACTION_UP, 2)
