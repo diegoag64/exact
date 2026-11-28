@@ -1,4 +1,4 @@
-import { fixtureResponse, parseFaults } from '../host/web/faults.js';
+import { fixtureResponse, fixtureStream, parseFaults } from '../host/web/faults.js';
 export { faultSpecOf } from '../host/web/faults.js';
 import {gameNonInput, proofInputFiles, executionInputFiles} from '../game/inputs.mjs';
 export {gameNonInput} from '../game/inputs.mjs';
@@ -617,7 +617,7 @@ export function parseFlags(argv) {
     else if (argv[i] === '--timing') flags.timing = value();
     else if (argv[i] === '--touch') flags.touch = value();
     else if (argv[i] === '--chrome') flags.chrome = value();
-    else if (argv[i] === '--phone' || argv[i] === '--display') flags[argv[i].slice(2)] = value(); // --display: a Mac drive's window's display (LLP 1012, "where a driven Mac window opens")
+    else if (argv[i] === '--phone' || argv[i] === '--display' || argv[i] === '--only') flags[argv[i].slice(2)] = value(); // --display: a Mac drive's window's display (LLP 1012, "where a driven Mac window opens")
     else if (argv[i] === '--sim') flags.sim = value();
     else if (argv[i] === '--variant') { process.env.EXACT_VARIANT = value(); delete process.env.EXACT_VARIANT_APP; }
     else if (argv[i] === '--storage') flags.storage = value();
@@ -717,7 +717,8 @@ export function parityScript({ mediaClock = 'wall', lineHeight = null } = {}) {
 export function faultSpec(spec) {
   const lines = String(spec ?? '').split('\n').filter(l => l.trim());
   for (const line of lines) {
-    const [prefix, ...fields] = line.split('\t'), counts = fields.slice(0, 4); if (fields[4]) fixtureResponse(JSON.parse(fields[4]));
+    const [prefix, ...fields] = line.split('\t'), counts = fields.slice(0, 4);
+    if (fields[4]) { const o = JSON.parse(fields[4]), st = o && typeof o === 'object' && o.stream !== undefined && o.status === undefined; if (st) { const s = fixtureStream(o.stream); if (fields[6]?.toUpperCase() === 'HEAD' && s.steps !== undefined) throw new Error('answer stream: explicit `method HEAD` cannot declare a streaming 2xx schedule'); } else fixtureResponse(o); }
     if (!prefix) throw new Error('fail fetch: each fault names a non-empty URL prefix');
     if (fields.length > 7 || (fields[5] !== undefined && !/^\d+$/.test(fields[5])) || counts.some((c, i) => !(c === '-' || /^\d+$/.test(c)) && !(i === 3 && /^[01]$/.test(c)))) throw new Error(`fail fetch: an unreadable fault line: ${JSON.stringify(line)}`);
     if (counts[0] === '0') throw new Error('fail fetch: `times` is a positive integer');
@@ -776,7 +777,7 @@ export function launchFacts({seed, locale, formatLocale, timeZone, epoch, failFe
 }
 
 export function launchEnvironment(facts, host) {
-  return {...(facts.substitutes && host !== 'web' ? {EXACT_AGENT_SUBSTITUTES: JSON.stringify({ values: facts.substitutes, restore: !!facts.restoreSubstitutes, target: host })} : {}), EXACT_AGENT_SEED: String(facts.seed), EXACT_AGENT_LOCALE: facts.locale, EXACT_AGENT_TIME_ZONE: facts.timeZone, EXACT_AGENT_EPOCH: String(facts.epoch), ...(facts.formatLocale ? {EXACT_AGENT_FORMAT_LOCALE: facts.formatLocale} : {}), ...(facts.failFetch ? {EXACT_AGENT_FAIL_FETCH: facts.failFetch} : {})};
+  return {...(facts.substitutes && host !== 'web' ? {EXACT_AGENT_SUBSTITUTES: JSON.stringify({ values: facts.substitutes, restore: !!facts.restoreSubstitutes, target: host })} : {}), ...(host !== 'web' ? {TZ: facts.timeZone} : {}), EXACT_AGENT_SEED: String(facts.seed), EXACT_AGENT_LOCALE: facts.locale, EXACT_AGENT_TIME_ZONE: facts.timeZone, EXACT_AGENT_EPOCH: String(facts.epoch), ...(facts.formatLocale ? {EXACT_AGENT_FORMAT_LOCALE: facts.formatLocale} : {}), ...(facts.failFetch ? {EXACT_AGENT_FAIL_FETCH: facts.failFetch} : {})};
 }
 
 // Each carrier checks the inputs its build recorded (LLP 1012.001.000 D1).
@@ -1069,7 +1070,7 @@ export function refuseBackendOrigin(build, app, command = null) {
     `Rebuild for ${selected.origin}${command ? ` (${command})` : ''}, or select this baked backend explicitly with --backend ${actual}`);
 }
 
-/** Backend metadata for carriers without the default Apple build check. A portable executable's record is bound
+/** Check and return the baked backend for carriers without the default Apple build check. A portable executable's record is bound
  * to its bytes; an interrupted bake cannot authorize the executable left from the preceding build. A packaged
  * Windows directory carries its own receipt (host/windows/build.mjs `writePackagedReceipt`), since the bake cache
  * keeps only a target's latest build and a directory packaged before it would lose its record. */
@@ -1087,6 +1088,7 @@ export function refuseBinaryBackend(bin, app, { receipt, packaged = false, comma
     if (existsSync(receipt)) build = JSON.parse(readFileSync(receipt, 'utf8')).build;
   } else build = boundSettings(bin);
   refuseBackendOrigin(build, app, command);
+  return build?.backendOrigin;
 }
 
 /** An Apple build's receipt: its Rust and Swift inputs by digest, then by mtime the app's own files the receipt leaves out on purpose (the root build script's watches: the contract, app.json, data, shaders, assets — what the baked plan and bundle are made from). */
@@ -1198,7 +1200,7 @@ export function webInputPresent(app, path) {
 }
 
 /** Changed inputs of the build in `dist`; modification times nominate candidates, digests compare their bytes. */
-export function webChanges(dist, app) {
+export function webChanges(dist, app, sourceRoots = webSourceRoots) {
   const marker = resolve(dist, '.exact-build.json');
   if (!existsSync(marker)) return { app: [], shared: [], all: [] };
   const built = JSON.parse(readFileSync(marker, 'utf8'));
@@ -1209,7 +1211,7 @@ export function webChanges(dist, app) {
   const since = typeof built.inputsAt === 'number' ? built.inputsAt - 2000 : statSync(marker).mtimeMs;
   let inputRoots = built.inputRoots;
   // A root query that fails (Cargo's lock, a manifest) leaves the build unverified: the build says why.
-  if (!inputRoots) try { inputRoots = webSourceRoots(app, built.target === 'js'); } catch { return { app: [], shared: [shown(marker)], all: [shown(marker)] }; }
+  if (!inputRoots) try { inputRoots = sourceRoots(app, built.target === 'js'); } catch { return { app: [], shared: [shown(marker)], all: [shown(marker)] }; }
   const recorded = new Set(inputRoots.filter(root => root.file).map(root => resolve(root.file)));
   const unusedContract = notBuildInput(app.dir, shaderWatchRoots(app), new Set());
   const byContractReceipt = path => contract && path.endsWith('.contract') && !recorded.has(resolve(ROOT, path))
@@ -1398,7 +1400,8 @@ export const cdpEscape = (call) => async () => { for (const type of ['rawKeyDown
 
 /** The lock file of a simulator's display (`['display', udid]`) or of one app on it (`[udid, bundle]`). */
 const simulatorLock = (key) => createHash('sha256').update(JSON.stringify(key)).digest('hex') + '/.lock';
-export const simulatorDisplayLockPath = udid => resolve(simulatorTempDirectory(), 'exact-ios-drives', simulatorLock(['display', udid]));
+const simulatorLockDir = () => resolve(simulatorTempDirectory(), 'exact-ios-drives');
+export const simulatorDisplayLockPath = udid => resolve(simulatorLockDir(), simulatorLock(['display', udid]));
 /** Runs `fn` holding the simulator lock `key`, trying again every 100 ms while another process holds it: `waiting`
  *  is called at the first refusal, and after `timeout` the error says `busy(seconds)`. */
 async function holdSimulator(key, fn, { directory, timeout, busy, waiting = () => {} }) {
@@ -1417,14 +1420,14 @@ async function holdSimulator(key, fn, { directory, timeout, busy, waiting = () =
 
 /** One simulator's display, across every drive and checkout: a capture that reads it (`withDisplay`) holds it, and so
  *  does a launch, which brings its app to the front over another drive's. Runs `fn` holding it. */
-export async function simulatorDisplay(udid, fn, { directory = resolve(simulatorTempDirectory(), 'exact-ios-drives'), timeout = 60000 } = {}) {
+export async function simulatorDisplay(udid, fn, { directory = simulatorLockDir(), timeout = 60000 } = {}) {
   return holdSimulator(['display', udid], fn, { directory, timeout, busy: (s) => `simulator ${udid}'s display busy: another drive still held it after ${s}s` });
 }
 
 /** Runs `fn`, an install or a launch outside a drive (`exact.mjs ios`), holding the lock of each of `bundles` on the
  *  simulator. A drive holds its app's from launch to close (`exclusiveIOS`), and an install over that app, or another
  *  launch of it, ends it under the drive: another checkout of the app (a git worktree) has the same bundle id. */
-export async function simulatorApps(udid, bundles, fn, { name = udid, directory = resolve(tmpdir(), 'exact-ios-drives'), timeout = 60000 } = {}) {
+export async function simulatorApps(udid, bundles, fn, { name = udid, directory = simulatorLockDir(), timeout = 60000 } = {}) {
   const [bundle, ...rest] = bundles;
   if (!bundle) return fn();
   return holdSimulator([udid, bundle], () => simulatorApps(udid, rest, fn, { name, directory, timeout }), {
@@ -1437,7 +1440,7 @@ export async function simulatorApps(udid, bundles, fn, { name = udid, directory 
 /** The simulator has one running process per bundle id, across every checkout.
  * Hold an OS lock through launch and close; a crashed driver releases it through
  * the helper's stdin. Permanent lock files avoid unlink/reacquire races. */
-export async function exclusiveIOS(udid, bundle, launch, { directory = resolve(tmpdir(), 'exact-ios-drives'), timeout = 60000 } = {}) {
+export async function exclusiveIOS(udid, bundle, launch, { directory = simulatorLockDir(), timeout = 60000 } = {}) {
   const path = simulatorLock([udid, bundle]);
   const started = Date.now();
   let release, holding;

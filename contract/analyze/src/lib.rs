@@ -152,10 +152,17 @@ pub struct Analysis {}
 /// the app's root slot. @ref LLP 1038 D2/D3.
 pub fn check_routes_root(file: &File, root_file: bool) -> Result<(), AnalyzeError> {
     if let Some(routes) = &file.routes {
-        if !root_file || file.components.is_empty() {
+        if !root_file {
             return err(
                 "analyze-routes-not-root",
                 "`routes` belongs to the app's root file",
+                routes.span,
+            );
+        }
+        if file.components.is_empty() {
+            return err(
+                "analyze-routes-not-root",
+                "`routes` belongs in the app's root file beside a `component` declaration (importing a component with `use` alone does not define the root component)",
                 routes.span,
             );
         }
@@ -373,7 +380,7 @@ fn check_tasks(c: &Component) -> Vec<AnalyzeError> {
 
 /// The handler attributes (the web's events, LLP 1005 §3): `press`,
 /// `change`, `input`, `hover`, `focus`, `blur`, `key`, `submit`, `load`, `message`.
-pub const HANDLERS: [&str; 89] = [
+pub const HANDLERS: [&str; 93] = [
     "press",
     "change",
     "input",
@@ -429,10 +436,14 @@ pub const HANDLERS: [&str; 89] = [
     "wheel",
     // DOM's `drop` of files from outside (studio diary R19): each a `doc:`
     // handle in the `DragEvent` its action may take. `dragenter` and
-    // `dragleave` bracket a file drag over the node, with the same record.
+    // `dragleave` bracket a file drag over the node, with the same record,
+    // and `dragstart` and `dragend` a drag of the node itself (LLP 1094.000
+    // D16).
     "drop",
     "dragenter",
     "dragleave",
+    "dragstart",
+    "dragend",
     // A press on an inline atom of a Markdown text or field (LLP 1045.000
     // D7); it may hand its action an `AtomEvent`.
     "atompress",
@@ -454,6 +465,8 @@ pub const HANDLERS: [&str; 89] = [
     "pan",
     // A pan that began ended (LLP 1057 §10.6 phase 2): release velocity.
     "panrelease",
+    "pinch",
+    "pinchrelease",
     "loadedmetadata",
     "durationchange",
     "fullscreenchange",
@@ -555,6 +568,7 @@ pub fn handler_arity(attr: &str, given: usize) -> Option<std::ops::RangeInclusiv
         return (given == 0).then_some(0..=1);
     }
     let payload = match attr {
+        "pinch" | "pinchrelease" => 3,
         "transformgeometry" => 4,
         "transformrelease" => 6,
         "scroll" | "pan" | "panrelease" | "heightrelease" | "reorderdrop" | "resize" => 2,
@@ -735,7 +749,13 @@ fn check_handler(
         }
         if matches!(
             attr,
-            "pan" | "panrelease" | "heightrelease" | "transformgeometry" | "transformrelease"
+            "pan"
+                | "panrelease"
+                | "pinch"
+                | "pinchrelease"
+                | "heightrelease"
+                | "transformgeometry"
+                | "transformrelease"
         ) && params[given..].iter().any(|ty| *ty != Ty::Number)
         {
             return err(
@@ -829,4 +849,23 @@ pub fn resource_clock_warnings(file: &File) -> Vec<AnalyzeError> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod routes_root_tests {
+    use super::*;
+
+    #[test]
+    fn root_routes_without_component_explains_use_import() {
+        let file = contract_syntax::parse("routes nav\n  home \"/\"\n").unwrap();
+        let err = check_routes_root(&file, true).unwrap_err();
+        assert_eq!(err.id, "analyze-routes-not-root", "{err:?}");
+        assert!(
+            err.message.contains("beside a `component` declaration"),
+            "{err:?}"
+        );
+        let imported = check_routes_root(&file, false).unwrap_err();
+        assert_eq!(imported.id, "analyze-routes-not-root");
+        assert_eq!(imported.message, "`routes` belongs to the app's root file");
+    }
 }

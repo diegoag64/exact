@@ -49,13 +49,17 @@ pub fn encode_optional(
             ])
         })
         .collect();
-    let mut body = json!({"turn": 1, "reads": local.reads(), "draws": local.entropy_draws(), "topics": local.take_topics(), "announced": local.take_announced(), "writes": writes, "logs": logs});
+    let mut body = json!({"turn": 1, "reads": local.reads(), "draws": local.entropy_draws(), "clocks": local.clock_reads(), "topics": local.take_topics(), "announced": local.take_announced(), "writes": writes, "logs": logs});
     match result {
         Ok(Some(Answer::Now(value))) => body["value"] = Json::String(base64(&value.to_bytes())),
         // A long poll no host may run (LLP 1016.000 D8) is refused before it crosses: the envelope carries
         // no surface, so its far side couldn't tell.
         Ok(Some(Answer::Later(request))) if request.long_poll_refusal().is_some() => {
             let why = request.long_poll_refusal().unwrap_or_default();
+            body["error"] = error_json(&unavailable(why));
+        }
+        Ok(Some(Answer::Later(request))) if request.stream_open_refusal().is_some() => {
+            let why = request.stream_open_refusal().unwrap_or_default();
             body["error"] = error_json(&unavailable(why));
         }
         // A listener's connections are handles a worker's turn cannot hold,
@@ -145,6 +149,9 @@ pub fn apply_optional(
     for _ in 0..draws {
         store.observe_entropy();
     }
+    for _ in 0..json["clocks"].as_u64().unwrap_or(0) {
+        store.observe_clock();
+    }
     for _ in topics.len() as u64 + draws..json["reads"].as_u64().unwrap_or(0) {
         store.observe_external_read();
     }
@@ -228,6 +235,7 @@ fn error_from(error: &Json) -> DataError {
 fn request_json(request: &Request) -> Json {
     json!({
         "continuation": request.continuation,
+        "local": request.local.then_some(true),
         "max_response_bytes": match request.http {
             HttpScheduling::Ordered => None,
             HttpScheduling::Independent { max_response_bytes } => Some(max_response_bytes),
@@ -239,6 +247,7 @@ fn request_json(request: &Request) -> Json {
         "headers": request.headers,
         "body": base64(&request.body),
         "stream": request.stream,
+        "stream_open": request.stream_open.then_some(true),
         "protocols": request.protocols,
         "upload_progress": request.upload_progress.then_some(true),
         "long_poll": request.long_poll.as_ref().map(|p| json!({
@@ -288,6 +297,7 @@ fn request_from(json: &Json) -> Result<Request, DataError> {
         reach: Default::default(),
         listen: None,
         continuation: json["continuation"].as_u64(),
+        local: json["local"].as_bool().unwrap_or(false),
         http: match &json["max_response_bytes"] {
             Json::Null => HttpScheduling::Ordered,
             value => HttpScheduling::Independent {
@@ -304,6 +314,11 @@ fn request_from(json: &Json) -> Result<Request, DataError> {
         headers,
         body: json["body"].as_str().and_then(unbase64).unwrap_or_default(),
         stream: json["stream"].as_bool().unwrap_or(false),
+        stream_open: match &json["stream_open"] {
+            Json::Null => false,
+            Json::Bool(b) => *b,
+            _ => return Err(unavailable("exactStreamOpen is true or false")),
+        },
         // A worker's stream only listens: its handle is the main thread's
         // (LLP 1016.000 D7, worker-placed streams). Nor does it read a byte
         // stream: a body that is not events is its one answer.
@@ -391,6 +406,7 @@ fn request_from(json: &Json) -> Result<Request, DataError> {
     match request
         .long_poll_refusal()
         .or(request.upload_progress_refusal())
+        .or(request.stream_open_refusal())
     {
         Some(why) => Err(unavailable(format!("turn reply: {why}"))),
         None => Ok(request),
@@ -550,6 +566,18 @@ mod tests {
             Answer::Later(r) => assert_eq!(r, storage),
             _ => panic!("a storage yield"),
         }
+        let mut local_continuation = Request::get("");
+        local_continuation.continuation = Some(9);
+        local_continuation.local = true;
+        let outcome = encode(
+            Ok(Answer::Later(local_continuation.clone())),
+            &mut Store::default(),
+            vec![],
+        );
+        match apply(outcome, &mut live, &mut logs).unwrap() {
+            Answer::Later(r) => assert_eq!(r, local_continuation),
+            _ => panic!("a local continuation yield"),
+        }
     }
 
     #[test]
@@ -652,6 +680,28 @@ mod tests {
             Answer::Later(r) => assert_eq!(r.long_poll, request.long_poll),
             _ => panic!("a yield"),
         }
+    }
+
+    #[test]
+    fn a_worker_s_stream_open_round_trips_and_invalid_ones_are_refused() {
+        let request = Request {
+            stream: true,
+            ..Request::get("https://x.test/events")
+                .independent_http(4096)
+                .stream_open()
+        };
+        let outcome = encode(Ok(Answer::Later(request)), &mut Store::default(), vec![]);
+        match apply(outcome, &mut Store::default(), &mut Vec::new()).unwrap() {
+            Answer::Later(r) => assert!(r.stream && r.stream_open, "{r:?}"),
+            _ => panic!("a yield"),
+        }
+        let invalid = Request::get("https://x.test/events").stream_open();
+        let outcome = encode(Ok(Answer::Later(invalid)), &mut Store::default(), vec![]);
+        let refused = apply(outcome, &mut Store::default(), &mut Vec::new()).unwrap_err();
+        assert!(
+            format!("{refused:?}").contains("exactStreamOpen"),
+            "{refused:?}"
+        );
     }
 
     #[test]

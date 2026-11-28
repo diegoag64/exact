@@ -23,10 +23,13 @@ import java.io.IOException
  * (`View.canAcceptAccessibilityDrop`). It tells exact2's tracker (`presenter/file_drop.rs`) where the drag is: exact2
  * sends the nodes under it their `dragenter` and `dragleave` and finds the innermost node that takes a `drop`. A hosted
  * field tells it too, and gives the root a drag that D2 gives a node ([field]); a drag of text that it keeps it
- * inserts as an `EditText` does. The root and the page's view lie at the same place, so the root's pixels are the
- * view's, which exact2 reads a touch in.
+ * inserts as an `EditText` does. The page's view ([page]) may be inset inside the edge-to-edge root for system bars
+ * or cutouts, so drag points are translated into [page]'s pixels, which exact2 reads a touch in.
  */
 internal class DragIn(private val root: View) {
+    /** The page's view inside [root], whose origin is exact2's (0, 0) once [ExactActivity.chrome] places it. */
+    var page: View? = null
+
     /** Whether the window has heard a drag start and not yet its end ([Root.dragging]). */
     var dragging = false
         private set
@@ -47,13 +50,19 @@ internal class DragIn(private val root: View) {
     fun heard(event: DragEvent): Boolean {
         when (event.action) {
             DragEvent.ACTION_DRAG_STARTED -> { dragging = true; settled = false; carries = carries(event.clipDescription) }
-            DragEvent.ACTION_DRAG_LOCATION -> over(event.x, event.y)
+            DragEvent.ACTION_DRAG_LOCATION -> inPage(root, event).let { (x, y) -> over(x, y) }
             DragEvent.ACTION_DRAG_EXITED -> exited()
-            DragEvent.ACTION_DROP -> return drop(event, event.x, event.y)
+            DragEvent.ACTION_DROP -> inPage(root, event).let { (x, y) -> return drop(event, x, y) }
             DragEvent.ACTION_DRAG_ENDED -> {
                 dragging = false
                 main.removeCallbacks(exit)
                 if (carries && !settled) Exact.dragLeft()
+                // This window's own lift ended, after the leaves it owes: its node hears `dragend` once Android's
+                // call returns, a destination having taken it or not (LLP 1094.000 D16). The event is pooled, so its
+                // result is read now.
+                val lift = own(event)
+                val taken = event.result
+                if (lift != 0) main.post { Exact.liftEnded(lift, taken) }
             }
         }
         return true
@@ -73,13 +82,13 @@ internal class DragIn(private val root: View) {
         return when (event.action) {
             DragEvent.ACTION_DRAG_STARTED -> if (own) true else null
             DragEvent.ACTION_DRAG_LOCATION -> {
-                val (x, y) = inRoot(field, event)
+                val (x, y) = inPage(field, event)
                 over(x, y)
                 if (own) true else null
             }
             DragEvent.ACTION_DRAG_EXITED -> { exited(); null }
             DragEvent.ACTION_DROP -> {
-                val (x, y) = inRoot(field, event)
+                val (x, y) = inPage(field, event)
                 val owner = Exact.fieldDrop(field.node, x, y)
                 val file = owner == 2 && event.clipData?.let { holdsFile(it, field.context.contentResolver) } == true
                 if (owner == -1 || owner == 1 || file) drop(event, x, y) else { landed = x to y; null }
@@ -88,7 +97,7 @@ internal class DragIn(private val root: View) {
         }
     }
 
-    /** Where the drop a field keeps landed, in the root's pixels ([field]). */
+    /** Where the drop a field keeps landed, in the page view's pixels ([field]). */
     private var landed = 0f to 0f
 
     /** A hosted field took the drop, or refused it: the nodes under the drag where it dropped hear the enters it
@@ -99,14 +108,19 @@ internal class DragIn(private val root: View) {
         if (carries) Exact.dragDropped(landed.first, landed.second)
     }
 
-    /** [event]'s point, which Android gives in [field]'s own pixels, in the root's. */
-    private fun inRoot(field: View, event: DragEvent): Pair<Float, Float> {
-        val at = IntArray(2).also(field::getLocationInWindow)
-        val base = IntArray(2).also(root::getLocationInWindow)
+    /** The number of this window's own lift [event] is, 0 for another window's or app's drag. */
+    private fun own(event: DragEvent): Int = (event.localState as? DragOut.Lift)?.takeIf { it.owner === root.context }?.id ?: 0
+
+    /** [event]'s point, which Android gives in [from]'s own pixels, in the page view's. */
+    private fun inPage(from: View, event: DragEvent): Pair<Float, Float> {
+        val target = page ?: root
+        if (from === target) return event.x to event.y
+        val at = IntArray(2).also(from::getLocationInWindow)
+        val base = IntArray(2).also(target::getLocationInWindow)
         return event.x + at[0] - base[0] to event.y + at[1] - base[1]
     }
 
-    /** The drag is at ([x], [y]) in the root's pixels. */
+    /** The drag is at ([x], [y]) in the page view's pixels. */
     private fun over(x: Float, y: Float) {
         main.removeCallbacks(exit)
         if (carries) Exact.dragOver(x, y)
@@ -128,7 +142,7 @@ internal class DragIn(private val root: View) {
         val clip = event.clipData
         if (!carries || clip == null) return false
         settled = true
-        val id = Exact.dropReleased(x, y)
+        val id = Exact.dropReleased(x, y, own(event))
         if (id == 0) return false
         val items = DropItems.read(clip)
         if (items.files.isEmpty()) {
@@ -150,7 +164,7 @@ internal class DragIn(private val root: View) {
             grant = (root.context as? Activity)?.requestDragAndDropPermissions(event)
             // Another app's files are read under the drop's grant alone: one the app could read with its own rights is
             // still not given to it by a drag. The app's own drags need none.
-            if (grant == null && event.localState !== DragOut.OWN) {
+            if (grant == null && event.localState !is DragOut.Lift) {
                 said += "drop: Android granted no read permission for its files, so it delivers its text and link alone"
                 land(emptyList())
                 return true

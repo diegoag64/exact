@@ -151,7 +151,7 @@ fn settle_queued(
         outcome,
         bytes: job.charge,
         message: false,
-        stream: false,
+        stream: None,
         light: false,
         again: false,
         reply: false,
@@ -193,6 +193,7 @@ impl Core {
     fn forget_with(&self, held: impl Fn(u64) -> bool, explicit: &[u64], suspending: bool) {
         let mut aborts = Vec::new();
         let mut cancels = Vec::new();
+        let mut fixture_done = Vec::new();
         {
             let mut guard = self.shared.state.lock().unwrap();
             let state = &mut *guard;
@@ -210,7 +211,6 @@ impl Core {
                             || explicit.contains(&job.ticket))
                     {
                         *counts -= 1;
-                        *streams -= usize::from(job.request.stream);
                         *bytes -= job.charge;
                         return false;
                     }
@@ -237,7 +237,7 @@ impl Core {
                         }
                         *light -= usize::from(done.light);
                         *agains -= usize::from(done.again);
-                        *streams -= usize::from(done.stream);
+                        streams.release(done.stream);
                         *bytes -= done.bytes;
                     }
                     false
@@ -248,7 +248,10 @@ impl Core {
                 let by_app = explicit.contains(&run.ticket);
                 if by_app || (!run.forgotten && !held(run.ticket)) {
                     run.forgotten = true;
-                    let stream = run.stream.then_some(run.ticket);
+                    if run.fixture_stream {
+                        fixture_done.push(run.ticket);
+                    }
+                    let stream = run.stream.is_some().then_some(run.ticket);
                     let abort = if by_app {
                         run.exchange.clone()
                     } else {
@@ -261,13 +264,13 @@ impl Core {
                     }
                 }
             }
-            state.ordered.retain(|ticket| held(*ticket));
+            reads::retain_on_forget(state, &held);
             // A parked upload let go unsent takes its size with it.
             let queued: std::collections::HashSet<u64> =
                 state.jobs.iter().flatten().map(|job| job.ticket).collect();
             state.book.sized.retain(|ticket, _| queued.contains(ticket));
             // A re-ask let go before it found room: dropped, never settled.
-            state.waiting.retain(|ticket| held(*ticket));
+            state.waiting.retain(|(ticket, _)| held(*ticket));
             state.waiting_set.retain(|ticket| held(*ticket));
             let mut kept = VecDeque::new();
             for mut place in std::mem::take(&mut state.fenced) {
@@ -307,6 +310,13 @@ impl Core {
         #[cfg(test)]
         if let Some(before) = self.shared.before_stream_release.lock().unwrap().take() {
             before();
+        }
+        for ticket in fixture_done {
+            complete(
+                &self.shared,
+                ticket,
+                failed(FailureKind::Aborted, "stream fixture closed"),
+            );
         }
         stream::release(&self.shared, aborts, suspending);
         // An upload let go while it waits ends unsent; the places freed may start others.

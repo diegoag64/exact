@@ -22,11 +22,11 @@ struct Schema {
     enums: std::collections::BTreeMap<String, EnumDef>,
     styles: Vec<StyleRow>,
     opcodes: Vec<OpcodeRow>,
-    symbols: Vec<[String; 3]>,
+    symbols: Vec<SymbolRow>,
     #[serde(rename = "symbolAliases")]
     symbol_aliases: Vec<[String; 2]>,
     #[serde(rename = "symbolGlyphs")]
-    symbol_glyphs: Vec<(String, String, String, bool)>,
+    symbol_glyphs: Vec<SymbolGlyphRow>,
     materials: Vec<[String; 7]>,
     #[serde(rename = "buttonStyles")]
     button_styles: Vec<[String; 5]>,
@@ -162,7 +162,7 @@ fn digest(canonical: &str, codecs: &[(&str, String)]) -> u64 {
         // Tests do not define wire bytes, so exclude them and the snapshot itself.
         hasher.update(
             source
-                .split_once("\n#[cfg(test)]\n")
+                .split_once("\n#[cfg(test)]")
                 .map_or(source.as_str(), |(production, _)| production)
                 .as_bytes(),
         );
@@ -181,22 +181,36 @@ fn generate(schema: &Schema, digest: u64) -> String {
     writeln!(
         w,
         "pub const SYMBOL_ROLES: &[&str] = &{:?};",
-        schema.symbols.iter().map(|row| &row[0]).collect::<Vec<_>>()
+        schema
+            .symbols
+            .iter()
+            .map(|row| &row.role)
+            .collect::<Vec<_>>()
     )
     .unwrap();
     writeln!(
         w,
-        "/// Resolve a role to its Apple name, browser path, and whether that path is\n/// filled (even-odd) rather than stroked; never accepts a platform name."
+        "/// Resolve a role to its Apple name, browser path, whether that path is\n/// filled (even-odd) rather than stroked, and whether it mirrors in RTL;\n/// never accepts a platform name."
     )
     .unwrap();
     writeln!(
         w,
-        "pub fn symbol(role: &str) -> Option<(&'static str, &'static str, bool)> {{ match role {{"
+        "pub fn symbol(role: &str) -> Option<(&'static str, &'static str, bool, bool)> {{ match role {{"
     )
     .unwrap();
-    for [role, apple, path] in &schema.symbols {
+    for SymbolRow {
+        role,
+        apple,
+        path,
+        mirror,
+    } in &schema.symbols
+    {
         let filled = role.ends_with("-fill");
-        writeln!(w, "{role:?} => Some(({apple:?}, {path:?}, {filled})),").unwrap();
+        writeln!(
+            w,
+            "{role:?} => Some(({apple:?}, {path:?}, {filled}, {mirror})),"
+        )
+        .unwrap();
     }
     writeln!(w, "_ => None, }} }}").unwrap();
     write_symbol_role(w, schema);
@@ -638,7 +652,7 @@ fn generate(schema: &Schema, digest: u64) -> String {
     // ---- StyleId / StyleCodec --------------------------------------------
     writeln!(w, "/// Wire codec of a style row.").unwrap();
     writeln!(w, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]").unwrap();
-    writeln!(w, "pub enum StyleCodec {{ Dimension, LineHeight, F32, U8, U16, U32, I32, AutoI32, ColorValue, KeywordColor, Vec2, Tracks, Placement, Transitions, Animations, ClipPath, ShapeOutside, AspectRatio, Paint, DashArray, Transform, TransformOrigin, ObjectPosition, PaintOrder, Marker, Filter, BackgroundImage, BackdropFilter, BoxShadow, TextShadow, FontVariations, FontFeatures, MaskImage, CornerShape, RotateAxis, SymbolPalette, DragTimeline, AnimationTimeline, AnimationRange, TimelineScope, SafeAreaProperties, TimelineName, ViewTimelineInset, PositionTryFallbacks, Enum }}").unwrap();
+    writeln!(w, "pub enum StyleCodec {{ Dimension, LineHeight, F32, U8, U16, U32, I32, AutoI32, ColorValue, KeywordColor, Vec2, Tracks, Placement, Transitions, Animations, ClipPath, ShapeOutside, AspectRatio, AspectFit, Paint, DashArray, Transform, TransformOrigin, ObjectPosition, PaintOrder, Marker, Filter, BackgroundImage, BackdropFilter, BoxShadow, TextShadow, FontVariations, FontFeatures, MaskImage, CornerShape, RotateAxis, SymbolPalette, DragTimeline, AnimationTimeline, AnimationRange, TimelineScope, SafeAreaProperties, TimelineName, ViewTimelineInset, PositionTryFallbacks, Enum }}").unwrap();
     writeln!(w, "/// One style row; the discriminant is the mask bit.").unwrap();
     writeln!(w, "#[repr(u16)]").unwrap();
     writeln!(
@@ -1097,7 +1111,7 @@ fn generate(schema: &Schema, digest: u64) -> String {
     .unwrap();
     writeln!(
         w,
-        "            let relative = (self.relative.get(id), patch.relative.get(id));"
+        "            let relative = (self.relative.get_spec(id), patch.relative.get_spec(id));"
     )
     .unwrap();
     // A row written the same relative way is unchanged, whatever pixels

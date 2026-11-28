@@ -356,7 +356,7 @@ test('two iOS launches check once and look up each device once; reinstalls refre
       spawnSync(command, args, options) {
         if (command === 'git') return realSpawnSync(command, args, options);
         if (command === 'contract') {
-          assert.deepEqual(args, ['test', file]);
+          assert.deepEqual(args, ['test', file, '--app', dir]);
           return result(JSON.stringify({ tests: authored, properties: [] }));
         }
         assert.equal(command, 'xcrun'); return simctl(args);

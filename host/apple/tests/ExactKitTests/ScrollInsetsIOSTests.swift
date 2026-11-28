@@ -297,6 +297,31 @@ final class ScrollInsetsIOSTests: XCTestCase {
         XCTAssertEqual([scroll.adjustedContentInset.left, scroll.adjustedContentInset.right], [band.left, band.right])
     }
 
+    func testAScaledScrollerTakesTheBandInItsOwnCoordinates() throws {
+        guard let scene = hostedWindowScene() else { throw missing("scene", "the band is a scene window's safe area") }
+        // D14: a scroller at half scale under its owner, top edges together, clears the owner's top
+        // band with twice its depth in its own points, the insets it is written in
+        let (_, owner) = try scrollView(in: scene)
+        let band = owner.safeAreaInsets
+        try XCTSkipIf(band.top < 1, "no top band on this device")
+        let box = UIView(frame: CGRect(x: 0, y: 0, width: owner.bounds.width * 2, height: owner.bounds.height * 2))
+        box.layer.anchorPoint = .zero
+        box.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
+        box.frame.origin = .zero
+        owner.addSubview(box)
+        let scroll = UIScrollView(frame: box.bounds)
+        scroll.contentSize = CGSize(width: box.bounds.width, height: 10_000)
+        box.addSubview(scroll)
+        owner.layoutIfNeeded()
+        XCTAssertEqual(ScrollInsetsIOS.band(of: scroll, in: owner)[0], band.top * 2, accuracy: 0.01)
+        var never = ScrollInsetsIOS.Rows()
+        never.adjustment = .never
+        ScrollInsetsIOS.write(scroll, in: owner, terms: .init(), rows: never)
+        XCTAssertEqual(scroll.contentInset.top, band.top * 2, accuracy: 0.01, "the owner's band, cleared on screen")
+        let top = owner.convert(CGPoint(x: 0, y: scroll.contentOffset.y + scroll.adjustedContentInset.top), from: scroll).y
+        XCTAssertEqual(top, band.top, accuracy: 0.01, "the inset ends at the band's inner edge on screen")
+    }
+
     func testAScrollerInAnotherTakesNoneOfTheBandThatOneTook() throws {
         guard let scene = hostedWindowScene() else { throw missing("scene", "the band is a scene window's safe area") }
         // An inner scroll view at the top of an outer one's content, the outer scrolled 30 under
@@ -462,6 +487,47 @@ final class ScrollInsetsIOSTests: XCTestCase {
         XCTAssertEqual(scroll.contentInset, UIEdgeInsets(top: 0, left: 0, bottom: 7, right: 0))
         XCTAssertEqual(scroll.contentInsetAdjustmentBehavior, .always)
         XCTAssertTrue(scroll.automaticallyAdjustsScrollIndicatorInsets)
+    }
+
+    /// LLP 1123 D15: a lent table takes the table rows its box says and keeps its module's choice for
+    /// one it does not, a lent flow layout takes the section reference words it has and refuses the
+    /// others, and what the host set is given back as the box stops saying it and on release.
+    func testALentTableAndFlowLayoutTakeTheListRowsTheirBoxSays() {
+        let table = UITableView(frame: .zero, style: .plain)
+        // UIKit's defaults, which the rows' initial values name
+        XCTAssertTrue(table.insetsContentViewsToSafeArea)
+        XCTAssertFalse(table.cellLayoutMarginsFollowReadableWidth)
+        table.cellLayoutMarginsFollowReadableWidth = true
+        let lent = LentScrollIOS(view: table, layout: nil)
+        XCTAssertEqual(lent.list(["list_insets_content_to_safe_area": .number(1)]), [])
+        XCTAssertFalse(table.insetsContentViewsToSafeArea, "false")
+        XCTAssertTrue(table.cellLayoutMarginsFollowReadableWidth, "the module's own where the box says nothing")
+        lent.list(["list_cell_margins_follow_readable_width": .number(0)])
+        XCTAssertTrue(table.insetsContentViewsToSafeArea, "given back as the box stops saying it")
+        XCTAssertFalse(table.cellLayoutMarginsFollowReadableWidth)
+        lent.release()
+        XCTAssertTrue(table.cellLayoutMarginsFollowReadableWidth, "given back on release")
+
+        let flow = UICollectionViewFlowLayout()
+        let lentFlow = LentScrollIOS(view: UICollectionView(frame: .zero, collectionViewLayout: flow), layout: nil)
+        XCTAssertEqual(lentFlow.list(["list_section_insets_reference": .string("safe-area")]), [])
+        XCTAssertEqual(flow.sectionInsetReference, .fromSafeArea)
+        XCTAssertEqual(lentFlow.list(["list_section_insets_reference": .string("readable-content")]), ["readable-content"])
+        XCTAssertEqual(flow.sectionInsetReference, .fromContentInset, "a refused word is as unsaid")
+        lentFlow.list(["list_section_insets_reference": .string("layout-margins")])
+        lentFlow.release()
+        XCTAssertEqual(flow.sectionInsetReference, .fromContentInset, "given back on release")
+
+        // The module replaces the layout it holds: the first gets its own back and the second keeps its own
+        let first = UICollectionViewFlowLayout(), second = UICollectionViewFlowLayout()
+        second.sectionInsetReference = .fromLayoutMargins
+        let collection = UICollectionView(frame: .zero, collectionViewLayout: first)
+        let replaced = LentScrollIOS(view: collection, layout: nil)
+        replaced.list(["list_section_insets_reference": .string("safe-area")])
+        collection.collectionViewLayout = second
+        replaced.release()
+        XCTAssertEqual(first.sectionInsetReference, .fromContentInset, "the first layout's own")
+        XCTAssertEqual(second.sectionInsetReference, .fromLayoutMargins, "the second layout's own")
     }
 
     func testAWriteOutOfAWindowWritesNothing() {

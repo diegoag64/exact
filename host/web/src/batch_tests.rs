@@ -74,6 +74,7 @@ fn cases() -> Vec<(&'static str, String)> {
             Value::list(vec![Value::Number(1.5), Value::Number(-2.0)]),
             Value::str("a\"b"),
         ],
+        colors: vec![],
         types: vec![None, None],
     };
     vec![
@@ -88,6 +89,12 @@ fn cases() -> Vec<(&'static str, String)> {
                     activation: 3,
                     removed: vec![],
                     visits: vec![(1, "/".into()), (5, "/tag/\"x\"?q=1".into())],
+                    roots: vec![1],
+                    tab: "home".into(),
+                    chain: vec![
+                        destination("/", "home"),
+                        destination("/tag/\"x\"?q=1", "home"),
+                    ],
                     pattern: String::new(),
                     params: vec![],
                     due: false,
@@ -105,6 +112,9 @@ fn cases() -> Vec<(&'static str, String)> {
                     activation: 0,
                     removed: vec![1, 22, 333],
                     visits: vec![(18_446_744_073_709_551_615, "/".into())],
+                    roots: vec![18_446_744_073_709_551_615],
+                    tab: String::new(),
+                    chain: vec![destination("/", "")],
                     pattern: String::new(),
                     params: vec![],
                     due: false,
@@ -330,11 +340,11 @@ fn cases() -> Vec<(&'static str, String)> {
 const GOLDEN: &[(&str, &str)] = &[
     (
         "router",
-        r#"{"ops":[{"op":"router","top":5,"url":"/tag/\"x\"?q=1#moves","fragment":"moves","scroll":true,"activation":3,"removed":[],"visits":[[1,"/"],[5,"/tag/\"x\"?q=1"]]}],"timers":false,"clock":0,"error":null}"#,
+        r#"{"ops":[{"op":"router","top":5,"url":"/tag/\"x\"?q=1#moves","fragment":"moves","scroll":true,"activation":3,"removed":[],"visits":[[1,"/"],[5,"/tag/\"x\"?q=1"]],"roots":[1],"tab":"home","chain":[["/","home"],["/tag/\"x\"?q=1","home"]]}],"timers":false,"clock":0,"error":null}"#,
     ),
     (
         "router-removed",
-        r#"{"ops":[{"op":"router","top":18446744073709551615,"url":"/","fragment":"","scroll":false,"activation":0,"removed":[1,22,333],"visits":[[18446744073709551615,"/"]]}],"timers":false,"clock":0,"error":null}"#,
+        r#"{"ops":[{"op":"router","top":18446744073709551615,"url":"/","fragment":"","scroll":false,"activation":0,"removed":[1,22,333],"visits":[[18446744073709551615,"/"]],"roots":[18446744073709551615],"tab":"","chain":[["/",""]]}],"timers":false,"clock":0,"error":null}"#,
     ),
     (
         "collections",
@@ -695,5 +705,64 @@ fn prefetch_is_ignored_for_web_reads_and_refused_for_sends_and_other_work() {
             batch["ops"][0]["message"],
             "exactPrefetch requires a plain HTTP read"
         );
+    }
+}
+
+#[test]
+fn stream_open_is_marked_and_refused_where_the_native_hosts_refuse_it() {
+    let open_req = Request::get("https://api.example/events")
+        .independent_http(4096)
+        .stream_open();
+    let exact_runner::Answer::Later(open_req) = exact_runner::Answer::stream(open_req) else {
+        unreachable!()
+    };
+    let text = one(|b| b.request(&request(1, open_req.clone(), false)));
+    assert!(
+        text.contains(r#","stream":true"#) && text.contains(r#","streamOpen":true"#),
+        "{text}"
+    );
+
+    let mut plain = open_req.clone();
+    plain.stream = false;
+    let mut socket = open_req.clone();
+    socket.url = "wss://api.example/events".into();
+    let mut poll = open_req.clone().long_poll("since", "seq");
+    let mut upload = open_req.clone().upload_progress();
+    upload.method = "POST".into();
+    upload.body = vec![1];
+    poll.stream = true;
+    for (refused, why) in [
+        (
+            plain,
+            "exactStreamOpen reports an HTTP stream's response head on open: give exactStream too",
+        ),
+        (
+            socket,
+            "exactStreamOpen: only an HTTP event or byte stream takes exactStreamOpen",
+        ),
+        (
+            poll,
+            "exactStreamOpen: only an HTTP event or byte stream takes exactStreamOpen",
+        ),
+        (
+            upload,
+            "exactStreamOpen: only an HTTP event or byte stream takes exactStreamOpen",
+        ),
+    ] {
+        assert_eq!(crate::batch::request_refusal(&refused), Some(why));
+        let text = one(|b| b.request(&request(2, refused, false)));
+        assert!(
+            text.contains(r#""op":"refuse""#) && !text.contains("\"streamOpen\""),
+            "{text}"
+        );
+    }
+}
+
+fn destination(url: &str, tab: &str) -> exact_route::Destination {
+    exact_route::Destination {
+        name: String::new(),
+        url: url.into(),
+        tab: tab.into(),
+        params: Default::default(),
     }
 }

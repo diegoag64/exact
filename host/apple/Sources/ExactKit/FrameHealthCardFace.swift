@@ -9,7 +9,7 @@ import Foundation
 enum FrameHealthCardFace {
     enum Status { case live, paused, idle }
     enum Control: Equatable {
-        case close, title, status, details, share, charts, table
+        case close, title, status, clear, details, share, charts, table
         #if os(iOS)
         case minimize
         #endif
@@ -36,11 +36,11 @@ enum FrameHealthCardFace {
         var status = Status.idle
         var request = ("No rate requested", "")
         var display = ""
-        /// Two rows, each a window's name, frame rate in whole frames per second, and missed frames, or late ones where
-        /// the card measures the screen, which `unit` names
-        var rows = [("Last 0.5s", "—", "—"), ("Last 5s", "—", "—")], unit = "missed"
+        /// Two rows, each a window's name, frame rate in whole frames per second, and missed frames or, where the card
+        /// measures the screen, the share of the time it was held up; `lead` and `unit` are the words before and after it
+        var rows = [("Last 0.5s", "—", "—"), ("Last 5s", "—", "—")], lead = "", unit = "missed"
         var pacing = ("—", "")
-        /// What the line under the figures gives, pacing or, where the card measures the screen, the main thread's work,
+        /// What the line under the figures gives, pacing or, where the card measures the screen, the longest hold-up,
         /// and the window it covers: "last 5s", or the span it actually covers
         var pacingName = "Pacing", pacingWindow = "last 5s"
         var table = false
@@ -67,6 +67,21 @@ enum FrameHealthCardFace {
     static let strong = FrameHealthCardDrawing.tabular(FrameHealthCardDrawing.semibold(12))
     package static let title = FrameHealthCardDrawing.semibold(15)
 
+    /// The right edge of a row's second figure: a count in a column as wide as "0000" from 162 points, or a percentage
+    /// after its leading word, at 136 points, in one as wide as "100%".
+    static func secondFigure(lead: String) -> CGFloat {
+        typealias D = FrameHealthCardDrawing
+        return lead.isEmpty ? 162 + D.width("0000", strong) : 136 + D.width(lead, body) + 3.6 + D.width("100%", strong)
+    }
+
+    /// The width the line under the figures gives its label, `name` and its window, in tabular digits: as wide as a
+    /// window named in up to three digits can make it, "last 00.0s" or "last 000s", so the value after it stays put as
+    /// the window's span changes.
+    static func labelWidth(_ label: String, name: String) -> CGFloat {
+        typealias D = FrameHealthCardDrawing
+        return ([label] + ["00.0", "000"].map { "\(name) (last \($0)s)" }).map { D.width($0, digits) }.max() ?? 0
+    }
+
     /// Every region at a card width; sizes are points.
     struct Layout {
         let width: CGFloat
@@ -91,7 +106,9 @@ enum FrameHealthCardFace {
             return CGRect(x: self.width - 6 - width, y: 47, width: width, height: 32)
         }
         private static let doneWidth = ceil(FrameHealthCardDrawing.width("Done", FrameHealthCardFace.strong)) + 16
-        /// The line under the header: the requested rate and the display, and Details
+        var clear: CGRect { CGRect(x: details.minX - Self.clearWidth - 4, y: 47, width: Self.clearWidth, height: 32) }
+        private static let clearWidth = ceil(FrameHealthCardDrawing.width("Clear", FrameHealthCardFace.strong)) + 16
+        /// The line under the header: the requested rate and the display, Clear and Details
         var context: CGRect { CGRect(x: 0, y: 44, width: width, height: 38) }
         /// The title is the definitions button, with 4 points of fill on either side of its text. It stands 2 points plus
         /// Close's room from Close or Minimize, so Close can move in without moving it.
@@ -140,7 +157,7 @@ enum FrameHealthCardFace {
         func control(at point: CGPoint) -> Control? {
             func target(_ rect: CGRect) -> CGRect { rect.insetBy(dx: min(0, (rect.width - 44) / 2), dy: min(0, (rect.height - 44) / 2)) }
             func distance(_ rect: CGRect) -> CGFloat { max(rect.minX - point.x, point.x - rect.maxX, 0) + max(rect.minY - point.y, point.y - rect.maxY, 0) }
-            var buttons = [(Control.close, close), (.title, title), (.status, status), (.share, share), (.details, details)]
+            var buttons = [(Control.close, close), (.title, title), (.status, status), (.share, share), (.details, details), (.clear, clear)]
             #if os(iOS)
             if minimized { return CGRect(x: 0, y: 0, width: width, height: cardHeight).contains(point) ? .minimize : nil }
             if minimizable { buttons.append((.minimize, minimize)) }
@@ -277,8 +294,8 @@ enum FrameHealthCardFace {
         }
         if bands.contains(.header) { header(ctx, layout, state: state, palette: p) }
         if bands.contains(.context) {
-            // Context: the request and any system limit, then the display, short of Details
-            let right = layout.details.minX - 8
+            // Context: the request and any system limit, then the display, short of Clear and Details
+            let right = layout.clear.minX - 8
             let request = state.request.0 + (state.request.1.isEmpty ? "" : " ")
             D.text(ctx, request, x: 12, y: 52, body, p.label, .left, limit: right - 12)
             if !state.request.1.isEmpty {
@@ -286,6 +303,8 @@ enum FrameHealthCardFace {
                 D.text(ctx, "· " + state.request.1, x: x, y: 52, body, p.secondary, .left, limit: max(0, right - x))
             }
             D.text(ctx, state.display, x: 12, y: 68, body, p.secondary, .left, limit: right - 12)
+            fill(ctx, layout, .clear, layout.clear, state: state, palette: p)
+            D.text(ctx, "Clear", x: layout.clear.midX - D.width("Clear", strong) / 2, y: layout.clear.midY, strong, p.label, .left)
             fill(ctx, layout, .details, layout.details, state: state, palette: p)
             if state.showsDetails {
                 D.text(ctx, "Done", x: layout.details.midX - D.width("Done", strong) / 2, y: layout.details.midY, strong, p.label, .left)
@@ -297,14 +316,15 @@ enum FrameHealthCardFace {
         guard !state.showsDetails else { return }
         if bands.contains(.figures) {
             // One row per window, digits right-aligned in reserved tabular columns so nothing moves
-            let digits = D.width("000", strong), count = D.width("0000", strong)
+            let digits = D.width("000", strong), second = Self.secondFigure(lead: state.lead)
             for (index, row) in state.rows.enumerated() {
                 let y = 94 + CGFloat(index) * 18
                 D.text(ctx, row.0, x: 12, y: y, body, p.secondary, .left)
                 D.text(ctx, row.1, x: 78 + digits, y: y, strong, p.label, .right)
                 D.text(ctx, "FPS", x: 78 + digits + 3.6, y: y, body, p.label, .left)
-                D.text(ctx, row.2, x: 162 + count, y: y, strong, p.label, .right)
-                D.text(ctx, state.unit, x: 162 + count + 3.6, y: y, body, p.label, .left)
+                D.text(ctx, state.lead, x: 136, y: y, body, p.label, .left)
+                D.text(ctx, row.2, x: second, y: y, strong, p.label, .right)
+                D.text(ctx, state.unit, x: second + 3.6, y: y, body, p.label, .left)
             }
             separator(ctx, y: 125, width: width, p)
         }
@@ -312,8 +332,8 @@ enum FrameHealthCardFace {
             // A compact card ends with these lines, whose starts move in together where a bottom corner rounds
             let outline = layout.bottomOutline, area = layout.pacingArea
             let x = outline.map { D.fit(D.box(state.pacing.1, x: 12, y: 154, Self.digits, .left), .left, limit: area.width, within: $0).x } ?? 12
-            let label = "\(state.pacingName) (\(state.pacingWindow))", verdict = x + D.width(label, body) + 3.6
-            D.text(ctx, label, x: x, y: 138, body, p.secondary, .left)
+            let label = "\(state.pacingName) (\(state.pacingWindow))", verdict = x + Self.labelWidth(label, name: state.pacingName) + 3.6
+            D.text(ctx, label, x: x, y: 138, Self.digits, p.secondary, .left)
             D.text(ctx, state.pacing.0, x: verdict, y: 138, strong, p.label, .left, limit: area.maxX - verdict, within: outline)
             D.text(ctx, state.pacing.1, x: x, y: 154, Self.digits, p.label, .left, limit: area.maxX - x, within: outline)
         }

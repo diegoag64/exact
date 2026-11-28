@@ -768,7 +768,7 @@
       "id": 262,
       "name": "navigationSplit",
       "kind": "str",
-      "_comment": "@ref LLP 1116.004 D1.2: on a stack's root route, \"none\" keeps a wide window's stack pushed, and a positive width (CSS px, points) is the list column's when the stack splits, splitting a list the host's rule does not find; on iPad, \"split\" on the first route puts a split view in its tab or window at the platform column width, even for a custom primary without a directory list. A tab stays a stack by default. Other hosts keep their own admission and widths. LLP 1127 D19. @ref LLP 1116.006 D2: \"placeholder\" on a box in the root route is the detail pane's while nothing is selected, in place of the platform's; the lowerer makes it `display: none`, which the web shell overrides there."
+      "_comment": "@ref LLP 1127 D1: on a stack's root route, \"split\" or a width, a whole number from 1 to 999999 in digits with no leading zero (CSS px, points: the list column's preferred width), asks for the split, and \"none\" pushes on every host; unsaid, the web and an iPhone push, and the Mac (LLP 1115.002 D4), the painted hosts and an iPad outside a tab (LLP 1127 D19, D22) split a list whose rows push. On iPad, \"split\" on the first route puts a split view in its tab or window at the platform column width, even for a custom primary without a directory list; a tab stays a stack by default. @ref LLP 1116.006 D2: \"placeholder\" on a plain box that is the root route's own child is the detail pane's while nothing is selected, in place of the platform's, and asks for the split; the lowerer makes it `display: none`, which the web shell overrides there."
     },
     {
       "id": 328,
@@ -955,6 +955,11 @@
       "id": 109,
       "name": "preventsDisplaySleepDuringVideoPlayback",
       "kind": "bool"
+    },
+    {
+      "id": 340,
+      "name": "audiovisualBackgroundPlaybackPolicy",
+      "kind": "str"
     },
     {
       "id": 310,
@@ -1520,7 +1525,7 @@
       "id": 225,
       "name": "listStyle",
       "kind": "str",
-      "_comment": "@ref LLP 1084 D2: a grouped list's style, `inset-grouped`, `grouped` or `plain`; set by Contract on every `list` whose appearance is `auto` (UICollectionLayoutListConfiguration.Appearance on iOS)."
+      "_comment": "@ref LLP 1084 D2, LLP 1127 D17: a grouped list's style, `inset-grouped`, `grouped`, `plain` or `sidebar`; set by Contract on every `list` whose appearance is `auto` (UICollectionLayoutListConfiguration.Appearance on iOS; a host with no sidebar list draws `sidebar` as `plain`)."
     },
     {
       "id": 226,
@@ -1721,7 +1726,19 @@
       "id": 317,
       "name": "dataTransferFiles",
       "kind": "str",
-      "_comment": "@ref LLP 1094.000 D2: `DataTransfer(files=)`, newline-joined: each a shipped `assets/` file or an `app:/` path. The runner rewrites it to the entries its file rule admits for the host before a batch is sent. The compiler's, never authored."
+      "_comment": "@ref LLP 1094.000 D2: `DataTransfer(files=)`, newline-joined: each a shipped `assets/` file or an `app:/` path, the entries the runner admits for the host before a batch is sent; a plan compiled before LLP 1094.000 D14 binds it directly. The compiler's and the runner's, never authored."
+    },
+    {
+      "id": 348,
+      "name": "dataTransferEntries",
+      "kind": "str",
+      "_comment": "@ref LLP 1094.000 D14: `DataTransfer(files=, names=)` as the compiler binds them: each file percent-encoded and followed by a line feed, then, with `names=`, U+001E and each name likewise. The runner decodes it, admits each file with its name and writes `dataTransferFiles` and `dataTransferNames`; it reaches no host. The compiler's, never authored."
+    },
+    {
+      "id": 349,
+      "name": "dataTransferNames",
+      "kind": "str",
+      "_comment": "@ref LLP 1094.000 D14: the name a destination is offered for each admitted file, newline-joined beside `dataTransferFiles`, empty for a file's own. The runner's, never authored."
     },
     {
       "id": 255,
@@ -2017,6 +2034,12 @@
       "_comment": "@ref LLP 1115 §2 (what the author writes wins): on a menu's trigger (a `popovertarget` button, a bar button that opens a menu, a node with `contextPopover`), the order its rows show in: `fixed` (as written, wherever the menu opens), `priority` (the first row nearest the finger) or `automatic` (the default: the platform's; UIKit's shows a menu that opens upward last row first). iOS and tvOS set it as `preferredMenuElementOrder`; the other hosts always show the rows as written and ignore it."
     },
     {
+      "id": 350,
+      "name": "keepsMenuPresented",
+      "kind": "bool",
+      "_comment": "@ref LLP 1115 §2 (what the author writes wins): on a menu's popover column (a menu or a submenu) or on one of its rows, whether a pick on the row leaves the menu open. The row's own value wins over its popover's, which reaches no submenu. Unset, a pick closes the menu, the platform's. A row that follows a link, opens something, or hides a menu it is in closes it anyway. iOS sets UIKit's `keepsMenuPresented` on the row and updates the open menu after each pick, except in the edit menu a keyboard's menu key opens; the web keeps a menu open until a row hides it, as before; macOS, tvOS, Android, Linux and Windows close it at every pick and ignore it."
+    },
+    {
       "id": 303,
       "name": "glassInteractive",
       "kind": "bool",
@@ -2098,13 +2121,121 @@
       "id": 326,
       "name": "navigationSizing",
       "kind": "str",
-      "_comment": "@ref LLP 1123 D7: `page` (the default), `form` or `automatic`: a sheet route's presentation, read as the sheet is presented. `page` is UIKit's page sheet, `form` its form sheet (a centred sheet of a standard size in a regular-width window), `automatic` UIKit's choice. UIKit's `modalPresentationStyle`, SwiftUI's `presentationSizing`."
+      "_comment": "@ref LLP 1123 D7: `automatic` (the default), `page` or `form`: a sheet route's presentation, read as the sheet is presented. `automatic` is UIKit's own choice, as it presents a controller that names no style, a form sheet on iOS 18 and later and a page sheet before; `page` is its page sheet, `form` its form sheet (a centred sheet of a standard size in a regular-width window); `fitted` stays out (rules/DEFERRED.md). UIKit's `modalPresentationStyle`, SwiftUI's `presentationSizing`."
     },
     {
       "id": 327,
       "name": "navigationUndimmedDetent",
       "kind": "str",
       "_comment": "@ref LLP 1123 D7: the tallest word of a sheet route's `navigationDetent` at which the sheet dims nothing and is nonmodal: at or below it the screen under the sheet stays live, its touches, its accessibility and its reads, and the sheet begins no modal boundary. Unsaid, every detent dims and the sheet is modal. UIKit's `largestUndimmedDetentIdentifier`, SwiftUI's `presentationBackgroundInteraction(.enabled(upThrough:))`."
+    },
+    {
+      "id": 329,
+      "name": "navigationPopoverAnchor",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D7: the `id` of the element a popover route is anchored to, its source: UIKit's `sourceView`, the anchor's whole box. Read on a route presented as a popover."
+    },
+    {
+      "id": 330,
+      "name": "navigationPopoverMargins",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D7: one to four lengths in points, top right bottom left as `padding` expands them: how far a popover route keeps from the window's edges. UIKit's `popoverLayoutMargins`; unsaid, the platform's."
+    },
+    {
+      "id": 331,
+      "name": "navigationPopoverArrows",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D7: `any`, or any of `up`, `down`, `left` and `right`: the directions a popover route's arrow may point. UIKit's `permittedArrowDirections`; unsaid, any."
+    },
+    {
+      "id": 332,
+      "name": "navigationPopoverOverlapsSource",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D7: `true` or `false` (the default): whether a popover route may cover its anchor where it cannot fit beside it. UIKit's `canOverlapSourceViewRect`."
+    },
+    {
+      "id": 333,
+      "name": "navigationPopoverAdaptation",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D7: `sheet` (the default) or `none`: what a popover route becomes in a compact-width window, a sheet as UIKit adapts it, or still a popover."
+    },
+    {
+      "id": 341,
+      "name": "navigationFullSizeContent",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D7, D16: `true` or `false`: whether AppKit's content runs under its chrome. On a popover route, `NSPopover.hasFullSizeContent` (default `false`); on the window's root route, the window's `.fullSizeContentView` (unsaid, the host's own choice)."
+    },
+    {
+      "id": 342,
+      "name": "navigationSplitItemAdjustsForOverlays",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D15: `true` or `false` (the default) on a route: whether the Mac split item it projects, the page's or the detail's, adjusts its safe area for the sidebars and inspectors overlaid on it. `NSSplitViewItem.automaticallyAdjustsSafeAreaInsets` (macOS 26)."
+    },
+    {
+      "id": 343,
+      "name": "navigationSplitItemFullHeight",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D15: `true` (the default) or `false` on the root tablist or a route's inspector `aside`: whether the sidebar or inspector it projects on the Mac runs the window's full height under full-size content. `NSSplitViewItem.allowsFullHeightLayout`."
+    },
+    {
+      "id": 344,
+      "name": "navigationSplitItemTopAccessory",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D15: on a route, the root tablist or a route's inspector `aside`, the `id` of the element the Mac split item it projects shows at its top, a content owner (D2). `NSSplitViewItem.topAlignedAccessoryViewControllers` (macOS 26)."
+    },
+    {
+      "id": 345,
+      "name": "navigationSplitItemBottomAccessory",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D15: as `navigationSplitItemTopAccessory`, at the item's bottom. `NSSplitViewItem.bottomAlignedAccessoryViewControllers` (macOS 26)."
+    },
+    {
+      "id": 346,
+      "name": "navigationAccessoryContentInsets",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D15: `true` (the default) or `false` on an element a Mac split item shows as an accessory: whether AppKit applies its standard content insets to it. `NSSplitViewItemAccessoryViewController.automaticallyAppliesContentInsets` (macOS 26)."
+    },
+    {
+      "id": 347,
+      "name": "navigationAccessoryScrollEdgeEffect",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D15: `automatic` (the default), `soft` or `hard` on an element a Mac split item shows as an accessory: the edge effect content scrolling behind it takes. `NSSplitViewItemAccessoryViewController.preferredScrollEdgeEffectStyle` (macOS 26.1)."
+    },
+    {
+      "id": 334,
+      "name": "appleMagnification",
+      "kind": "float",
+      "_comment": "@ref LLP 1020.002 §9: the authored pinch scale of a macOS iframe, applied at its top left. https://developer.apple.com/documentation/webkit/wkwebview/setmagnification(_:centeredat:)"
+    },
+    {
+      "id": 335,
+      "name": "navigationExtendedLayout",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D4: `all` (the default), `none`, or the edges `top`, `left`, `bottom` and `right`, each once: the edges under whose translucent bars a route's controller view lies. UIKit's `edgesForExtendedLayout`; the content root follows (D3)."
+    },
+    {
+      "id": 336,
+      "name": "navigationExtendsUnderOpaqueBars",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D4: `true` or `false` (the default): whether a route's controller view lies under opaque bars too. UIKit's `extendedLayoutIncludesOpaqueBars`."
+    },
+    {
+      "id": 337,
+      "name": "navigationVerticalBar",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D4: `automatic` (the default) or `disabled`: whether a route's bars may move into the iPhone Duo's vertical bar. UIKit's `preferredVerticalBarBehavior` (iOS 27.1), which UIKit's containers take from the child that shows."
+    },
+    {
+      "id": 338,
+      "name": "navigationVerticalBarCompression",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D4: `automatic` (the default), `prefers-bar-items` or `prefers-tab-bar`: which compresses first where a route's bar items and the tab bar share the vertical bar. UIKit's `UINavigationItem.verticalBarCompressionBehavior` (iOS 27.1)."
+    },
+    {
+      "id": 339,
+      "name": "navigationWidthFollowsPreferredContentSize",
+      "kind": "str",
+      "_comment": "@ref LLP 1123 D7: `true` or `false` (the default): whether a sheet attached to a compact-height window's bottom edge takes its content's preferred width, as a popover route's sheet in a compact width does. UIKit's `widthFollowsPreferredContentSizeWhenEdgeAttached`."
     }
   ],
   "_enums": "Wire discriminant is the 0-based index. An unknown discriminant is a typed decode rejection, never a fallback. refused: keywords the wire carries and the compiler refuses an author, because no presenter builds them (LLP 1043.000 §3 D1); `contract vocab` lists the others. No wire reads it, so it is outside the digest.",
@@ -2681,6 +2812,22 @@
     },
     "LayoutMarginsPreserved": {
       "_comment": "@ref LLP 1123 D8: `-exact-preserves-superview-layout-margins`, the keywords of the layout_margins_preserved row, not a wire enum: false is 0, true 1.",
+      "values": [
+        "false",
+        "true"
+      ],
+      "default": "false"
+    },
+    "ListInsetsContentToSafeArea": {
+      "_comment": "@ref LLP 1123 D15: `-exact-list-insets-content-to-safe-area`, the keywords of the list_insets_content_to_safe_area row, not a wire enum: true, UIKit's default, is 0 and false 1.",
+      "values": [
+        "true",
+        "false"
+      ],
+      "default": "true"
+    },
+    "ListCellMarginsFollowReadableWidth": {
+      "_comment": "@ref LLP 1123 D15: `-exact-list-cell-margins-follow-readable-width`, the keywords of the list_cell_margins_follow_readable_width row, not a wire enum: false, UIKit's default, is 0 and true 1.",
       "values": [
         "false",
         "true"
@@ -6054,9 +6201,34 @@
       "rare": true,
       "codec": "enum:SafeAreaTrack",
       "_comment": "@ref LLP 1123 D9 (\"Moving edges\"): `-exact-safe-area-track: live | observed-max`, on a reader: under `live`, the initial value, its lengths read the band as it is; under `observed-max`, they read the largest band its owner's host has reported for the owner's current configuration, while its readouts stay live. For a capture, the declaring node's. Not inherited."
+    },
+    {
+      "bit": 316,
+      "field": "list_insets_content_to_safe_area",
+      "codec": "u8",
+      "keywords": "ListInsetsContentToSafeArea",
+      "rare": true,
+      "default": 0,
+      "_comment": "@ref LLP 1123 D15: `-exact-list-insets-content-to-safe-area: true | false`, a native table's `insetsContentViewsToSafeArea`: whether its cells' and headers' content views are inset from its safe area. For a table a native view lends the host, read from the box whose scroll policy it takes; a box that says nothing leaves the table's own choice. Not layout. Not inherited."
+    },
+    {
+      "bit": 317,
+      "field": "list_cell_margins_follow_readable_width",
+      "codec": "u8",
+      "keywords": "ListCellMarginsFollowReadableWidth",
+      "rare": true,
+      "default": 0,
+      "_comment": "@ref LLP 1123 D15: `-exact-list-cell-margins-follow-readable-width: false | true`, a native table's `cellLayoutMarginsFollowReadableWidth`: whether its cells' margins keep their content within the readable width. For a table a native view lends the host, read from the box whose scroll policy it takes; a box that says nothing leaves the table's own choice. Not layout. Not inherited."
+    },
+    {
+      "bit": 318,
+      "field": "safe_area_aspect_fit",
+      "codec": "aspect-fit",
+      "rare": true,
+      "_comment": "@ref LLP 1123 D16: `-exact-safe-area-aspect-fit: none | <ratio>`, on the first authored root of a standalone `cover` session with no native primary container: the window's `safeAreaAspectFitLayoutGuide` at that ratio, width over height, gives the root's border box its origin and size, the document viewport unchanged. `none`, the initial value, claims no guide. Not inherited."
     }
   ],
-  "_transitions": "The `transition` row is CSS `transition` (LLP 1002): count u8 (≤8), then per declaration property u8 (0 all, then 1 + `Property`: 1 translate, 2 scale, 3 rotate, 4 opacity, 5 height, 6 stroke-dashoffset, 7 r, 8 color, 9 background-color, 10 fill, 11 stroke, 12 cx, 13 cy, 14 x, 15 y, 16 rx, 17 ry, 18 border-top-color, 19 border-right-color, 20 border-bottom-color, 21 border-left-color, 22 -exact-tint-color, 23 box-shadow — LLP 1062; 24, box-shadow's colour alone, is refused; 25 font-weight, 26 font-stretch, 27 font-variation-settings — LLP 1019 §13 D10; 28 is CSS's `border-color` shorthand; 29 is a path's `d`, LLP 1055.000 D15; 30 is `filter`, LLP 1003.002), duration f32 s, delay f32 s, easing u8 (0 linear, 1 ease, 2 ease-in, 3 ease-out, 4 ease-in-out, 5 cubic-bezier + 4×f32, 6 steps + u16 count + u8 position, 7 spring + f32 stiffness/damping/mass, 8 linear() + u8 count + count×(f32 input, f32 output)). Its Rust type lives in exact-motion; the kernel owns the bytes.",
+  "_transitions": "The `transition` row is CSS `transition` (LLP 1002): count u8 (≤8), then per declaration property u8 (0 all, then 1 + `Property`: 1 translate, 2 scale, 3 rotate, 4 opacity, 5 height, 6 stroke-dashoffset, 7 r, 8 color, 9 background-color, 10 fill, 11 stroke, 12 cx, 13 cy, 14 x, 15 y, 16 rx, 17 ry, 18 border-top-color, 19 border-right-color, 20 border-bottom-color, 21 border-left-color, 22 -exact-tint-color, 23 box-shadow — LLP 1062; 24, box-shadow's colour alone, is refused; 25 font-weight, 26 font-stretch, 27 font-variation-settings — LLP 1019 §13 D10; 28 is CSS's `border-color` shorthand; 29 is a path's `d`, LLP 1055.000 D15; 30 is `filter`, LLP 1003.002; 31 is a box's `clip-path`, LLP 1003.003), duration f32 s, delay f32 s, easing u8 (0 linear, 1 ease, 2 ease-in, 3 ease-out, 4 ease-in-out, 5 cubic-bezier + 4×f32, 6 steps + u16 count + u8 position, 7 spring + f32 stiffness/damping/mass, 8 linear() + u8 count + count×(f32 input, f32 output)). Its Rust type lives in exact-motion; the kernel owns the bytes.",
   "_animations": "The `animation` row is CSS `animation` (LLP 1055 D5): count u8 (≤8), then per animation name (str), duration f32 s, delay f32 s, easing (as `_transitions`, never a spring), iteration count f32 (+inf is `infinite`), direction u8 (0 normal, 1 reverse, 2 alternate, 3 alternate-reverse), fill u8 (0 none, 1 forwards, 2 backwards, 3 both), paused u8, then its keyframes: count u8 (≤32), per keyframe offset f32 in [0,1], easing flag u8 (0 the animation's, 1 followed by an easing), count u8, per value property u8 (as `Property`), then its components as f32: one, two for `scale` (x and y factors), four for `translate` (x and y lengths in points, then x and y percentages of the box), three for `box-shadow` (offset x, y and blur, in points; its colour is the next value, `box-shadow`'s colour half), three for a `font-variation-settings` axis (its number, then its tag's high and low 16 bits; a keyframe carries one value per axis, LLP 1019 §13 D10), four for a colour (premultiplied sRGB red, green, blue, alpha; LLP 1055.000 D6), a colour then u8 1 and four more for the dark half of a `light-dark()` pair, else u8 0 (LLP 1062 D9). Its Rust type lives in exact-motion; the kernel owns the bytes.",
   "_opcodes": "The closed wire-visible op list for EXWF frame revision 1. There is no op count on the wire; consumers iterate by validated lengths.",
   "opcodes": [
@@ -6480,6 +6652,10 @@
           "member": "frames",
           "codec": "bool"
         },
+        "rides": {
+          "member": "rides",
+          "codec": "ids"
+        },
         "presentOnly": {
           "member": "presentOnly",
           "codec": "bool"
@@ -6742,7 +6918,8 @@
     [
       "back",
       "chevron.backward",
-      "M15 5 8 12l7 7"
+      "M15 5 8 12l7 7",
+      true
     ],
     [
       "close",
@@ -6782,7 +6959,8 @@
     [
       "select-text",
       "selection.pin.in.out",
-      "M6 4v13a2 2 0 0 0 2 2h10V9a2 2 0 0 0-2-2H6m12 12v2M7 3a1 1 0 1 1-2 0 1 1 0 0 1 2 0Zm12 19a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"
+      "M6 4v13a2 2 0 0 0 2 2h10V9a2 2 0 0 0-2-2H6m12 12v2M7 3a1 1 0 1 1-2 0 1 1 0 0 1 2 0Zm12 19a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z",
+      true
     ],
     [
       "more",
@@ -6797,7 +6975,8 @@
     [
       "forward",
       "arrowshape.turn.up.right",
-      "M14 4v5C6 9 3 13 3 21c3-6 6-7 11-7v6l8-8-8-8Z"
+      "M14 4v5C6 9 3 13 3 21c3-6 6-7 11-7v6l8-8-8-8Z",
+      true
     ],
     [
       "home",
@@ -6847,7 +7026,8 @@
     [
       "document",
       "doc.text",
-      "M14 3H6v18h12V7l-4-4Zm0 0v4h4M9 11h6M9 14h6M9 17h4"
+      "M14 3H6v18h12V7l-4-4Zm0 0v4h4M9 11h6M9 14h6M9 17h4",
+      true
     ],
     [
       "select",
@@ -6867,7 +7047,8 @@
     [
       "list",
       "list.bullet",
-      "M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"
+      "M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01",
+      true
     ],
     [
       "cart",
@@ -6897,7 +7078,8 @@
     [
       "reply",
       "bubble.left",
-      "M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z"
+      "M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z",
+      true
     ],
     [
       "share",
@@ -6972,7 +7154,8 @@
     [
       "speaker",
       "speaker.wave.2",
-      "M4 9h4l5-4v14l-5-4H4ZM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"
+      "M4 9h4l5-4v14l-5-4H4ZM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12",
+      true
     ],
     [
       "speaker-mute",
@@ -7002,7 +7185,8 @@
     [
       "forward-chevron",
       "chevron.forward",
-      "m9 5 7 7-7 7"
+      "m9 5 7 7-7 7",
+      true
     ],
     [
       "at",
@@ -7022,12 +7206,14 @@
     [
       "sign-out",
       "rectangle.portrait.and.arrow.right",
-      "M14 4H5v16h9M10 12h11M17 8l4 4-4 4"
+      "M14 4H5v16h9M10 12h11M17 8l4 4-4 4",
+      true
     ],
     [
       "quote",
       "quote.bubble",
-      "M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2ZM9 9v3M15 9v3"
+      "M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H10l-5 4v-4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2ZM9 9v3M15 9v3",
+      true
     ],
     [
       "feeds",
@@ -7172,7 +7358,8 @@
     [
       "open-app",
       "arrow.up.forward.app",
-      "M11 4H5v15h15v-6M14 4h6v6M20 4l-9 9"
+      "M11 4H5v15h15v-6M14 4h6v6M20 4l-9 9",
+      true
     ],
     [
       "download-pending",
@@ -7222,7 +7409,8 @@
     [
       "article",
       "doc.plaintext",
-      "M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM8.5 8h7M8.5 12h7M8.5 16h4"
+      "M6 3h12a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM8.5 8h7M8.5 12h7M8.5 16h4",
+      true
     ],
     [
       "radio",
@@ -7232,12 +7420,14 @@
     [
       "running",
       "figure.run",
-      "M16.6 4.5a1.6 1.6 0 1 1-3.2 0 1.6 1.6 0 0 1 3.2 0ZM7 11l2.5-3 4 .5 3 2.5 3-1M13.5 8.5 11 14l3.5 2-.5 5M11 14l-2.5 3.5H4"
+      "M16.6 4.5a1.6 1.6 0 1 1-3.2 0 1.6 1.6 0 0 1 3.2 0ZM7 11l2.5-3 4 .5 3 2.5 3-1M13.5 8.5 11 14l3.5 2-.5 5M11 14l-2.5 3.5H4",
+      true
     ],
     [
       "walking",
       "figure.walk",
-      "M14.1 4.5a1.6 1.6 0 1 1-3.2 0 1.6 1.6 0 0 1 3.2 0ZM8.5 13l.5-2.5 3-2 3 2.5 1.5 2M12 8.5 11.5 14l2.5 3.5 1 3.5M11.5 14 10 17.5 8 21"
+      "M14.1 4.5a1.6 1.6 0 1 1-3.2 0 1.6 1.6 0 0 1 3.2 0ZM8.5 13l.5-2.5 3-2 3 2.5 1.5 2M12 8.5 11.5 14l2.5 3.5 1 3.5M11.5 14 10 17.5 8 21",
+      true
     ],
     [
       "stopwatch",
@@ -7298,6 +7488,21 @@
       "finish",
       "flag.checkered",
       "M5 22V3M5 4h15v10H5M10 4v10M15 4v10M5 9h15"
+    ],
+    [
+      "globe",
+      "globe",
+      "M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0ZM3 12h18M12 3a4 9 0 0 1 0 18 4 9 0 0 1 0-18Z"
+    ],
+    [
+      "sim-card",
+      "simcard",
+      "M6 3h9l4 4v13a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1ZM8.5 11h7v6h-7ZM12 11v6M8.5 14h7"
+    ],
+    [
+      "sim-card-fill",
+      "simcard.fill",
+      "M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2ZM8 11h3v2.5H8ZM13 11h3v2.5h-3ZM8 15h3v2.5H8ZM13 15h3v2.5h-3Z"
     ]
   ],
   "symbolAliases": [
@@ -7600,6 +7805,10 @@
     [
       "checkered-flag",
       "finish"
+    ],
+    [
+      "language",
+      "globe"
     ]
   ],
   "symbolGlyphs": [
@@ -7607,7 +7816,8 @@
       "back",
       "fluent",
       "M20 12H4m7-7-7 7 7 7",
-      false
+      false,
+      true
     ],
     [
       "more",
@@ -7619,6 +7829,7 @@
       "back",
       "material",
       "m313-440 224 224-57 56-320-320 320-320 57 56-224 224h487v80H313Z",
+      true,
       true
     ],
     [
@@ -7631,6 +7842,7 @@
       "share",
       "material",
       "M680-80q-50 0-85-35t-35-85q0-6 3-28L282-392q-16 15-37 23.5t-45 8.5q-50 0-85-35t-35-85q0-50 35-85t85-35q24 0 45 8.5t37 23.5l281-164q-2-7-2.5-13.5T560-760q0-50 35-85t85-35q50 0 85 35t35 85q0 50-35 85t-85 35q-24 0-45-8.5T598-672L317-508q2 7 2.5 13.5t.5 14.5q0 8-.5 14.5T317-452l281 164q16-15 37-23.5t45-8.5q50 0 85 35t35 85q0 50-35 85t-85 35Zm0-80q17 0 28.5-11.5T720-200q0-17-11.5-28.5T680-240q-17 0-28.5 11.5T640-200q0 17 11.5 28.5T680-160ZM200-440q17 0 28.5-11.5T240-480q0-17-11.5-28.5T200-520q-17 0-28.5 11.5T160-480q0 17 11.5 28.5T200-440Zm508.5-291.5Q720-743 720-760t-11.5-28.5Q697-800 680-800t-28.5 11.5Q640-777 640-760t11.5 28.5Q663-720 680-720t28.5-11.5ZM680-200ZM200-480Zm480-280Z",
+      true,
       true
     ],
     [
@@ -7661,6 +7873,7 @@
       "send",
       "material",
       "M120-160v-640l760 320-760 320Zm80-120 474-200-474-200v140l240 60-240 60v140Zm0 0v-400 400Z",
+      true,
       true
     ],
     [
@@ -7691,6 +7904,7 @@
       "forward",
       "material",
       "m640-280-57-56 184-184-184-184 57-56 240 240-240 240ZM80-200v-160q0-83 58.5-141.5T280-560h247L383-704l57-56 240 240-240 240-57-56 144-144H280q-50 0-85 35t-35 85v160H80Z",
+      true,
       true
     ],
     [
@@ -7775,6 +7989,7 @@
       "list",
       "material",
       "M360-200v-80h480v80H360Zm0-240v-80h480v80H360Zm0-240v-80h480v80H360ZM200-160q-33 0-56.5-23.5T120-240q0-33 23.5-56.5T200-320q33 0 56.5 23.5T280-240q0 33-23.5 56.5T200-160Zm0-240q-33 0-56.5-23.5T120-480q0-33 23.5-56.5T200-560q33 0 56.5 23.5T280-480q0 33-23.5 56.5T200-400Zm-56.5-263.5Q120-687 120-720t23.5-56.5Q167-800 200-800t56.5 23.5Q280-753 280-720t-23.5 56.5Q233-640 200-640t-56.5-23.5Z",
+      true,
       true
     ],
     [
@@ -7787,6 +8002,7 @@
       "sort",
       "material",
       "M120-240v-80h240v80H120Zm0-200v-80h480v80H120Zm0-200v-80h720v80H120Z",
+      true,
       true
     ],
     [
@@ -7811,6 +8027,7 @@
       "reply",
       "material",
       "M80-80v-720q0-33 23.5-56.5T160-880h640q33 0 56.5 23.5T880-800v480q0 33-23.5 56.5T800-240H240L80-80Zm126-240h594v-480H160v525l46-45Zm-46 0v-480 480Z",
+      true,
       true
     ],
     [
@@ -7895,6 +8112,7 @@
       "speaker",
       "material",
       "M560-131v-82q90-26 145-100t55-168q0-94-55-168T560-749v-82q124 28 202 125.5T840-481q0 127-78 224.5T560-131ZM120-360v-240h160l200-200v640L280-360H120Zm440 40v-322q47 22 73.5 66t26.5 96q0 51-26.5 94.5T560-320ZM400-606l-86 86H200v80h114l86 86v-252ZM300-480Z",
+      true,
       true
     ],
     [
@@ -7931,6 +8149,7 @@
       "forward-chevron",
       "material",
       "M504-480 320-664l56-56 240 240-240 240-56-56 184-184Z",
+      true,
       true
     ],
     [
@@ -7955,6 +8174,7 @@
       "sign-out",
       "material",
       "M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h280v80H200v560h280v80H200Zm440-160-55-58 102-102H360v-80h327L585-622l55-58 200 200-200 200Z",
+      true,
       true
     ],
     [
@@ -8135,6 +8355,7 @@
       "open-app",
       "material",
       "M200-120q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h280v80H200v560h560v-280h80v280q0 33-23.5 56.5T760-120H200Zm188-212-56-56 372-372H560v-80h280v280h-80v-144L388-332Z",
+      true,
       true
     ],
     [
@@ -8195,6 +8416,7 @@
       "article",
       "material",
       "M280-280h280v-80H280v80Zm0-160h400v-80H280v80Zm0-160h400v-80H280v80Zm-80 480q-33 0-56.5-23.5T120-200v-560q0-33 23.5-56.5T200-840h560q33 0 56.5 23.5T840-760v560q0 33-23.5 56.5T760-120H200Zm0-80h560v-560H200v560Zm0-560v560-560Z",
+      true,
       true
     ],
     [
@@ -8207,12 +8429,14 @@
       "running",
       "material",
       "M520-40v-240l-84-80-40 176-276-56 16-80 192 40 64-324-72 28v136h-80v-188l158-68q35-15 51.5-19.5T480-720q21 0 39 11t29 29l40 64q26 42 70.5 69T760-520v80q-66 0-123.5-27.5T540-540l-24 120 84 80v300h-80Zm-36.5-723.5Q460-787 460-820t23.5-56.5Q507-900 540-900t56.5 23.5Q620-853 620-820t-23.5 56.5Q573-740 540-740t-56.5-23.5Z",
+      true,
       true
     ],
     [
       "walking",
       "material",
       "m280-40 112-564-72 28v136h-80v-188l202-86q14-6 29.5-7t29.5 4q14 5 26.5 14t20.5 23l40 64q26 42 70.5 69T760-520v80q-70 0-125-29t-94-74l-25 123 84 80v300h-80v-260l-84-64-72 324h-84Zm203.5-723.5Q460-787 460-820t23.5-56.5Q507-900 540-900t56.5 23.5Q620-853 620-820t-23.5 56.5Q573-740 540-740t-56.5-23.5Z",
+      true,
       true
     ],
     [
@@ -8286,11 +8510,29 @@
       "material",
       "M360-720h80v-80h-80v80Zm160 0v-80h80v80h-80ZM360-400v-80h80v80h-80Zm320-160v-80h80v80h-80Zm0 160v-80h80v80h-80Zm-160 0v-80h80v80h-80Zm160-320v-80h80v80h-80Zm-240 80v-80h80v80h-80ZM200-160v-640h80v80h80v80h-80v80h80v80h-80v320h-80Zm400-320v-80h80v80h-80Zm-160 0v-80h80v80h-80Zm-80-80v-80h80v80h-80Zm160 0v-80h80v80h-80Zm80-80v-80h80v80h-80Z",
       true
+    ],
+    [
+      "globe",
+      "material",
+      "M480-80q-82 0-155-31.5t-127.5-86Q143-252 111.5-325T80-480q0-83 31.5-155.5t86-127Q252-817 325-848.5T480-880q83 0 155.5 31.5t127 86q54.5 54.5 86 127T880-480q0 82-31.5 155t-86 127.5q-54.5 54.5-127 86T480-80Zm0-82q26-36 45-75t31-83H404q12 44 31 83t45 75Zm-104-16q-18-33-31.5-68.5T322-320H204q29 50 72.5 87t99.5 55Zm208 0q56-18 99.5-55t72.5-87H638q-9 38-22.5 73.5T584-178ZM170-400h136q-3-20-4.5-39.5T300-480q0-21 1.5-40.5T306-560H170q-5 20-7.5 39.5T160-480q0 21 2.5 40.5T170-400Zm216 0h188q3-20 4.5-39.5T580-480q0-21-1.5-40.5T574-560H386q-3 20-4.5 39.5T380-480q0 21 1.5 40.5T386-400Zm268 0h136q5-20 7.5-39.5T800-480q0-21-2.5-40.5T790-560H654q3 20 4.5 39.5T660-480q0 21-1.5 40.5T654-400Zm-16-240h118q-29-50-72.5-87T584-782q18 33 31.5 68.5T638-640Zm-234 0h152q-12-44-31-83t-45-75q-26 36-45 75t-31 83Zm-200 0h118q9-38 22.5-73.5T376-782q-56 18-99.5 55T204-640Z",
+      true
+    ],
+    [
+      "sim-card",
+      "material",
+      "M280-200h80v-80h-80v80Zm0-160h80v-160h-80v160Zm160 160h80v-160h-80v160Zm0-240h80v-80h-80v80Zm160 240h80v-80h-80v80Zm0-160h80v-160h-80v160ZM240-80q-33 0-56.5-23.5T160-160v-480l240-240h320q33 0 56.5 23.5T800-800v640q0 33-23.5 56.5T720-80H240Zm0-80h480v-640H434L240-606v446Zm0 0h480-480Z",
+      true
+    ],
+    [
+      "sim-card-fill",
+      "material",
+      "M280-200h80v-80h-80v80Zm0-160h80v-160h-80v160Zm160 160h80v-160h-80v160Zm0-240h80v-80h-80v80Zm160 240h80v-80h-80v80Zm0-160h80v-160h-80v160ZM240-80q-33 0-56.5-23.5T160-160v-480l240-240h320q33 0 56.5 23.5T800-800v640q0 33-23.5 56.5T720-80H240Z",
+      true
     ]
   ],
-  "_symbols": "[role, Apple system symbol name, browser SVG path in a 24-unit box]. The path keeps to about the box's 20-unit live area, which the web draws an em across, as an SF Symbol's glyph is (the neutral look's `symbol-scale`). The path is stroked; a filled state is its own role, `<role>-fill` for Apple's `<name>.fill`, whose path is a filled silhouette (even-odd, so a cutout is a subpath). Two roles may share an Apple glyph when Material draws their meanings apart (`reorder`, `menu`); the Apple name then answers to the earlier row. Portable roles only; symbol:sf/<name> passes an opaque name directly to Apple (LLP 1035.004.000), without a table entry. The sf namespace is reserved.",
+  "_symbols": "[role, Apple system symbol name, browser SVG path in a 24-unit box, optional mirrorInRtl boolean (default false)]. The path keeps to about the box's 20-unit live area, which the web draws an em across, as an SF Symbol's glyph is (the neutral look's `symbol-scale`). The path is stroked; a filled state is its own role, `<role>-fill` for Apple's `<name>.fill`, whose path is a filled silhouette (even-odd, so a cutout is a subpath). The optional fourth boolean declares whether that browser path reflects horizontally in an RTL layout direction; Apple uses SF Symbols' own directionality instead. Two roles may share an Apple glyph when Material draws their meanings apart (`reorder`, `menu`); the Apple name then answers to the earlier row. Portable roles only; symbol:sf/<name> passes an opaque name directly to Apple (LLP 1035.004.000), without a table entry. The sf namespace is reserved.",
   "_symbolAliases": "[alias, role]. Other spellings a `symbol:` source answers to, beside the role itself and Apple's name for it (dots, dashes and underscores are one: `chevron.right`, `chevron-right`, `chevron_right`): Material's names and the common guesses that mean this role and no other. An alias keeps the distinctions the roles make (filled or outlined, enclosed or bare): a name for a symbol no role draws is no alias and is refused. Never a role, never another spelling's key; `sf/` stays reserved. The lowering rewrites a source to its role, so the plan and every host see the role, and warns (`lower-symbol-alias`) once per use (LLP 1116.007 D3.1).",
-  "_symbolGlyphs": "[role, platform, path, filled]. @ref LLP 1115.001 D14, LLP 1115.004: a role a platform's own symbols draw in another shape, in that shape: in the same 24-unit box, stroked as a role's path is, or filled (even-odd). `fluent` is Windows, whose Back (Segoe Fluent Icons U+E72B) is an arrow and More (U+E712) three bare dots in a row. `material` is Android: `back` and `share` are Material Icons' `arrow_back` (which the top app bar's Up arrow draws too) and `share` paths, and `more` is `more_vert`'s three discs. A role with no row for a platform draws its own path there. A role takes these by any of its spellings (`sf/chevron.backward` is `back`); an icon token is the author's own image and draws as written. The web and the Linux desktop (the neutral look, LLP 1115.000 D17) draw the role's own path.",
+  "_symbolGlyphs": "[role, platform, path, filled, optional mirrorInRtl boolean (default false)]. @ref LLP 1115.001 D14, LLP 1115.004: a role a platform's own symbols draw in another shape, in that shape: in the same 24-unit box, stroked as a role's path is, or filled (even-odd; Material's paths use `0 -960 960 960` and fill nonzero). Each override supplies its own RTL mirror flag with its own path rather than inheriting the web path's flag; a role with no row for a platform draws the web path and keeps its mirror flag. `fluent` is Windows, whose Back (Segoe Fluent Icons U+E72B) is an arrow and More (U+E712) three bare dots in a row. `material` is Android: `back` and `share` are Material Icons' `arrow_back` (which the top app bar's Up arrow draws too) and `share` paths, and `more` is `more_vert`'s three discs. A role takes these by any of its spellings (`sf/chevron.backward` is `back`); an icon token is the author's own image and draws as written. The web and the Linux desktop (the neutral look, LLP 1115.000 D17) draw the role's own path.",
   "_materials": "[name, iOS UIBlurEffect.Style (or glass / glassClear: UIGlassEffect), macOS NSVisualEffectView.Material (or glass / glassClear: NSGlassEffectView), web and Linux blur px, web saturate %, light tint, dark tint]. @ref LLP 1053.000 D4: `backgroundMaterial`'s whole vocabulary, one row per platform material, kebab-case one-to-one. A `~` marks a platform without that material: it draws the one named instead and logs so once. The web and Linux columns are stated approximations of Apple's look, not parity. Hosts never admit a platform name directly.",
   "_buttonStyles": "[name, iOS 26+ UIButton.Configuration factory, the factory before iOS 26, macOS NSButton look (borderless, push, push-accent: the accent as bezelColor, glass: NSBezelStyleGlass on macOS 26 else push, glass-accent), web and Linux look (ua: the browser's own button, text, soft, fill, glass, glass-fill)]. @ref LLP 1069.011 D2: `buttonStyle`'s whole vocabulary, kebab-case one-to-one with Apple's names. A `~` marks a platform drawing a stand-in, silently; the agent reports the requested and the drawn style. Hosts never admit a platform name directly.",
   "buttonStyles": [
@@ -9208,8 +9450,8 @@
     ["grouped-separator-end", "style length", 0, 10, 0, 0],
     ["grouped-row-min-height", "style length", 52, 36, 52, 52, 56],
     ["grouped-row-padding-block", "style length", "unset", 10, "unset", "unset", 8],
-    ["grouped-row-inset", "style length", 16, 10, 16, 16],
-    ["grouped-row-padding-end", "style length", 16, 10, 16, 16],
+    ["grouped-row-inset", "style length", 16, 10, 16, 16, 16],
+    ["grouped-row-padding-end", "style length", 16, 10, 16, 16, 16],
     ["grouped-swipe-margin", "style length", 0, 10, 0, 0],
     ["grouped-swipe-max-width", "style length", "unset", "calc(100% - 10px)", "unset", "unset"],
     ["grouped-swipe-padding", "style length", 16, 0, 16, 16],
@@ -9478,7 +9720,7 @@
       "typeAhead": true
     }
   ],
-  "_controls": "LLP 1121 D9 (stage 8 C): each native control's parameters a design can set (accent-color, or a colour role it reads) and how each host Exact ships honours one: [control (a `:state` after it: that state's), parameter, ios, macos, web, linux, windows, terminal, android], each host `exact`, `best-effort` (the platform alters it) or `none` (the platform's own stands), `: why` after it saying so. Measured by scripts/measure-controls.mjs, recorded with provenance in docs/control-roles-measured.md, which a test holds this table to; the compiler's forma-unreachable lint reads it. A new parameter is a role first (LLP 1095 §3).",
+  "_controls": "LLP 1121 D9 (stage 8 C): each native control's parameters a design can set (accent-color, or a colour role it reads) and how each host Exact ships honours one: [control (a `:state` after it: that state's), parameter, ios, macos, web, linux, windows, terminal, android], each host `exact`, `best-effort` (the platform alters it) or `none` (the platform's own stands), `: why` after it saying so. Measured by scripts/measure-controls.mjs, recorded with provenance in docs/control-roles-measured.md, which a test holds this table to; the compiler's forma-unreachable lint reads it. The segmented-group row measures an inline selected segment. On macOS a header uses NSToolbarItemGroup, with no public selected-segment tint (none). A meter role exposes an authored view as a level indicator and has no native fill. A new parameter is a role first (LLP 1095 §3).",
   "controls": [
     ["switch", "accent-color", "exact", "none: NSSwitch draws the system accent", "exact", "exact", "exact", "none: the terminal draws no colour", "exact"],
     ["switch:disabled", "accent-color", "best-effort: dimmed, as the platform draws a disabled control", "none: NSSwitch draws the system accent", "best-effort: dimmed, as the platform draws a disabled control", "best-effort: dimmed, as the platform draws a disabled control", "best-effort: dimmed, as the platform draws a disabled control", "none: the terminal draws no colour", "best-effort: dimmed, as the platform draws a disabled control"],
@@ -9486,8 +9728,9 @@
     ["checkbox:disabled", "accent-color", "best-effort: dimmed, as the platform draws a disabled control", "none: AppKit draws a disabled checkbox grey, whatever its contentTintColor", "best-effort: dimmed, as the platform draws a disabled control", "best-effort: dimmed, as the platform draws a disabled control", "best-effort: dimmed, as the platform draws a disabled control", "none: the terminal draws no colour", "best-effort: dimmed, as the platform draws a disabled control"],
     ["radio", "accent-color", "exact", "exact", "exact", "exact", "exact", "none: the terminal draws no colour", "exact"],
     ["radio:disabled", "accent-color", "best-effort: dimmed, as the platform draws a disabled control", "none: AppKit draws a disabled radio button grey, whatever its contentTintColor", "best-effort: dimmed, as the platform draws a disabled control", "best-effort: dimmed, as the platform draws a disabled control", "best-effort: dimmed, as the platform draws a disabled control", "none: the terminal draws no colour", "best-effort: dimmed, as the platform draws a disabled control"],
-    ["range", "accent-color", "exact", "none: NSSlider draws the system accent", "exact", "exact", "exact", "none: the terminal draws no colour", "exact"],
-    ["range:disabled", "accent-color", "best-effort: dimmed, as the platform draws a disabled control", "none: NSSlider draws the system accent", "best-effort: dimmed, as the platform draws a disabled control", "best-effort: dimmed, as the platform draws a disabled control", "best-effort: dimmed, as the platform draws a disabled control", "none: the terminal draws no colour", "best-effort: dimmed, as the platform draws a disabled control"],
+    ["range", "accent-color", "exact", "exact", "exact", "exact", "exact", "none: the terminal draws no colour", "exact"],
+    ["range:disabled", "accent-color", "best-effort: dimmed, as the platform draws a disabled control", "none: AppKit draws a disabled slider grey, whatever its trackFillColor", "best-effort: dimmed, as the platform draws a disabled control", "best-effort: dimmed, as the platform draws a disabled control", "best-effort: dimmed, as the platform draws a disabled control", "none: the terminal draws no colour", "best-effort: dimmed, as the platform draws a disabled control"],
+    ["segmented-group", "accent-color", "none: UIKit draws the selected segment with its default fill", "exact", "none: the neutral selected segment uses the page ground or fill", "none: the neutral selected segment uses the page ground or fill", "none: the neutral selected segment uses the page ground or fill", "none: the terminal draws no segment bezel", "none: the selected Material segment uses its container colour"],
     ["progress", "accent-color", "exact", "none: NSProgressIndicator takes no tint", "exact", "exact", "exact", "none: the terminal draws no colour", "exact"],
     ["spinner", "accent-color", "best-effort: UIKit fades its activity indicator's spokes", "none: NSProgressIndicator takes no tint", "exact", "exact", "exact", "none: the terminal draws no colour", "exact"],
     ["select", "accent-color", "exact", "none: NSPopUpButton takes no tint", "none: a browser's select takes no accent-color", "none: the neutral look, as the web's, draws a closed select without the accent", "none: the neutral look, as the web's, draws a closed select without the accent", "none: the terminal draws no colour", "none: Material's closed menu field takes no accent (the open menu marks its chosen row in it, which the table does not judge)"],

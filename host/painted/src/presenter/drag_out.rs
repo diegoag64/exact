@@ -4,13 +4,26 @@
 //! `dataTransfer…` props carry. The reader builds the drag and its shadow;
 //! the presenter names the node, its box and the data, each file as the
 //! node names it (a shipped `assets/…` name or an `app:/` path), which the
-//! reader resolves as it does a `video`'s.
+//! reader resolves as it does a `video`'s, with the name it is offered under
+//! (D14).
 use super::*;
 use exact_kernel::NodeKey;
 
+/// A dragged file (LLP 1094.000 D14): the entry the node names it by, and
+/// the name a destination is offered for it, the entry's own unless the
+/// node's `dataTransferNames` gives one at its place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DragFile {
+    /// A shipped `assets/…` name or an `app:/` path.
+    pub entry: String,
+    /// The name a destination is offered.
+    pub name: String,
+}
+
 /// What the reader drags: the node's box and the finger's point in the
 /// view's pixels, whether an assistive service started it, then its text,
-/// url and files.
+/// url and files, and the lift's number, by which the reader says when the
+/// platform began and ended it (LLP 1094.000 D16).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DragOut {
     /// The node.
@@ -26,13 +39,16 @@ pub struct DragOut {
     pub text: String,
     /// `url`, empty for none.
     pub url: String,
-    /// Each file as the node names it.
-    pub files: Vec<String>,
+    /// Each file as the node names it, with the name it is offered under.
+    pub files: Vec<DragFile>,
+    /// The lift's number.
+    pub lift: u32,
 }
 
 impl DragOut {
     /// The words the reader reads: the node, the box, the point, 1 for a
-    /// service's drag, the text, the url, then the files' count and each.
+    /// service's drag, the text, the url, the files' count and each file's
+    /// entry and name, then the lift's number.
     pub(super) fn encode(&self, out: &mut Vec<i32>) {
         out.push(self.node as i32);
         out.extend(self.rect);
@@ -42,8 +58,10 @@ impl DragOut {
         requests::string(out, &self.url);
         out.push(self.files.len() as i32);
         for file in &self.files {
-            requests::string(out, file);
+            requests::string(out, &file.entry);
+            requests::string(out, &file.name);
         }
+        out.push(self.lift as i32);
     }
 }
 
@@ -106,7 +124,7 @@ impl<D: exact_runner::DataSource> Presenter<D> {
             Some(_) => return false,
             None => {}
         }
-        self.ask_drag(drag, now_ms);
+        self.ask_drag(drag, (x, y), now_ms);
         true
     }
 
@@ -182,13 +200,14 @@ impl<D: exact_runner::DataSource> Presenter<D> {
         let Some(drag) = self.drag_of(id, x, y, service) else {
             return false;
         };
-        self.ask_drag(drag, now_ms);
+        self.ask_drag(drag, (x, y), now_ms);
         true
     }
 
-    /// The reader's drag, asked: the finger is the drag's now, so nothing it
-    /// is over presses or scrolls.
-    fn ask_drag(&mut self, drag: DragOut, now_ms: f64) {
+    /// The reader's drag, held at `at`, asked: the finger is the drag's now,
+    /// so nothing it is over presses or scrolls.
+    fn ask_drag(&mut self, mut drag: DragOut, at: (f32, f32), now_ms: f64) {
+        drag.lift = self.lift_asked(drag.node, at);
         if let Err(e) = self.pointer_cancel(now_ms) {
             self.host.log(e);
         }
@@ -213,13 +232,15 @@ impl<D: exact_runner::DataSource> Presenter<D> {
             text,
             url,
             files,
+            lift: 0,
         })
     }
 }
 
 impl<D: exact_runner::DataSource> Presenter<D> {
-    /// What `id` carries: its `text`, its `url` and each of its files.
-    fn carried_values(&self, id: ViewId) -> (String, String, Vec<String>) {
+    /// What `id` carries: its `text`, its `url` and each of its files with
+    /// the name it is offered under.
+    fn carried_values(&self, id: ViewId) -> (String, String, Vec<DragFile>) {
         let props = |prop| {
             self.host
                 .kernel()
@@ -228,10 +249,19 @@ impl<D: exact_runner::DataSource> Presenter<D> {
                 .unwrap_or_default()
                 .to_string()
         };
+        let names = props(PropId::DataTransferNames);
+        let mut names = names.split('\n');
         let files = props(PropId::DataTransferFiles)
             .split('\n')
             .filter(|entry| !entry.is_empty())
-            .map(str::to_string)
+            .map(|entry| {
+                let own = entry.rsplit('/').next().unwrap_or(entry);
+                let name = names.next().filter(|name| !name.is_empty()).unwrap_or(own);
+                DragFile {
+                    entry: entry.to_string(),
+                    name: name.to_string(),
+                }
+            })
             .collect();
         (
             props(PropId::DataTransferText),
@@ -287,12 +317,23 @@ impl Offers {
 /// and where the press held it in that picture, in the window's logical
 /// coordinates.
 pub struct Lift {
+    /// The lift's number, by which the host says when the platform began
+    /// and ended it (LLP 1094.000 D16).
+    pub id: u32,
     /// `text`, empty for none or when not offered.
     pub text: String,
     /// `url`, empty for none or when not offered.
     pub url: String,
-    /// Each file as the node names it, none when not offered.
-    pub files: Vec<String>,
+    /// Each file as the node names it, with the name it is offered under,
+    /// none when not offered.
+    pub files: Vec<DragFile>,
+    /// The generation whose shipped files `files` names, pinned at the lift
+    /// (LLP 1094.000 D3).
+    pub assets: crate::image::Assets,
+    /// The session's own files, which `files`' `app:/` entries are read
+    /// through, as the lift found them pinned (LLP 1094.000 D3).
+    #[cfg(target_os = "linux")]
+    pub app: Option<crate::picker::AppFiles>,
     /// The node's box, within its clip, cut from the frame last shown.
     pub picture: Option<LiftPicture>,
     /// The press, relative to the picture's top left.
@@ -369,6 +410,9 @@ impl<D: exact_runner::DataSource> Presenter<D> {
         for prop in offers.props() {
             node.props.str(prop).hash(&mut digest);
         }
+        if offers.files {
+            node.props.str(PropId::DataTransferNames).hash(&mut digest);
+        }
         digest.finish()
     }
 
@@ -384,13 +428,19 @@ impl<D: exact_runner::DataSource> Presenter<D> {
         origin: (f32, f32),
         now_ms: f64,
     ) -> bool {
-        let Some(lift) = self.mouse_lift_of(hit, source, carried, origin) else {
+        let Some(mut lift) = self.mouse_lift_of(hit, source, carried, origin) else {
             return false;
         };
+        let Some(id) = self.host.kernel().node_by_key(source).map(|node| node.id) else {
+            return false;
+        };
+        let number = self.lift_asked(id, origin);
+        lift.id = number;
         let Some(lifter) = self.lifter.as_mut() else {
             return false;
         };
         if !(lifter.lift)(lift) {
+            self.drag_in.lifting.retain(|s| s.id != number);
             return false;
         }
         if let Err(e) = self.pointer_cancel(now_ms) {
@@ -416,9 +466,13 @@ impl<D: exact_runner::DataSource> Presenter<D> {
         let (picture, hotspot) = self.icon_of(id, origin);
         let offers = self.lifter.as_ref()?.offers;
         Some(Lift {
+            id: 0,
             text: if offers.text { text } else { String::new() },
             url: if offers.url { url } else { String::new() },
             files: if offers.files { files } else { Vec::new() },
+            assets: self.assets.clone(),
+            #[cfg(target_os = "linux")]
+            app: self.host.app_files(),
             picture,
             hotspot,
         })

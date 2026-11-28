@@ -615,6 +615,8 @@ pub(crate) fn handler_attr(name: &str) -> bool {
             | "drop"
             | "dragenter"
             | "dragleave"
+            | "dragstart"
+            | "dragend"
             | "atompress"
             | "swiperight"
             | "swipeleft"
@@ -628,6 +630,8 @@ pub(crate) fn handler_attr(name: &str) -> bool {
             | "scrolldragend"
             | "pan"
             | "panrelease"
+            | "pinch"
+            | "pinchrelease"
             | "heightrelease"
             | "transformgeometry"
             | "transformrelease"
@@ -775,8 +779,9 @@ fn refine_params_from_view(
                                     return err(
                                         "type-argument",
                                         format!(
-                                            "`{name}` expects `{}`, given `{t}`",
-                                            ct.actions[ai][i]
+                                            "`{name}` expects `{}`, given `{t}`{}",
+                                            ct.actions[ai][i],
+                                            super::enums::rejection(&ct.actions[ai][i], arg)
                                         ),
                                         arg.span(),
                                     );
@@ -842,6 +847,7 @@ fn refine_params_from_view(
                             "scroll" | "pan" | "panrelease" | "heightrelease" | "resize" => {
                                 vec![Ty::Number, Ty::Number]
                             }
+                            "pinch" | "pinchrelease" => vec![Ty::Number; 3],
                             "transformgeometry" => vec![Ty::Number; 4],
                             "transformrelease" => vec![Ty::Number; 6],
                             "reorderdrop" => vec![Ty::String, Ty::Option(Box::new(Ty::String))],
@@ -1182,7 +1188,8 @@ pub(crate) fn action_call(
             return err(
                 "type-argument",
                 format!(
-                    "`{name}` expects `{pt}`, given `{t}`{}",
+                    "`{name}` expects `{pt}`, given `{t}`{}{}",
+                    super::enums::rejection(pt, arg),
                     crate::shadows::note(name, Some(scope.component()), shapes)
                 ),
                 arg.span(),

@@ -42,7 +42,7 @@ pub use field::{FieldSelection, InputDetails, SelectionDirection};
 mod host_kinds;
 pub use host_kinds::{HistorySwipe, ScrollDrag};
 mod pointer;
-pub use pointer::{AtomEvent, DropEvent, MouseEvent, PointerEvent, WheelEvent};
+pub use pointer::{AtomEvent, DropEffect, DropEvent, MouseEvent, PointerEvent, WheelEvent};
 mod intersect;
 mod mounted_reorder;
 mod reorder;
@@ -65,6 +65,7 @@ mod forma;
 mod root_font;
 mod shown;
 mod sounds;
+mod surface_colors;
 mod theme;
 pub use event::{
     ActionBinding, ActionBindingError, ActionBindingRefusal, ControlValue, Event, KeyModifiers,
@@ -172,6 +173,7 @@ pub use wakes::WakeHow;
 mod abort_tests;
 mod canvas_performance;
 mod split;
+mod stream_fixture_spec;
 mod surface_record;
 mod text_axes;
 mod time;
@@ -268,7 +270,7 @@ struct PendingReq {
     completion: Option<CompletionReply>,
     module: Option<ModuleInstance>,
     inspection_generation: u64,
-    refusal: Option<(&'static str, bool)>,
+    refusal: Option<(String, bool)>,
     /// The host refused this ordered request before execution (LLP 1041 §8.4).
     /// Earlier source turns may already have executed effects.
     refused: bool,
@@ -294,9 +296,8 @@ struct PendingReq {
     sent: bool,
     /// A stream's: the grant line that admits it (`state.streams`).
     grant: Option<String>,
-    /// A topic its resource watches changed while it was in flight: its
-    /// reply lands, then the resource is asked again (LLP 1016.002 D4).
-    ask_again: bool,
+    /// Changes owed one ask when this answer lands (LLP 1054.000.000 D3).
+    ask_again: resources::AskAgain,
     /// Module work wrote the store while it was in flight, leaving this store
     /// revision: until another write, its answer stands (LLP 1146 §2.3).
     module_again: Option<u64>,
@@ -315,6 +316,10 @@ struct PendingReq {
     held: bool,
     long_poll: bool,
     replied: bool,
+    /// A scripted stream fixture delivered its open batch (or opened empty/parked):
+    /// `clock data` no longer waits on it while `pending(r)` still waits for the first mapped value.
+    fixture_opened: bool,
+    stream_meta: Option<Box<advance::stream_fixtures::StreamReqMeta>>,
     /// Never sent: when a resource an overrun refused is asked again (`overrun.rs`).
     reask_at: Option<f64>,
     /// The launch's own ask (its target was in `Runner::launch` when asked),
@@ -348,7 +353,11 @@ impl PendingReq {
     /// Waited on by a clock (a jump, `clock settle`, `clock data`): in flight, not held (D8, D9),
     /// not a re-ask's wait (no I/O: the agent's settle goes to its time, `overrun.rs`).
     fn waited(&self) -> bool {
-        self.in_flight() && !self.quiet() && !self.replied && self.reask_at.is_none()
+        self.in_flight()
+            && !self.quiet()
+            && !self.replied
+            && !self.fixture_opened
+            && self.reask_at.is_none()
     }
 
     /// A request with effects the host has not refused at admission, and no
@@ -383,6 +392,7 @@ pub struct Runner<D: DataSource> {
     keeps_midi: std::cell::OnceCell<bool>,
     action_binding_origin: std::rc::Rc<()>,
     detached_focus: Vec<(ViewId, FocusPath)>,
+    floating_videos: std::collections::BTreeMap<ViewId, event::FloatingVideo>,
     data: D,
     bake_warnings: Vec<String>,
     kernel: Kernel,
@@ -432,6 +442,7 @@ pub struct Runner<D: DataSource> {
     /// Refused requests, for `state` (LLP 1070.000 §2.2).
     into_view_refused: std::collections::VecDeque<String>,
     surfaces: Vec<SurfaceUpdate>,
+    surface_colors: surface_colors::Bindings,
     /// Views the next applied batch renews (LLP 1078): rebound list rows.
     renewed: Vec<ViewId>,
     /// Rows the next batch mounts out of their port, and those that showed (LLP 1055 D13).
@@ -599,6 +610,10 @@ pub struct Runner<D: DataSource> {
     geometry: geometry_facts::Facts,
     // @ref LLP 1069.000 D2 — visibility, connectivity, the share sheet.
     platform: crate::page::Platform,
+    // @ref LLP 1094.000 D2 — each node's standing drag refusals, by its url
+    // or its files, each by what was refused, so a refusal is journaled once
+    // while it stands.
+    drag_refused: std::collections::HashMap<(exact_kernel::ViewId, bool), Vec<String>>,
     page: crate::page::Page,
     presented: crate::page::Presented, // `exactPage().presented` (LLP 1069.000 D2)
     window_name: String,               // the page's `name` (LLP 1030.004 D2)
@@ -882,6 +897,7 @@ impl<D: DataSource> Runner<D> {
             action_binding_origin: std::rc::Rc::new(()),
             completion_identity: Default::default(),
             detached_focus: Vec::new(),
+            floating_videos: Default::default(),
             data,
             kernel,
             slots: Vec::new(),
@@ -925,6 +941,7 @@ impl<D: DataSource> Runner<D> {
             intersections: Vec::new(),
             into_view_refused: Default::default(),
             surfaces: Vec::new(),
+            surface_colors: Default::default(),
             renewed: Vec::new(),
             shown: Default::default(),
             reuse: false,
@@ -992,6 +1009,7 @@ impl<D: DataSource> Runner<D> {
             text_axes: seams::TextAxesState(seams.text_axes.state()),
             place: launched_place.clone().unwrap_or_default(),
             platform: crate::page::Platform::at_boot(),
+            drag_refused: Default::default(),
             window_name: crate::time::launch_window_name(),
             host_direction: crate::time::launch_direction(),
             surface_records: Default::default(),
@@ -1035,37 +1053,8 @@ impl<D: DataSource> Runner<D> {
         runner.carry_modes(carried.map_or(&[], |c| &c.modes));
         runner.ask_kept_scheme();
         runner.derives = vec![None; runner.plan.derives.len()];
-        // Resources: carry only the same named source and a value that still fits the declared shape; a carried value can refuse nothing.
-        let carried_resources = (0..runner.plan.resources.len())
-            .map(|i| {
-                let name = runner.plan.str(runner.plan.resources[i].name);
-                let source = runner.plan.str(runner.plan.resources[i].source);
-                carried
-                    .filter(|_| same_logic)
-                    .and_then(|c| {
-                        c.resources
-                            .iter()
-                            .find(|(n, s, _, _)| n == name && s == source)
-                    })
-                    .filter(|(_, _, _, value)| runner.check_shape(i, value).is_ok())
-                    .map(|(_, _, args, value)| ResourceState {
-                        inspection_generation: 0,
-                        args: args.clone(),
-                        value: crate::held::Held::new(value.clone()),
-                        store_revision: runner.store.revision(),
-                        placeholder: false,
-                        kept_seed: false,
-                        from_page: false,
-                        answered_for: None,
-                        asleep: false,
-                        slept: false,
-                        origin: 0,
-                    })
-            })
-            .collect::<Vec<_>>();
-        for (row, state) in runner.resources.iter_mut().zip(carried_resources) {
-            row.state = state;
-        }
+        runner.sync_store_clock();
+        runner.adopt_carried_resources(carried, same_logic);
         // @ref LLP 1016.000 D10 — the uploads asked, carried by resource,
         // source and arguments whatever the data module; a launch starts with none.
         runner.carry_uploads_in(carried.map_or(&[][..], |c| &c.uploads));
@@ -1353,6 +1342,20 @@ impl<D: DataSource> Runner<D> {
             .iter()
             .map(|h| self.plan.handler(h).event)
             .collect()
+    }
+
+    /// Whether a live view handles any of `kinds`, from the views the runner
+    /// created, without collecting them (LLP 1094.000 D15: a window whose
+    /// nodes hear a drag's events scrolls under a drag).
+    pub fn hears_any(&self, kinds: &[EventKind]) -> bool {
+        self.ids.sites().any(|(view, node)| {
+            let handlers = self.plan.node(node).handlers;
+            handlers.len > 0
+                && handlers
+                    .iter()
+                    .any(|h| kinds.contains(&self.plan.handler(h).event))
+                && self.kernel.node(view).is_some()
+        })
     }
 
     /// All live listener declarations (bulk host creation), from the views

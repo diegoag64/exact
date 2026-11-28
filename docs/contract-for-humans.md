@@ -917,15 +917,19 @@ call outside them fails. The capabilities are:
 
 **What catches people.**
 
-- *A source cannot read the clock, repeat a timer or call `Math.random()`.*
-  `Date.now()`, `new Date()` without a value, `setInterval`,
-  `performance.now()` and `Math.random()` are refused when first used, on every
-  executor (`crypto.getRandomValues` and `crypto.randomUUID` work inside an answer); the type check cannot see it, and only `logs` shows the refusal. Time
-  and seeds are arguments: pass `performanceNow()` from the Contract (the
-  [data-module reference](reference.md#generate-typescript-data-source-types) has the full list).
-  An answer may wait with `setTimeout` or `AbortSignal.timeout`: the timer is
-  due on the app's clock, the agent's `clock +N` fires it, and it is cleared
-  when its answer gives its value.
+- *A source cannot repeat a timer, and ambient clocks skip bake.* `setInterval`,
+  `requestAnimationFrame` and `requestIdleCallback` are refused at build time
+  and on every executor; use a Contract `task` to repeat work. `Date.now()`,
+  `new Date()` without a value, `performance.now()` and `Math.random()` work
+  against the host's deterministic clock and seeded substream (CSPRNG in
+  production), alongside `crypto.getRandomValues` and `crypto.randomUUID`,
+  but a resource that calls them is excluded from launch bake and SSR caching
+  and logs `[ambient-clock]`. Pass `exactTime()` or `performanceNow()` from
+  Contract when the value should bake, cache or stay reactive (the
+  [data-module reference](reference.md#generate-typescript-data-source-types)
+  has the full rules). An answer may wait with `setTimeout` or
+  `AbortSignal.timeout`: the timer is due on the app's clock, the agent's
+  `clock +N` fires it, and it is cleared when its answer gives its value.
 - *There is no storage or network at build time.* The build bakes each
   resource's first value into the plan, and a storage or `native.call` then is refused
   with `code: 'bake'`. An uncaught refusal leaves the resource unbaked;
@@ -1313,7 +1317,9 @@ column), sets image-to-title spacing. Leave it absent for the platform's
 spacing. Title-to-subtitle spacing stays the platform's. `align-items` and
 `justify-content` accept only `center`. `-exact-control-size` takes `mini`,
 `small`, `medium`, `large`; `-exact-corner-style` takes `dynamic`, `small`,
-`medium`, `large`, `capsule`. These are styleable rows for native buttons only.
+`medium`, `large`, `capsule`. These are styleable rows for native buttons only,
+but a segmented control (a `tablist` or `radiogroup`) also takes
+`-exact-control-size`, which makes it the platform's segmented control of that size.
 With explicit `appearance="auto"`, `border-radius` sets a radius and wins over
 the named corner style. Under the default, a radius makes the button bare. `padding`
 and its longhands set content insets; leave them absent for the style's own.
@@ -1404,11 +1410,14 @@ activate its `:hover` shadow yet.
 Row buttons and their detail accessories stay bare by default, preserving the
 cell's title and action. Explicit `appearance="auto"` makes one a custom native control.
 
-`listStyle` is `inset-grouped` (the default), `grouped` or `plain`, a literal.
-iOS draws UIKit's own list (`UICollectionView` with a list configuration); the
-other hosts draw a sheet measured from it, and your own attributes replace any
-of its rows. A section's own `margin-top` or `margin-bottom` is the space iOS
-leaves there too, collapsed with its neighbour's as on the web (LLP 1084 §6.4).
+`listStyle` is `inset-grouped` (the default), `grouped`, `plain` or `sidebar`,
+a literal. iOS draws UIKit's own list (`UICollectionView` with a list
+configuration); the other hosts draw a sheet measured from it, and your own
+attributes replace any of its rows. `sidebar` is UIKit's sidebar list at every
+width, for a list of places to go (folders, sections); the hosts with no
+sidebar list draw it as the plain list. A section's own `margin-top` or
+`margin-bottom` is the space iOS leaves there too, collapsed with its
+neighbour's as on the web (LLP 1084 §6.4).
 The rest of a section's layout is the platform's, its rows one under another
 across the card: besides those margins a section takes only `display` `"block"`
 or `"none"` of its own layout, written or from its `class`, and the compiler
@@ -1482,7 +1491,11 @@ are of one kind, points or percentages (`medium` is half), each taller than the
 one before, and `large` goes last; a literal that breaks this is refused. A point
 height that a small screen's tallest reaches, with a taller detent after it, is
 left out there, so `"900 large"` on a phone is `large` alone.
-`fit-content` goes alone or as `"fit-content large"`.
+`fit-content` goes alone, as `"fit-content large"`, or last after ascending stops
+below `large` (e.g. `"medium fit-content"`) as a content-height ceiling: stops at
+or above the sheet's natural content height are omitted, so short content opens
+fitted and taller content opens at the preceding stop and expands to fit its
+content up to the available height.
 It measures the route laid out on its own with its height left to its
 content, as CSS's `fit-content` does, so nothing the sheet gives it counts:
 rows do not shrink into it, and a percentage `height` or `flex-grow` takes
@@ -1503,6 +1516,15 @@ the window below the status bar, `medium` half that; `fit-content` rests at
 `medium`), dragged between them or down to dismiss, over a scrim
 (`host/android/README.md`). macOS and desktop Linux ignore the detent
 (LLP 1075.003 §9.11, LLP 1115.000 D4.8).
+
+A sheet's width on an iPad is its route's `navigationSizing`. `automatic`, the
+default, is the platform's own sheet, as UIKit and SwiftUI present one: a form
+sheet, centred at a standard size, on iPadOS 18 and later, and a page sheet
+before. `page` is a page sheet, the window's full width, for a sheet whose
+content needs the room, as a camera's or an editor's does; `form` is a form
+sheet on every version. On an iPhone and a closed iPhone Duo the three are the
+same full-width sheet, and the other hosts' sheets have one size. It is read as
+the sheet is presented.
 
 A route pushed while a sheet is on top is shown inside that sheet, which keeps the
 detents of the route that opened it, and Back returns to the route before it in

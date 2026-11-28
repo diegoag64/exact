@@ -120,15 +120,38 @@ extension UINavigationBar {
         #endif
         // On an ordinary iPhone or iPad this can measure an app button directly behind a hidden, transparent or detached
         // Back because UIKit supplies no view for default Back and the horizontal bar still needs its box (LLP 1035.003).
-        guard !traitCollection.placesVerticalBar, RouteGeometry.shownBar(self) != nil else { return nil }
+        return drawnBackControlPublicFallback()
+    }
+
+    /// Horizontal-bar fallback for locating UIKit's default Back control without reading
+    /// `_effectiveBackBarButtonItem`. Excludes UIKit's inline title control (which two
+    /// trailing buttons can shift into the leading half on iOS 27), header-trait controls,
+    /// custom item views, and projected non-Back item controls.
+    package func drawnBackControlPublicFallback() -> UIControl? {
+        guard backItem != nil, let item = topItem, !item.hidesBackButton,
+              item.leftBarButtonItems?.isEmpty != false || item.leftItemsSupplementBackButton,
+              !traitCollection.placesVerticalBar, RouteGeometry.shownBar(self) != nil else { return nil }
         let rtl = effectiveUserInterfaceLayoutDirection == .rightToLeft
         let items = (item.leftBarButtonItems ?? []) + (item.rightBarButtonItems ?? [])
         let custom = items.compactMap(\.customView)
         let otherFrames = items.filter { !$0.isHidden }.compactMap { $0.frame(in: self) }
+        #if EXACT_INSPECT
+        let otherControls = items.compactMap { $0.projectedControl(in: window) }
+        #else
+        let otherControls: [UIView] = []
+        #endif
+        let titleControl: UIControl? = item.title.flatMap(drawnTitleLabel).flatMap { label in
+            sequence(first: label as UIView, next: \.superview)
+                .prefix { $0 !== self }
+                .first { $0 is UIControl } as? UIControl
+        }
         var back: UIControl?, pending = subviews
         while let view = pending.popLast() {
-            guard !view.isHidden, view.alpha > 0.01, view.isUserInteractionEnabled, view !== item.titleView,
-                  !custom.contains(view), !(view is UISearchBar || view is UITextField || view is UISegmentedControl) else { continue }
+            guard !view.isHidden, view.alpha > 0.01, view.isUserInteractionEnabled,
+                  view !== item.titleView, view !== titleControl,
+                  !custom.contains(view), !otherControls.contains(where: { $0 === view }),
+                  !view.accessibilityTraits.contains(.header),
+                  !(view is UISearchBar || view is UITextField || view is UISegmentedControl) else { continue }
             guard let control = view as? UIControl else { pending += view.subviews; continue }
             let box = control.convert(control.bounds, to: self), mid = CGPoint(x: box.midX, y: box.midY)
             guard bounds.contains(mid), (rtl ? mid.x > bounds.midX : mid.x < bounds.midX),
@@ -175,10 +198,7 @@ extension Agent {
     func drawnTabControl(_ item: UITabBarItem, in bar: UITabBar) -> UIView? {
         let items = bar.items ?? [], id = item.accessibilityIdentifier, title = item.title
         if let id, !id.isEmpty, items.filter({ $0.accessibilityIdentifier == id }).count != 1 { return nil }
-        if let window = bar.window, let view = item.agentBackingView, view.window === window, RouteGeometry.shownBar(view) != nil {
-            let middle = CGPoint(x: view.bounds.midX, y: view.bounds.midY)
-            if bar.bounds.contains(view.convert(middle, to: bar)) { return view }
-        }
+        if let view = item.backingTabControl(in: bar) { return view }
         let uniqueTitle = title?.isEmpty == false && items.filter { $0.title == title }.count == 1
         var named: [UIView] = [], titled: [UIView] = [], pending = bar.subviews
         while let view = pending.popLast() {

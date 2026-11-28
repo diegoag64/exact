@@ -273,6 +273,11 @@ pub(crate) struct Blocks(
     Vec<(u32, [f32; 4])>,
     /// The owners in `.1`, for a lookup that finds no owner at once.
     crate::sorted::SlotSet,
+    /// The window's aspect-fit guide a host fits the first root to (LLP 1123 D16, `root_fit.rs`).
+    super::root_fit::RootFits,
+    /// The routes their host will present with a block of its own and has not yet placed (LLP 1123, "a presented
+    /// owner waits for its block"), laid out nowhere until it gives one (`set_pending`).
+    crate::sorted::SlotSet,
 );
 
 /// One node's block: the one in force, the host's or else the one the
@@ -313,6 +318,13 @@ pub(crate) struct Held {
 }
 
 impl Blocks {
+    pub(crate) fn root_fits(&self) -> &super::root_fit::RootFits {
+        &self.3
+    }
+    pub(crate) fn root_fits_mut(&mut self) -> &mut super::root_fit::RootFits {
+        &mut self.3
+    }
+
     /// The block `slot` has, its host's or the kernel's.
     pub(crate) fn get(&self, slot: u32) -> Option<HostBlock> {
         self.held(slot).map(|b| b.block)
@@ -403,10 +415,16 @@ impl Blocks {
         }
     }
 
-    /// `slot` gone: neither block stands, nor its local insets.
+    /// `slot` gone: neither block stands, nor its local insets, nor its wait for one.
     pub(crate) fn remove(&mut self, slot: u32) {
         self.0.retain(|b| b.slot != slot);
         self.set_local(slot, None);
+        self.4.remove(slot);
+    }
+
+    /// Whether `slot` waits for the block its host will present it in (`Kernel::set_pending`).
+    pub(crate) fn pending(&self, slot: u32) -> bool {
+        self.4.contains(slot)
     }
 
     /// The local insets a host gave the owner whose root is `slot`.
@@ -470,7 +488,8 @@ impl Blocks {
 /// host replaced whole, which hides every block in it (a tab not yet built,
 /// LLP 1075.003 §9.12); under a box a bar replaced with no block its host
 /// gave on the way down to `slot`, `slot`'s own included, since the bar shows
-/// such a block in a view of its own; or, with `authored`, under a box
+/// such a block in a view of its own; under a box a bar keeps the room of,
+/// which shows nothing it holds; or, with `authored`, under a box
 /// authored `display: none`. `itself`: `slot`'s own cover counts too.
 fn hidden_by(arena: &NodeArena, slot: u32, itself: bool, authored: bool) -> bool {
     let mut given = false;
@@ -481,6 +500,7 @@ fn hidden_by(arena: &NodeArena, slot: u32, itself: bool, authored: bool) -> bool
             match arena.cover(s) {
                 Some(super::HostCover::Whole) => return true,
                 Some(super::HostCover::Bar) if !given => return true,
+                Some(super::HostCover::Room(_)) if above => return true,
                 _ => {}
             }
         }
@@ -494,7 +514,9 @@ fn hidden_by(arena: &NodeArena, slot: u32, itself: bool, authored: bool) -> bool
 }
 
 pub(crate) fn closed_dialog(arena: &NodeArena, slot: u32) -> bool {
-    !arena.is_root(slot)
+    // A root takes no block: measuring it lays it out in its offer
+    let measured_root = arena.is_root(slot) && arena.alert_state.measured_dialogs.contains(slot);
+    !measured_root
         && !arena.blocks.holds(slot)
         && arena.props(slot).str(crate::PropId::SemanticTag) == Some("dialog")
 }
@@ -526,7 +548,10 @@ pub(crate) fn publication_start(arena: &mut NodeArena, root: u32) -> (bool, bool
         hidden_above(arena, root) || arena.cover(root).is_some_and(super::HostCover::replaces);
     let whole = arena.flags(root).has(NodeFlags::ATTACHED);
     let Some(held) = arena.blocks.held_mut(root) else {
-        return (false, false, (0.0, 0.0));
+        // A root the window's aspect-fit guide places starts at the guide's origin (LLP 1123 D16)
+        let key = arena.key(root);
+        let (origin, moved) = arena.blocks.root_fits_mut().publish(key);
+        return (false, moved, origin);
     };
     let was = std::mem::replace(&mut held.hidden, hidden);
     let [top, _, _, left] = held.cleared;
@@ -557,7 +582,8 @@ pub(crate) fn apply(
     s: &mut taffy::style::Style,
 ) {
     let Some(block) = block else {
-        if closed_dialog(arena, slot) {
+        // A route waiting for the block its host presents it in is laid out nowhere until then, as a closed dialog is
+        if closed_dialog(arena, slot) || arena.blocks.pending(slot) {
             s.display = taffy::Display::None;
         }
         return;
@@ -682,6 +708,30 @@ fn cyclic(block: HostBlock, s: &mut taffy::style::Style) {
 }
 
 impl Kernel {
+    /// Say that `view`, a route its host will present with a block of its own, waits for that block (LLP 1123, "a
+    /// presented owner waits for its block"), or no longer does; whether that changed. Until the host gives the block
+    /// (`set_host_block`, which ends the wait), the route has no layout box: none of its subtree is laid out in its
+    /// parent's flow or published, and its geometry is unavailable, as a closed dialog's is. The host decides it before
+    /// the layout of the batch that creates the route.
+    pub fn set_pending(&mut self, view: ViewId, pending: bool) -> Result<bool, KernelError> {
+        let slot = self
+            .arena
+            .slot_of(view)
+            .ok_or(LayoutError::UnknownView(view))?;
+        let changed = match pending && self.arena.blocks.given(slot).is_none() {
+            true => self.arena.blocks.4.insert(slot),
+            false => self.arena.blocks.4.remove(slot),
+        };
+        if changed {
+            if let (Some(node), Some(layout)) = (self.arena.taffy(slot), self.layout.as_deref_mut())
+            {
+                layout.restyle(&self.arena, slot, node);
+                layout.mark_dirty(node);
+            }
+        }
+        Ok(changed)
+    }
+
     /// Give `view` a containing block, or take it back (`None`): at the next
     /// layout its subtree is laid out in the block, or in its parent again
     /// (in the viewport for a top-layer box, the block the kernel implies).
@@ -706,8 +756,11 @@ impl Kernel {
                 Some("a root is laid out in its offer")
             } else if self.arena.in_paragraph(slot) {
                 Some("an inline run or image has no box of its own")
-            } else if self.region.is_some() && !self.arena.top_layer_slots.contains(slot) {
-                Some("only a top-layer block while a content region is registered")
+            } else if self.region.is_some()
+                && !self.arena.top_layer_slots.contains(slot)
+                && self.arena.props(slot).str(crate::PropId::SemanticTag) != Some("dialog")
+            {
+                Some("only a top-layer or dialog block while a content region is registered")
             } else {
                 None
             };
@@ -717,6 +770,10 @@ impl Kernel {
         }
         let before = self.arena.blocks.get(slot);
         let hosted = self.arena.hosted_readout(slot);
+        // The block its host presents it in ends a route's wait (`set_pending`)
+        if block.is_some() {
+            self.arena.blocks.4.remove(slot);
+        }
         // Measure the readers under a box that gains or gives back a block again, which
         // changes the band they observe; a reader elsewhere that this moves has a frame
         // that moved
@@ -911,7 +968,7 @@ impl Kernel {
 
     /// `slot`'s block root styled again, as its block or what is above it
     /// now says.
-    fn restyle_block(&mut self, slot: u32) {
+    pub(super) fn restyle_block(&mut self, slot: u32) {
         let buried = replaced_above(&self.arena, slot);
         if let Some(held) = self.arena.blocks.held_mut(slot) {
             held.buried = buried;

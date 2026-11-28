@@ -622,7 +622,7 @@ fn text_indent_insets_the_first_line_only() {
 fn a_markdown_list_items_lines_start_at_its_indent() {
     let mut e = engine(DEJAVU, "DejaVu Sans");
     let source = "Top\n\n- one two three four five six seven eight\n  - nested\n\n9. nine\n10. ten";
-    let s = spec(source, WhiteSpace::PreWrap).markdown();
+    let s = spec(source, WhiteSpace::PreWrap).markdown(exact_kernel::LineHeight::Normal);
     let p = e.paragraph(&s, Some(200.0));
     // Each visual line: its first glyph's run, where it starts, and where
     // the marker (a hung run) ends.
@@ -688,6 +688,52 @@ fn a_markdown_list_items_lines_start_at_its_indent() {
     let measured = e.measure(&s, AxisOffer::Definite(200.0));
     assert_eq!((measured.height, measured.width), (p.height, p.width));
     assert!(p.width <= 200.0, "{}", p.width);
+}
+
+#[test]
+fn a_wrapped_markdown_heading_resolves_leading_at_its_own_size() {
+    use exact_kernel::text::{Markup, Paragraph};
+    use exact_kernel::{LineHeight, TextRun, TextStyle};
+
+    let mut engine = engine(DEJAVU, "DejaVu Sans");
+    for (line_height, expected) in [
+        (LineHeight::Number(1.5), 38.4),
+        (LineHeight::Length(24.0), 24.0),
+    ] {
+        let rows = StyleProps::default().with_rows(|rows| {
+            rows.font_size = 16.0;
+            rows.line_height = line_height;
+        });
+        let runs = [TextRun {
+            text: "# Heading words that wrap".into(),
+            style: TextStyle::from_style(&rows),
+            inline: None,
+            edges: Default::default(),
+        }];
+        let mut paragraph = Paragraph::from_style(&rows);
+        paragraph.markup = Markup::Markdown;
+        let spec = Spec::from_request(&TextMeasureRequest {
+            atoms: Default::default(),
+            runs: &runs,
+            paragraph,
+            width: AxisOffer::Definite(120.0),
+            height: AxisOffer::MaxContent,
+            exclusions: &[],
+        });
+        assert_eq!(spec.runs[0].size, 25.6);
+        if matches!(line_height, LineHeight::Length(_)) {
+            assert_eq!(spec.runs[0].line_height, Some(expected));
+            continue;
+        }
+        let paragraph = engine.paragraph(&spec, Some(120.0));
+        let lines: Vec<_> = paragraph.layout_runs().map(|line| line.line_y).collect();
+        assert!(lines.len() > 1);
+        let advance = lines[1] - lines[0];
+        assert!(
+            (advance - expected).abs() < 0.001,
+            "{line_height:?}: {advance}"
+        );
+    }
 }
 
 #[test]

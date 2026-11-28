@@ -1047,28 +1047,28 @@ final class FrameHealthMetricsTests: XCTestCase {
         XCTAssertEqual(T.clock(idle), "Exact's clock idle")
         XCTAssertEqual(T.clock(.init(running: true, rates: .init(requestedHz: 0, periodMs: 1000 / 60))), "Exact's clock at the default rate")
         XCTAssertEqual(T.clock(.init(running: true, rates: .init(requestedHz: 120, periodMs: 1000 / 60))), "Exact asks 120 FPS, limit 60")
-        XCTAssertEqual(T.rows(source).map(\.0).prefix(3), ["Frame rate", "Late frames", "Frames"], "the face gives late frames beside the rate")
+        XCTAssertEqual(T.rows(source).map(\.0).prefix(3), ["Frame rate", "Held up", "Late frames"], "the face gives the time held up beside the rate")
         XCTAssertFalse(T.rows(source).map(\.0).contains("Max frame time"))
-        XCTAssertEqual(T.rows(source).last?.0, "Main thread over 8.3ms")
+        XCTAssertEqual(T.rows(source).last?.0, "Longest hold-up")
         XCTAssertEqual(T.caption(none, source: source, varied: false), "Late: sent after UIKit's deadline")
-        // The screen's frames bound no frame time: its rate is its frames over the time a window covers, and the main
-        // thread's work stands in for pacing
+        // The screen's frames bound no frame time: the rate is frames over the time a window covers, the longest hold-up stands
+        // in for pacing, and held up is time past one refresh over that time, rounded up, at most all; a longer window names its span
         var t = FrameHealthCardReader.Window()
+        let screen = { T.figures(t, rates: none, adaptiveSync: false, source: source) }, pacing = { T.pacing(t, rates: none, adaptiveSync: false, source: source) }
+        XCTAssertTrue(pacing() == ("—", "") && screen().heldUp == "—", "nothing read yet")
         (t.from, t.read) = (10, 10.5)
-        XCTAssertEqual(T.pacing(t, rates: none, adaptiveSync: false, source: source).0, "Longest 0.0ms")
-        XCTAssertEqual(T.pacing(t, rates: none, adaptiveSync: false, source: source).1, "None over one refresh, 8.3ms")
-        XCTAssertEqual(T.figures(t, rates: none, adaptiveSync: false, source: source).fps, "—", "no frames, no rate")
-        t.counts.callbacks = 60; t.counts.worked = 60; t.counts.late = 3; t.counts.long = 2; t.mainLongest = 61.2
-        let screen = T.figures(t, rates: none, adaptiveSync: false, source: source)
-        XCTAssertEqual([screen.fps, screen.frames, screen.late, screen.mainLongest, screen.mainLong, screen.changes],
-            ["120 FPS", "60", "3", "61.2ms", "2", "—"])
-        XCTAssertEqual(T.pacing(t, rates: none, adaptiveSync: false, source: source).1, "2 over one refresh, 8.3ms")
-        // Over a window that covers more than its nominal span, the rate is over the span it covers, which it names
+        XCTAssertTrue(pacing() == ("0.0ms", "") && screen().fps == "—", "no frames, no rate")
+        t.counts.callbacks = 60; t.counts.worked = 60; t.counts.late = 3; t.mainLongest = 61.2
+        XCTAssertEqual([screen().fps, screen().frames, screen().late, screen().mainLongest, screen().changes], ["120 FPS", "60", "3", "61.2ms", "—"])
+        XCTAssertTrue(pacing() == ("61.2ms", ""))
+        XCTAssertEqual([UInt64(0), 1, 35_000_000, 241_666_667, 600_000_000].map { t.counts.heldUpNs = $0; return screen().heldUp }, ["0%", "1%", "7%", "49%", "100%"], "any hold-up shows")
         t.from = 9.5
-        XCTAssertEqual(T.figures(t, rates: none, adaptiveSync: false, source: source).fps, "60 FPS")
+        XCTAssertEqual([screen().fps, screen().heldUp], ["60 FPS", "60%"])
         XCTAssertEqual(T.window(t, nominal: 0.5, source: source), "Last 1.0s")
-        let exact = T.figures(t, rates: none, adaptiveSync: false)
-        XCTAssertEqual([exact.fps, exact.frames, exact.mainLongest, exact.mainLong], ["—", "—", "—", "—"])
+        XCTAssertEqual({ let e = T.figures(t, rates: none, adaptiveSync: false); return [e.fps, e.frames, e.mainLongest, e.heldUp] }(), ["—", "—", "—", "—"])
+        typealias F = FrameHealthCardFace
+        XCTAssertLessThanOrEqual(F.secondFigure(lead: "held up") + 3.6 + FrameHealthCardDrawing.width("of the time", F.body), F.minimumWidth - 12, "the words fit")
+        XCTAssertEqual(Set(["5s", "2.5s", "10.0s", "100s"].map { F.labelWidth("Longest hold-up (last \($0))", name: "Longest hold-up") }).count, 1, "the value stays put")
         // The screen's work chart has a gridline at each whole refresh at the display's highest rate, the first dotted,
         // and draws no deadline
         let area = CGRect(x: 12, y: 206, width: 296, height: 200)
@@ -1143,10 +1143,10 @@ final class FrameHealthMetricsTests: XCTestCase {
         var taken = 0
         reader.sample(health, now: 1, force: true, main: { taken += 1; return (0.004, 0) })
         health.record(arrival: 1.1, target: 1.11, period: 0, finished: 1.105)
-        reader.sample(health, now: 1.6, force: true, main: { taken += 1; return (0.061, 2) })
+        reader.sample(health, now: 1.6, force: true, main: { taken += 1; return (0.061, 0.0525) })
         XCTAssertEqual(taken, 2, "each read takes the main thread's work, the baseline's too, so none carries over")
         XCTAssertEqual(reader.window(5).mainLongest, 61, accuracy: 1e-9)
-        XCTAssertEqual(reader.window(5).counts.long, 2)
+        XCTAssertEqual(reader.window(5).counts.heldUpNs, 52_500_000)
         // A paused card reads nothing; its first read after covers the paused span, from the last read before it
         health.record(arrival: 1.7, target: 1.71, period: 0, finished: 1.705)
         health.record(arrival: 3.7, target: 3.71, period: 0, finished: 3.705)
@@ -1307,7 +1307,7 @@ final class FrameHealthMetricsTests: XCTestCase {
         XCTAssertFalse(both.contains(CGPoint(x: end + 0.5, y: long.maxY)))
         // A compact card's last line, at its bottom left
         let compact = try XCTUnwrap(FrameHealthCardFace.Layout(width: width, compact: true, corners: (12, 12, 12, 54)).bottomOutline)
-        let pacing = D.box("None over one refresh, 16.7ms", x: 12, y: 154, FrameHealthCardFace.digits, .left)
+        let pacing = D.box("597 frames at 8.3ms, 3 at 25.0ms", x: 12, y: 154, FrameHealthCardFace.digits, .left)
         XCTAssertGreaterThan(D.fit(pacing, .left, limit: width - 24, within: compact).x, 12)
         // Drawn, the charts' labels leave no ink within a point of the card's edge: in a 54-point corner, where "now"
         // is cut without the outline, and with the frame-rate chart expanded, its 0 in a 62-point corner
@@ -1421,29 +1421,31 @@ final class FrameHealthMetricsTests: XCTestCase {
         let display = FrameHealthCardText.Display(name: "ProMotion", detail: "adaptive refresh up to 120 Hz", maximumHz: 120, adaptiveSync: false)
         let rates = FrameHealthCardText.Rates(requestedHz: 120, periodMs: 1000 / 120.0)
         let text = FrameHealthCardText.summary(reader: reader, rates: rates, display: display, health: health)
-        XCTAssertLessThan(text.utf8.count, 4000)
+        let screen = FrameHealthCardText.summary(reader: reader, clock: reader, rates: rates, display: display,
+            source: .screen(refreshMs: 1000 / 120.0, exact: .init(running: true, rates: rates)), health: health)
+        XCTAssertLessThan(max(text.utf8.count, screen.utf8.count), 4000, "both summaries")
         // Two seconds of samples cover two seconds, whatever the window's nominal span
         XCTAssertTrue(text.contains("Max work time: 3.0ms (last 0.5s), 3.0ms (last 2.0s), 3.0ms (last 2.0s)"), text)
         XCTAssertTrue(text.contains("Frame rate: 120 FPS (last 0.5s)"), text)
         XCTAssertFalse(text.contains("·"), "no middots in the figures")
-        XCTAssertTrue(text.contains("\nResults for the last 2.0s\nThese come from frame timing only"), "and Details' results: \(text)")
-        XCTAssertTrue(text.contains("\nCadence, whether every frame kept to the display's schedule: "), text)
-        let screen = FrameHealthCardText.summary(reader: reader, clock: reader, rates: rates, display: display,
-            source: .screen(refreshMs: 1000 / 120.0, exact: .init(running: true, rates: rates)), health: health)
-        XCTAssertLessThan(screen.utf8.count, 4000, "the screen's summary too")
-        XCTAssertTrue(text.contains("\nFigures\nFrame rate leaves out idle time. "), text)
-        XCTAssertTrue(screen.contains("\nExact's frame clock, the display link that drives Exact's own drawing: asks for 120 FPS\n"), screen)
-        // Share's text says what it holds and the card's status, and names each report's source in words
+        XCTAssertTrue(text.contains("\n- Cadence (did every frame keep to the display's schedule?): "), "and Details' results: \(text)")
+        XCTAssertTrue(text.contains("\n## Figures (Exact's frames)\n\nFrame rate doesn't count idle time. "), text)
+        XCTAssertTrue(screen.contains("\n- Exact's frame clock, which drives Exact's own drawing: requesting 120 FPS\n"), screen)
+        // Share's text is Markdown: the status, the summary, then a section on the reports and each under a heading naming it
         let report = Data("{}".utf8)
         let shared = FrameHealthCardText.shared(summary: screen, status: .paused,
             reports: [("ui-update", report), ("exact-app-display-link", report)])
-        XCTAssertTrue(shared.hasPrefix("Frame health, paused\nA summary, then the full data for an AI agent as 2 JSON reports.\n"
-            + "Paused: the summary's figures end when the card was paused; the reports are from now.\n"
-            + "Exact's docs/contract-for-agents.md describes each report's fields: search it for exact.frame-health/2.\n\nWhat was measured\n"), shared)
-        XCTAssertTrue(shared.hasSuffix("\n\nAgent report 1 of 2, the screen's frames (ui-update):\n{}\n\n"
-            + "Agent report 2 of 2, Exact's frame clock (exact-app-display-link):\n{}"), shared)
+        XCTAssertTrue(shared.hasPrefix("# Frame health, paused\n\nA summary of how smoothly this app is drawing, followed by detailed data for an AI agent. The card is paused, so the summary shows "
+            + "the numbers from when it was paused. The detailed data is current.\n\n## What was measured\n\n"), shared)
+        XCTAssertEqual(shared.components(separatedBy: "\n").filter { $0.hasPrefix("#") }, ["# Frame health, paused",
+            "## What was measured", "## Figures (all screen updates)", "## Checks (Exact's frames, last 2.0s)", "## Data for an AI agent",
+            "### All screen updates (`ui-update`)", "### Exact's frames (`exact-app-display-link`)"])
+        XCTAssertTrue(shared.contains("\n\n## Data for an AI agent\n\nThere are two reports covering the same period. "), shared)
+        XCTAssertTrue(shared.hasSuffix("\n\n```json\n{}\n```"), shared)
         XCTAssertTrue(FrameHealthCardText.shared(summary: text, status: .idle, reports: [("other", report)])
-            .hasSuffix("\n\nAgent report, other:\n{}"), "a source without a name in words by its own")
+            .hasSuffix("\n\n## Data for an AI agent\n\nThere is one report, because on the Mac and on iOS before 18 the card can't "
+                + "measure all screen updates. The JSON format is described in Exact's docs/contract-for-agents.md (search for "
+                + "exact.frame-health/2).\n\n### `other`\n\n```json\n{}\n```"), "a source without a name in words by its own")
     }
 
     func testDetailsGivesTheCollectorsResultsOverTheLast5sAndTheCountsBehindThem() {

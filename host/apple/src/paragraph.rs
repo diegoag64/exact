@@ -122,6 +122,26 @@ impl<D: DataSource> Host<D> {
         self.finish(batch, error)
     }
 
+    /// Emit paragraphs whose inline-image reservation changed in the kernel
+    /// outside a commit (lazy symbol measurement, viewport-relative box or
+    /// margin changes, or intrinsic size updates).
+    pub(super) fn sync_inline_image_paragraphs(&mut self, batch: &mut Batch) {
+        let owners = self.runner.kernel_mut().take_inline_image_paragraphs();
+        for owner in owners {
+            let Some(node) = self.runner.kernel().node(owner) else {
+                continue;
+            };
+            let current = node.paragraph_stamp();
+            let sent = self.mirror.get(&owner).and_then(|m| m.paragraph.as_deref());
+            if current.as_ref() != sent {
+                self.dirty_paragraphs.insert(owner);
+            }
+        }
+        if !self.dirty_paragraphs.is_empty() {
+            self.emit_paragraphs(batch);
+        }
+    }
+
     /// Lay out again after `view` took a new natural size.
     pub(super) fn layout_resized(&mut self, view: ViewId, batch: &mut Batch) -> Result<(), String> {
         self.inline_image_resized(view, batch);
@@ -367,6 +387,9 @@ impl<D: DataSource> Host<D> {
                 );
             }
             runs.push(']');
+            if let Some(mirror) = self.mirror.get_mut(&owner) {
+                mirror.paragraph = node.paragraph_stamp().map(Box::new);
+            }
             batch.paragraph(owner, &runs);
         }
     }
@@ -491,6 +514,17 @@ impl<D: DataSource> Host<D> {
     }
 
     pub(super) fn update(&mut self, id: ViewId, batch: &mut Batch) {
+        self.update_node(id, None, batch);
+    }
+
+    /// Receipt updates can prove an owner's paragraph inputs stayed the same.
+    /// A host refresh (environment, bar typography or native projection) resends them.
+    pub(super) fn update_node(
+        &mut self,
+        id: ViewId,
+        stamp: Option<exact_kernel::ParagraphStamp>,
+        batch: &mut Batch,
+    ) {
         if self.svg.element(self.runner.kernel(), id).is_some() {
             return;
         }
@@ -510,7 +544,11 @@ impl<D: DataSource> Host<D> {
             self.dirty_paragraphs.insert(owner);
         }
         if let Some(owner) = self.paragraph_owner(id) {
-            self.dirty_paragraphs.insert(owner);
+            if stamp.is_none()
+                || stamp.as_ref() != self.mirror.get(&owner).and_then(|m| m.paragraph.as_deref())
+            {
+                self.dirty_paragraphs.insert(owner);
+            }
             if owner != id {
                 return;
             }
@@ -680,8 +718,6 @@ impl<D: DataSource> Host<D> {
         let mut restyled = vec![(view, style::style_json_presented(&node, &env, &shown).0)];
         let mut runs = Vec::new();
         if inherits {
-            let mut inherited = style::Shown::default();
-            inherited.set(Property::Color, color);
             let mut stack = node.children();
             while let Some(child) = stack.pop() {
                 let Some(c) = kernel.node(child) else {
@@ -693,6 +729,12 @@ impl<D: DataSource> Host<D> {
                 if let Some((owner, _)) = self.inline_runs.get(&child) {
                     runs.push((child, *owner));
                 } else {
+                    // The child's own moving values (its clip, its filter,
+                    // its colours) with the colour it inherits
+                    let mut inherited = self.shown_paint(motion_node(c.key));
+                    if inherited.get(Property::Color).is_none() {
+                        inherited.set(Property::Color, color);
+                    }
                     restyled.push((child, style::style_json_inherited(&c, &env, &inherited).0));
                 }
                 stack.extend(c.children());
@@ -834,7 +876,12 @@ pub(super) fn props_for(node: &NodeRef<'_>) -> exact_kernel::SortedMap<&'static 
             PropValue::Str(s) => s.to_string(),
             PropValue::Bool(b) => b.to_string(),
             PropValue::Int(i) => i.to_string(),
-            PropValue::Float(f) if matches!(id, PropId::Datetime | PropId::Start | PropId::End) => {
+            PropValue::Float(f)
+                if matches!(
+                    id,
+                    PropId::Datetime | PropId::Start | PropId::End | PropId::AppleMagnification
+                ) =>
+            {
                 f.to_string()
             }
             PropValue::Float(f) => style::num(*f as f32),

@@ -102,6 +102,8 @@ pub struct WorldSurface<G: Game, P: Executor = (), const ASSETS: bool = false, H
     /// The last frame asked for no next one: the canvas draws again only on a change.
     still: bool,
     poll_input: bool,
+    draw_demand: Option<&'static str>,
+    trace_picture: Option<Box<crate::world::IdlePicture>>,
     idle_picture: Option<crate::world::IdlePicture>,
     /// The tick the world was first seen idle at, while it stays idle.
     idle_tick: Option<u64>,
@@ -519,10 +521,11 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         self.device_assets_invalidated = false;
         self.device = true;
     }
-    fn device_lost(&mut self) {
+    fn device_lost(&mut self) -> bool {
         self.hooks.device_lost();
         self.hook_clock.reset();
         self.gpu_timing = None;
+        self.look.retiered();
         for child in &mut self.placed.children {
             child.texture = None;
         }
@@ -546,6 +549,7 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
         }
         self.assets_dirty = true;
         self.dirty = true;
+        true
     }
     fn take_error(&mut self) -> Option<SurfaceError> {
         if let Some(refusal) = self.refusal.take() {
@@ -654,6 +658,15 @@ impl<G: Game, P: Executor, const ASSETS: bool, H: crate::Hooks> Surface
     }
     fn input(&mut self, event: &InputEvent) {
         self.queue_input(event);
+    }
+    fn finish_draw_trace(&mut self, traced: bool) -> Option<u64> {
+        self.remember_traced_picture(traced);
+        self.sim
+            .as_mut()
+            .and_then(Sim::take_consumed_sensor_samples)
+    }
+    fn draw_reasons(&self, input_poll: bool, record: &mut dyn FnMut(&str)) {
+        self.describe_draw(input_poll, record);
     }
     fn poll_input_before_draw(&mut self) {
         self.poll_input = true;

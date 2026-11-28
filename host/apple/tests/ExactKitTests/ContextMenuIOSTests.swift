@@ -12,6 +12,64 @@ import XCTest
 /// stack's animation, `.dismiss` otherwise. The native fixture's `peek` row.
 /// UIKit, so a simulator runs it: bun host/apple/build.mjs --test --ios
 final class ContextMenuIOSTests: XCTestCase {
+    /// UIKit sizes a preview to its visible path and puts the path's middle
+    /// at its target's center: a preview drawn in the top part of its view
+    /// (a balloon above the room its box keeps for a tail it does not draw)
+    /// aims at the middle of that part, not of the view, or it shows lower.
+    func testALiftAimsAtTheMiddleOfWhatItDraws() throws {
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 400, height: 400))
+        let screen = UIViewController()
+        window.rootViewController = screen
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        let view = UIView(frame: CGRect(x: 100, y: 100, width: 100, height: 100))
+        screen.view.addSubview(view)
+        XCTAssertEqual(try XCTUnwrap(LiftTarget.target(view)).center.y, 150, accuracy: 0.5)
+        let part = try XCTUnwrap(LiftTarget.target(view, around: CGRect(x: 0, y: 0, width: 100, height: 60)))
+        XCTAssertEqual(part.center.y, 130, accuracy: 0.5)
+        XCTAssertEqual(part.center.x, 150, accuracy: 0.5)
+    }
+
+    /// A sidebar's row lifts in the ground UIKit draws its press in, inset
+    /// and rounded: its corner is outside the path, its middle inside. A plain
+    /// list's row has no such ground, so its cell lifts whole.
+    func testASidebarCellLiftsInItsPressedGround() throws {
+        func cell(_ appearance: UICollectionLayoutListConfiguration.Appearance) throws -> UICollectionViewListCell {
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 400))
+            let layout = UICollectionViewCompositionalLayout.list(using: .init(appearance: appearance))
+            let list = UICollectionView(frame: window.bounds, collectionViewLayout: layout)
+            let registration = UICollectionView.CellRegistration<UICollectionViewListCell, Int> { cell, _, _ in
+                var content = cell.defaultContentConfiguration()
+                content.text = "Priya Shah"
+                cell.contentConfiguration = content
+                cell.backgroundConfiguration = .clear() // as a card-less row shows while it is not pressed
+            }
+            let source = UICollectionViewDiffableDataSource<Int, Int>(collectionView: list) { list, path, item in
+                list.dequeueConfiguredReusableCell(using: registration, for: path, item: item)
+            }
+            var snapshot = NSDiffableDataSourceSnapshot<Int, Int>()
+            snapshot.appendSections([0])
+            snapshot.appendItems([1])
+            source.apply(snapshot, animatingDifferences: false)
+            window.addSubview(list)
+            window.isHidden = false
+            list.layoutIfNeeded()
+            defer { window.isHidden = true }
+            _ = source
+            return try XCTUnwrap(list.cellForItem(at: IndexPath(item: 0, section: 0)) as? UICollectionViewListCell)
+        }
+        let row = try cell(.sidebar)
+        let shape = try XCTUnwrap(LiftTarget.backgroundShape(of: row), "a sidebar's row has a pressed ground")
+        XCTAssertFalse(shape.contains(CGPoint(x: shape.bounds.minX + 1, y: shape.bounds.minY + 1)), "rounded: its own corner is outside")
+        XCTAssertTrue(shape.contains(CGPoint(x: shape.bounds.midX, y: shape.bounds.minY + 1)), "its top edge is inside")
+        XCTAssertTrue(row.bounds.insetBy(dx: -0.5, dy: -0.5).contains(shape.bounds), "within the cell")
+        // The row's own background insets replace UIKit's
+        let inset = try XCTUnwrap(LiftTarget.backgroundShape(of: row, insets: NSDirectionalEdgeInsets(top: 2, leading: 30, bottom: 2, trailing: 10)))
+        XCTAssertGreaterThanOrEqual(inset.bounds.minX, row.bounds.minX + 30 - 0.5, "at least its leading inset in")
+        XCTAssertLessThanOrEqual(inset.bounds.maxX, row.bounds.maxX - 10 + 0.5, "at least its trailing inset in")
+        XCTAssertNil(LiftTarget.backgroundShape(of: try cell(.plain)), "a plain list's row lifts whole")
+    }
+
     private var window: UIWindow?
     private var session: ExactSession?
 

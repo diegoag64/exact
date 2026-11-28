@@ -61,8 +61,7 @@ final class GroupedCollectionView: UICollectionView, GroupedScroller, BandConsum
     }
     /// The list's node, which the collection is the scroll view of.
     private var owner: NodeView? { superview as? NodeView }
-    /// Its indicators take its safe area while UIKit's adjustment is off, and its horizontal indicator `sideSafeArea`
-    /// too, as a plain scroller's do (`SafeIndicatorTerm`).
+    /// Its indicators take its safe area while UIKit's adjustment is off, as a plain scroller's do (`SafeIndicatorTerm`).
     private var safeIndicators = SafeIndicatorTerm()
     var writtenWhole = false { didSet { safeIndicators.sync(self) } }
     override var automaticallyAdjustsScrollIndicatorInsets: Bool { didSet { safeIndicators.sync(self) } }
@@ -78,24 +77,38 @@ final class GroupedCollectionView: UICollectionView, GroupedScroller, BandConsum
     }
     /// The safe area at the sides the collection reaches over: the kernel's
     /// side reach once it has given one (LLP 1123 D13), else the list's own
-    /// (`sideReach`), the window's or a fold's half band. UIKit insets the
-    /// cards from it or its own safe area, whichever is deeper, as in a
-    /// hand-built list.
+    /// (`sideReach`), the window's or a fold's half band. UIKit gives the
+    /// collection none of it, as it lies past its node's box, so each section
+    /// takes what it adds to UIKit's own as inset (`sideBand`), which places
+    /// the cards as UIKit places a hand-built list's under that safe area.
+    /// UIKit's own stays its own: a reported one it did not give lays the
+    /// whole list out again on each frame its bars move, against a person's pan.
     var sideSafeArea: (left: CGFloat, right: CGFloat) = (0, 0) {
         didSet {
             guard sideSafeArea != oldValue else { return }
-            safeAreaInsetsDidChange()
+            let safe = safeAreaInsets
+            guard max(safe.left, sideSafeArea.left) != max(safe.left, oldValue.left)
+                || max(safe.right, sideSafeArea.right) != max(safe.right, oldValue.right) else { return }
+            safeIndicators.sync(self)
             collectionViewLayout.invalidateLayout()
         }
     }
-    /// The depth the cards are inset from on each side, the side safe area the layout uses (`safeAreaInsets`: UIKit's
-    /// or `sideSafeArea`, whichever is deeper), top right bottom left, which D14's writer leaves to the layout.
-    package var consumedBand: [CGFloat] { [0, safeAreaInsets.right, 0, safeAreaInsets.left] }
-    override var safeAreaInsets: UIEdgeInsets {
-        var insets = super.safeAreaInsets
-        insets.left = max(insets.left, sideSafeArea.left)
-        insets.right = max(insets.right, sideSafeArea.right)
+    /// Its indicators keep within the sides it reaches over too (`SafeIndicatorTerm`).
+    var indicatorSafeArea: UIEdgeInsets {
+        var insets = safeAreaInsets
+        (insets.left, insets.right) = (max(insets.left, sideSafeArea.left), max(insets.right, sideSafeArea.right))
         return insets
+    }
+    /// What `sideSafeArea` adds on each side to the safe area UIKit gives the collection, which the sections take.
+    var sideBand: (left: CGFloat, right: CGFloat) {
+        let safe = safeAreaInsets
+        return (max(0, sideSafeArea.left - safe.left), max(0, sideSafeArea.right - safe.right))
+    }
+    /// The depth the cards are inset from on each side, UIKit's safe area or `sideSafeArea`, whichever is deeper, top
+    /// right bottom left, which D14's writer leaves to the layout.
+    package var consumedBand: [CGFloat] {
+        let safe = indicatorSafeArea
+        return [0, safe.right, 0, safe.left]
     }
 
     /// UIKit changed the margins it gives the list's cells, or showed the
@@ -126,10 +139,16 @@ final class GroupedCollectionView: UICollectionView, GroupedScroller, BandConsum
     /// The sections' inset regions as the layout last took them (`insetsReferences`).
     private var referred: [UIContentInsetsReference?] = [nil, nil, nil]
     private var insets: [(clip: CALayer, caster: InsetShadowCaster)] = []
+    private var hasCardShadowStyle = false
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        paintCardShadows()
+        var paintsShadows = hasCardShadowStyle
+        #if os(iOS)
+        // Reordering defers projection sync while card styles can still change.
+        paintsShadows = paintsShadows || (contact != nil && reorderList?.movingRow != nil)
+        #endif
+        if paintsShadows { paintCardShadows() }
     }
 
     /// How far a section's card's outer shadows reach; nil when it casts none.
@@ -159,6 +178,7 @@ final class GroupedCollectionView: UICollectionView, GroupedScroller, BandConsum
     /// came, went or changed its reach, or the regions the list's insets
     /// are measured from changed, then casts every card's shadows.
     func castCardShadows() {
+        hasCardShadowStyle = (0..<numberOfSections).contains { card($0)?.mayCastGroupedCardShadow == true }
         let references = insetsReferences
         if referLayoutInsets(references[0]) || references != referred || (0..<numberOfSections).contains(where: { outerReach($0) != decorated[$0] }) {
             collectionViewLayout.invalidateLayout()

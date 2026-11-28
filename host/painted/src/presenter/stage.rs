@@ -47,33 +47,21 @@ use std::rc::Rc;
 use tiny_skia::Transform;
 
 mod authored;
+mod detents;
 #[cfg(test)]
 pub(super) mod tests;
 mod touch;
 mod zoom;
 
 use authored::{Authored, Top};
+pub use detents::SHEET_HANDLE;
+use detents::{fits, initial_rest, reconcile_index, resolve_sheet_stops};
+pub(crate) use detents::{sheet_handle, sheet_span};
 use exact_kernel::StyleId;
 
-/// The room a sheet's drag handle takes at its top, points: Material's
-/// handle, 4 tall with 22 above and below.
-pub const SHEET_HANDLE: f32 = 48.0;
-pub(crate) fn sheet_handle(route: &exact_kernel::NodeRef<'_>) -> f32 {
-    if route.props.str(PropId::NavigationGrabber) == Some("hidden") {
-        0.0
-    } else {
-        SHEET_HANDLE
-    }
-}
-/// Material 3's sheet: its widest, its top corners, and its scrim.
-const SHEET_MAX_WIDTH: f32 = 640.0;
+/// Material 3's sheet top corners and scrim.
 const SHEET_CORNER: f32 = 28.0;
 const SCRIM: f32 = 0.32;
-/// A centered Material sheet's left margin and width in the page.
-pub(crate) fn sheet_span(page_width: f32) -> (f32, f32) {
-    let width = page_width.min(SHEET_MAX_WIDTH);
-    ((page_width - width) / 2.0, width)
-}
 
 /// Material's motion: a sheet's entrance (emphasized decelerate), its exit
 /// (emphasized accelerate), a settle between detents, and the shared axis.
@@ -187,6 +175,9 @@ struct Sheet {
     /// Its resting heights, shortest first, the bar under its foot
     /// included; points.
     heights: Vec<f32>,
+    /// The detent word(s) each entry in `heights` came from, in matching order
+    /// (collapsed ties keep every word that resolved to the same height).
+    words: Vec<Vec<String>>,
     at: usize,
     /// Its top edge in the page, points.
     top: Glide,
@@ -204,6 +195,8 @@ struct Sheet {
     /// ancestors it is lifted out of, and keeps as it slides out; `None`
     /// follows the session's.
     scheme: Option<bool>,
+    /// The sheet route's projected top app bar picture, kept for `Closing`.
+    bar: Option<Rc<Tape>>,
 }
 
 /// A sheet whose route has gone, sliding out of the window.
@@ -219,11 +212,14 @@ struct Closing {
     /// What a predictive Back had shrunk it to.
     scale: f32,
     scheme: Option<bool>,
+    bar: Option<Rc<Tape>>,
 }
 
 /// A route crossing.
 struct Shift {
     forward: bool,
+    /// Whether the transition container's inline axis is right-to-left (shared-axis X).
+    rtl: bool,
     /// The route that leaves, drawn live or from its kept drawing once removed.
     outgoing: NodeKey,
     incoming: NodeKey,
@@ -339,44 +335,8 @@ pub(super) struct State {
 
 /// What a sheet's heights are computed from: its `navigationDetent`, the
 /// page's height and the tallest, whether the keyboard is up, and its
-/// `fit-content` height.
-type Said = (Option<String>, (f32, f32), bool, Option<f32>);
-
-/// Whether `detent` names `fit-content`.
-fn fits(detent: Option<&str>) -> bool {
-    detent.is_some_and(|d| d.split_whitespace().any(|w| w == "fit-content"))
-}
-
-/// The sheet heights `detent` asks for on a page `tallest` high below the
-/// status bar, the bar under the foot `foot` high, its route's content
-/// `fit` high with that bar; unreadable words are left out, and none left
-/// is the tallest.
-fn heights(detent: Option<&str>, tallest: f32, foot: f32, fit: f32) -> Vec<f32> {
-    let mut out: Vec<f32> = (detent.unwrap_or("large").split_whitespace())
-        .filter_map(|d| match d {
-            "large" => Some(tallest),
-            "medium" => Some(tallest / 2.0 + foot),
-            "fit-content" => Some(fit),
-            d => match d.strip_suffix('%') {
-                Some(p) => p.parse::<f32>().ok().filter(|p| *p > 0.0).map(|p| {
-                    if p >= 100.0 {
-                        tallest
-                    } else {
-                        tallest * p / 100.0 + foot
-                    }
-                }),
-                None => d.parse::<f32>().ok().filter(|v| *v > 0.0).map(|v| v + foot),
-            },
-        })
-        .map(|v| v.clamp(1.0, tallest.max(1.0)))
-        .collect();
-    out.sort_by(f32::total_cmp);
-    out.dedup_by(|a, b| (*a - *b).abs() < 0.5);
-    if out.is_empty() {
-        out.push(tallest.max(1.0));
-    }
-    out
-}
+/// natural and IME-lifted `fit-content` heights.
+type Said = (Option<String>, (f32, f32), bool, Option<(f32, f32)>);
 
 impl<D: DataSource> Presenter<D> {
     /// Whether this presenter places sheets and moves routes itself: its
@@ -408,6 +368,13 @@ impl<D: DataSource> Presenter<D> {
     /// A sheet's left edge and width.
     fn sheet_span(&self) -> (f32, f32) {
         sheet_span(self.viewport.0)
+    }
+
+    /// Where the stage shows the sheet `modal` opened, its left edge and top
+    /// in the page, points, while it shows one.
+    pub(super) fn sheet_origin(&self, modal: NodeKey) -> Option<(f32, f32)> {
+        let sheet = self.stage.sheets.iter().find(|s| s.modal == modal)?;
+        Some((self.sheet_span().0, self.sheet_top_now(sheet)))
     }
 
     fn sheet_top_now(&self, sheet: &Sheet) -> f32 {
@@ -488,6 +455,7 @@ impl<D: DataSource> Presenter<D> {
                     from,
                     scale,
                     scheme: sheet.scheme,
+                    bar: sheet.bar,
                 });
             }
             if matches!(&self.stage.gesture, Some(touch::Gesture::Drag { modal, .. }) if *modal == sheet.modal)
@@ -506,15 +474,48 @@ impl<D: DataSource> Presenter<D> {
             None => 0.0,
         };
         for (i, last) in wanted {
-            let kernel = self.host.kernel();
-            let node = kernel.node(stack[i]).expect("a live route");
-            let handle = sheet_handle(&node);
-            let detent = node.props.str(PropId::NavigationDetent).map(str::to_owned);
-            let initial = node
-                .props
-                .str(PropId::NavigationInitialDetent)
-                .map(str::to_owned);
-            let stamp = kernel.layout_stamp();
+            let (handle, detent, initial) = {
+                let kernel = self.host.kernel();
+                let node = kernel.node(stack[i]).expect("a live route");
+                (
+                    sheet_handle(&node),
+                    node.props.str(PropId::NavigationDetent).map(str::to_owned),
+                    node.props
+                        .str(PropId::NavigationInitialDetent)
+                        .map(str::to_owned),
+                )
+            };
+            // Measure `fit-content` at the sheet's actual width (capped at 640 dp)
+            // even on frame 1 before `place_sheets` runs. Only `.width` is checked
+            // because `Kernel::fit_content_height` depends only on the block's width
+            // axis, avoiding redundant re-layout once `place_sheets` sets final height.
+            if presents && fits(detent.as_deref()) {
+                let route_id = stack[i];
+                if self.host.kernel().host_block(route_id).map(|b| b.width)
+                    != Some(BlockAxis::Is(width))
+                {
+                    let block = HostBlock {
+                        tactic: Default::default(),
+                        width: BlockAxis::Is(width),
+                        height: BlockAxis::Is(tallest.round()),
+                    };
+                    if self
+                        .host
+                        .runner_mut()
+                        .kernel_mut()
+                        .set_host_block(route_id, Some(block))
+                        .is_ok()
+                    {
+                        if !self.stage.blocks.contains(&route_id) {
+                            self.stage.blocks.push(route_id);
+                        }
+                        if let Err(e) = self.host.layout_unauthored() {
+                            self.host.log(e);
+                        }
+                    }
+                }
+            }
+            let stamp = self.host.kernel().layout_stamp();
             let kept = (self.stage.sheets.iter())
                 .find(|s| s.modal == keys[i])
                 .and_then(|s| s.measured);
@@ -523,31 +524,31 @@ impl<D: DataSource> Presenter<D> {
                 (true, Some(m)) if m.0 == stamp => Some(m),
                 (true, _) => self.fit_content(keys[i]),
             };
-            // A `fit-content` sheet rests on the keyboard, as Compose's
-            // `ModalBottomSheet` rises with the IME inset.
-            let fit = measured.map(|(_, content)| (content + foot.max(lift)).clamp(1.0, tallest));
-            let said = (detent.clone(), (h, tallest), keyboard, fit);
-            let mut found = heights(detent.as_deref(), tallest, foot, fit.unwrap_or(tallest));
-            if !presents {
-                found = vec![h];
-            }
-            let fit_at = |found: &[f32]| {
-                fit.and_then(|fit| found.iter().position(|v| (v - fit).abs() < 0.5))
-            };
-            // While the keyboard is up a sheet rests at its tallest, but
-            // for one resting at `fit-content`, which keeps that height
-            // above the keys (the tallest, where it does not fit there).
-            let rest = |found: &[f32]| -> usize {
-                let first = heights(initial.as_deref(), tallest, foot, fit.unwrap_or(tallest));
-                let at = (initial.is_some())
-                    .then(|| found.iter().position(|v| (v - first[0]).abs() < 0.5))
-                    .flatten()
-                    .unwrap_or(0);
-                match keyboard && fit_at(found) != Some(at) {
-                    true => found.len() - 1,
-                    false => at,
-                }
-            };
+            let window_bottom = self.window().map(|w| {
+                (
+                    self.chrome().frame[1],
+                    w.size.1 - w.bars[2].max(w.cutout[2]),
+                )
+            });
+            let resolved = resolve_sheet_stops(
+                presents,
+                detent.as_deref(),
+                h,
+                tallest,
+                status,
+                foot,
+                lift,
+                self.window.keyboard,
+                window_bottom,
+                measured.map(|(_, content)| content),
+            );
+            let said = (detent.clone(), (h, tallest), keyboard, resolved.fit_pair);
+            let (words, found, dropped, fit_idx) = (
+                resolved.words,
+                resolved.heights,
+                resolved.dropped,
+                resolved.fit_idx,
+            );
             let covered = kinds[i..]
                 .iter()
                 .any(|k| matches!(k, Presented::Over | Presented::Full));
@@ -566,20 +567,22 @@ impl<D: DataSource> Presenter<D> {
                         sheet.top = Glide::still(h - sheet.heights[sheet.at]);
                     }
                     if sheet.said != said {
-                        let was = (sheet.said.3)
-                            .filter(|fit| (sheet.heights[sheet.at] - fit).abs() < 0.5);
-                        sheet.at = match (was.and(fit_at(&found)), keyboard) {
-                            (Some(at), _) => at,
-                            (None, true) => found.len() - 1,
-                            (None, false) => sheet.at.min(found.len() - 1),
-                        };
+                        sheet.at = reconcile_index(
+                            sheet.at,
+                            sheet.words.get(sheet.at),
+                            &words,
+                            &dropped,
+                            fit_idx,
+                            keyboard,
+                        );
                         sheet.top = Glide::still(h - found[sheet.at]);
                         sheet.heights = found;
+                        sheet.words = words;
                         sheet.said = said;
                     }
                 }
                 None => {
-                    let at = rest(&found);
+                    let at = initial_rest(initial.as_deref(), &words, &dropped, fit_idx, keyboard);
                     let to = h - found[at];
                     let top = match still {
                         true => Glide::still(to),
@@ -589,6 +592,7 @@ impl<D: DataSource> Presenter<D> {
                         modal: keys[i],
                         shown: keys[last],
                         heights: found,
+                        words,
                         at,
                         top,
                         said,
@@ -597,6 +601,7 @@ impl<D: DataSource> Presenter<D> {
                         handle,
                         covered,
                         scheme,
+                        bar: None,
                     });
                 }
             }
@@ -789,11 +794,22 @@ impl<D: DataSource> Presenter<D> {
         if still {
             return;
         }
-        let bar = (self.stage.bar.as_ref())
-            .filter(|(route, ..)| route == old && sheet.is_none())
-            .map(|(_, tape, frame)| (tape.clone(), *frame));
+        let bar = match sheet {
+            None => (self.stage.bar.as_ref())
+                .filter(|(route, ..)| route == old)
+                .map(|(_, tape, frame)| (tape.clone(), *frame)),
+            Some(modal) => self
+                .stage
+                .sheets
+                .iter()
+                .find(|s| s.modal == modal)
+                .and_then(|s| s.bar.clone())
+                .map(|tape| (tape, (0.0, 0.0, 0.0, 0.0))),
+        };
+        let rtl = authored::shift_rtl(self.host.kernel(), stack, within);
         self.stage.shift = Some(Shift {
             forward,
+            rtl,
             outgoing: *old,
             incoming: *new,
             sheet,
@@ -875,6 +891,44 @@ impl<D: DataSource> Presenter<D> {
     /// Whether a sheet is open in front.
     pub(crate) fn sheet_open(&self) -> bool {
         self.stage_presents() && self.front_sheets().next().is_some()
+    }
+
+    pub(super) fn sheet_bar_slots(
+        &self,
+    ) -> (f32, Option<NodeKey>, Vec<(NodeKey, NodeKey)>, Vec<NodeKey>) {
+        let (_, width) = self.sheet_span();
+        let top_modal = self.front_sheets().last().map(|s| s.modal);
+        let sheets = self
+            .stage
+            .sheets
+            .iter()
+            .map(|s| (s.modal, s.shown))
+            .collect();
+        let crossing = (self.stage.shift.as_ref())
+            .filter(|s| s.sheet.is_some())
+            .map(|s| [s.outgoing, s.incoming])
+            .into_iter()
+            .flatten()
+            .chain(
+                self.stage
+                    .preview
+                    .as_ref()
+                    .and_then(|p| p.pair())
+                    .into_iter()
+                    .flat_map(|(o, i)| [o, i]),
+            )
+            .collect();
+        (width, top_modal, sheets, crossing)
+    }
+
+    pub(super) fn set_sheet_bar(&mut self, modal: NodeKey, bar: Option<Rc<Tape>>) {
+        if let Some(sheet) = self.stage.sheets.iter_mut().find(|s| s.modal == modal) {
+            sheet.bar = bar;
+        }
+    }
+
+    pub(super) fn top_sheet_handle(&self) -> f32 {
+        self.front_sheets().last().map_or(0.0, |s| s.handle)
     }
 
     /// The route the top sheet shows, and its frame (x, top, width, the
@@ -1037,7 +1091,8 @@ impl<D: DataSource> Presenter<D> {
                 .items
                 .push(Item::Picture(tape.clone(), self.window_to_page(*frame)));
         }
-        self.stage_sheets(&mut stage, now);
+        let crossing_bars = self.prepare_sheet_bars();
+        self.stage_sheets(&mut stage, now, &crossing_bars);
         stage
     }
 
@@ -1134,7 +1189,12 @@ impl<D: DataSource> Presenter<D> {
     }
 
     /// Each open sheet over its scrim, then the sheets sliding out.
-    fn stage_sheets(&self, stage: &mut Stage, now: f64) {
+    fn stage_sheets(
+        &self,
+        stage: &mut Stage,
+        now: f64,
+        crossing_bars: &std::collections::BTreeMap<NodeKey, Rc<Tape>>,
+    ) {
         let kernel = self.host.kernel();
         let (w, h) = self.viewport;
         let page = self.chrome().frame;
@@ -1216,6 +1276,13 @@ impl<D: DataSource> Presenter<D> {
                     for (key, pose) in order {
                         let ts = ts.pre_concat(pose.transform((0.0, 0.0)));
                         items.push(Item::Opacity(pose.opacity));
+                        let route_bar = crossing_bars.get(&key).cloned().or_else(|| {
+                            self.stage
+                                .shift
+                                .as_ref()
+                                .filter(|s| s.sheet == Some(sheet.modal) && s.outgoing == key)
+                                .and_then(|s| s.bar.as_ref().map(|(t, _)| t.clone()))
+                        });
                         match kernel.node_by_key(key) {
                             Some(n) => {
                                 stage.skip.push(n.id);
@@ -1227,6 +1294,9 @@ impl<D: DataSource> Presenter<D> {
                                 });
                             }
                             None => items.push(Item::Taped(key, ts)),
+                        }
+                        if let Some(tape) = route_bar {
+                            items.push(Item::Picture(tape, ts.pre_translate(0.0, sheet.handle)));
                         }
                         items.push(Item::PopOpacity);
                     }
@@ -1240,6 +1310,12 @@ impl<D: DataSource> Presenter<D> {
                         ts,
                         tape,
                     });
+                    if let Some(tape) = &sheet.bar {
+                        items.push(Item::Picture(
+                            tape.clone(),
+                            ts.pre_translate(0.0, sheet.handle),
+                        ));
+                    }
                 }
             }
             if sheet.handle > 0.0 {
@@ -1273,6 +1349,12 @@ impl<D: DataSource> Presenter<D> {
                 .sheets
                 .push(Item::Fill(shape, container(None, dark), ts));
             stage.sheets.push(Item::Taped(closing.shown, ts));
+            if let Some(tape) = &closing.bar {
+                stage.sheets.push(Item::Picture(
+                    tape.clone(),
+                    ts.pre_translate(0.0, closing.handle),
+                ));
+            }
             if closing.handle > 0.0 {
                 stage.sheets.push(grip(closing.width, dark, ts));
             }
@@ -1324,7 +1406,11 @@ impl<D: DataSource> Presenter<D> {
                 };
                 return (out_pose, in_pose);
             }
-            let way = if shift.forward { 1.0 } else { -1.0 };
+            let way = if shift.forward != shift.rtl {
+                1.0
+            } else {
+                -1.0
+            };
             // The fades go by the clock, the moves by the curve.
             let out_fade = (1.0 - linear / AXIS_FADE).clamp(0.0, 1.0);
             let in_fade = ((linear - AXIS_FADE) / (1.0 - AXIS_FADE)).clamp(0.0, 1.0);

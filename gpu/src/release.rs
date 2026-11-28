@@ -45,6 +45,7 @@ impl Instance {
         let retired = {
             self.scratch = None;
             self.readback = None;
+            self.sampled = None;
             self.acquire.retire()
         };
         #[cfg(target_arch = "wasm32")]
@@ -54,6 +55,10 @@ impl Instance {
         #[cfg(target_os = "android")]
         {
             self.ring = None;
+            #[cfg(exact_android_draw_trace)]
+            {
+                self.draw_trace.new_target = true;
+            }
         }
         retired
     }
@@ -98,6 +103,7 @@ impl Module {
     /// rather than when the device is collected.
     #[cfg(any(target_arch = "wasm32", test))]
     pub(crate) fn unload(mut self) {
+        self.device_lost = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let gpu = self.gpu.take();
         drop(self);
         if let Some(gpu) = gpu {
@@ -108,6 +114,9 @@ impl Module {
 
 impl Drop for Module {
     fn drop(&mut self) {
+        for inst in self.instances.values() {
+            inst.wake.kill();
+        }
         // The open frame's drawables, then each canvas's own, before their
         // surfaces.
         self.open = None;

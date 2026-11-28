@@ -29,6 +29,37 @@ impl Batch {
         self.ops
             .push(format!("{{\"op\":\"auth\",\"ticket\":{ticket}}}"));
     }
+
+    /// Notify the page's fault table of a scripted stream fixture hit and/or failure (LLP 1103).
+    pub fn stream_failure(
+        &mut self,
+        prefix: &str,
+        method: Option<&str>,
+        url: &str,
+        hit: bool,
+        failure: bool,
+    ) {
+        let mut s = String::from("{\"op\":\"streamFailure\",\"prefix\":");
+        quote(prefix, &mut s);
+        if let Some(method) = method {
+            s.push_str(",\"method\":");
+            quote(method, &mut s);
+        }
+        s.push_str(",\"url\":");
+        quote(url, &mut s);
+        s.push_str(if hit {
+            ",\"hit\":true"
+        } else {
+            ",\"hit\":false"
+        });
+        s.push_str(if failure {
+            ",\"failure\":true"
+        } else {
+            ",\"failure\":false"
+        });
+        s.push('}');
+        self.ops.push(s);
+    }
 }
 
 pub(crate) fn request_refusal(request: &exact_runner::Request) -> Option<&'static str> {
@@ -57,6 +88,7 @@ pub(crate) fn request_refusal(request: &exact_runner::Request) -> Option<&'stati
         .or(request.body_to_refusal())
         .or(request.long_poll_refusal())
         .or(request.upload_progress_refusal())
+        .or(request.stream_open_refusal())
 }
 
 pub(crate) fn quote(s: &str, out: &mut String) {
@@ -237,6 +269,26 @@ impl Batch {
             id.push_to(&mut s);
             s.push(',');
             quote(url, &mut s);
+            s.push(']');
+        }
+        s.push_str("],\"roots\":[");
+        for (i, id) in change.roots.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            id.push_to(&mut s);
+        }
+        s.push_str("],\"tab\":");
+        quote(&change.tab, &mut s);
+        s.push_str(",\"chain\":[");
+        for (i, exact_route::Destination { url, tab, .. }) in change.chain.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push('[');
+            quote(url, &mut s);
+            s.push(',');
+            quote(tab, &mut s);
             s.push(']');
         }
         s.push_str("]}");
@@ -837,6 +889,10 @@ impl Batch {
         // body as events and delivers each as a message (kind 8).
         if r.request.stream {
             s.push_str(",\"stream\":true");
+        }
+        // Opt-in HTTP stream open head event (LLP 1016.000 D12, kind 11).
+        if r.request.stream_open {
+            s.push_str(",\"streamOpen\":true");
         }
         // An upload (LLP 1016.000 D10): the page sends it with XMLHttpRequest and
         // delivers its bytes sent as messages, then its reply.

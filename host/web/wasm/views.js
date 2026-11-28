@@ -1,9 +1,11 @@
-import { symbolBox, symbolSize, symbolPlaceholder, syncSymbolPlaceholder, symbolFit, tintFit } from "../symbol-geometry.js";
-import { downForDrag, elementOf, lightDomDragPath, observeDragInput, pressedAt } from "../drag-input.js";
+import { symbolSize, symbolPlaceholder, symbolMask, syncSymbolPlaceholder, symbolFit, tintFit } from "../symbol-geometry.js";
+import { downForDrag, dragPathFrom, elementOf, observeDragInput, pressedAt } from "../drag-input.js";
 import { picker, track, iframeLoading, localAssetURL, host, agentMode, pageFacts, pageNative, loadAfterPaint, moduleReady, views, writeIn, now, afterNativePaint, log, retiredViews, lists, root, encoder, readOut, imageProbes, inflight, IMAGE_ERROR, CORS_ERROR, heldValues, composing, loadDecorations, markupPending, scrollDocs, followScroll, pendingScrolls, DATA_LIMIT, authoredDisabled, holdWake, holdOrientation } from "../glue.js";
-import { resolveShortcuts, pageGivenFiles, commitGuestOrigin, frameURL, refuseURL, valuedControl, renderMarkup, editMenu, inertAncestor, contextAt, liveById, navigates, navigableURL, dataURL, settleValue, fitVisualViewport } from "../navigation.js";
+import { resolveShortcuts, pageGivenFiles, commitGuestOrigin, frameURL, refuseURL, fieldText, replaceFieldText, valuedControl, renderMarkup, editMenu, inertAncestor, contextAt, liveById, navigates, navigableURL, dataURL, settleValue, fitVisualViewport } from "../navigation.js";
 import { send } from "./commit.js";
 import { attach } from "./input.js";
+import { loadOnce } from '../load-once.js';
+
 export function appSource(el, name, value, then) {
   const p = picker().then((m) => m.appURL(value)).then((url) => {
     if (el[`exactApp-${name}`] !== value) {
@@ -59,7 +61,7 @@ export function syncMedia(el, set = {}, clear = []) {
   for (const name of clear) {
     delete el.exactMedia.props[name];
   }
-  host.mediaModule ??= new Promise((resolve) => requestAnimationFrame(() => resolve(loadAfterPaint("./media-glue.js", "installMedia"))));
+  loadOnce(host, "mediaModule", () => new Promise((resolve) => requestAnimationFrame(() => resolve(loadAfterPaint("./media-glue.js", "installMedia")))));
   const attach = Promise.all([host.mediaModule, moduleReady]).then(([install]) => {
     if (el.isConnected) {
       install(el, (payload) => {
@@ -116,7 +118,7 @@ export function nativeCreate(el, id) {
       return;
     }
   }
-  (host[pkg ? "packageNative" : "nativeHost"] ??= afterNativePaint().then(() => pkg
+  (loadOnce(host, pkg ? "packageNative" : "nativeHost", () => afterNativePaint().then(() => pkg
     ? loadAfterPaint("./packages/views.js", "wasmViewHost").then(bind => options => bind({
       host, generation, agentMode, now, foreground: () => !(pageFacts.bits() & 1), changed: topic => send(host.wasm.exact_changed(writeIn(topic)))
     }, options))
@@ -128,10 +130,8 @@ export function nativeCreate(el, id) {
         send(host.wasm.exact_dispatch(id, kind, text == null ? 0 : writeIn(text), now()));
       }
     }
-  }))).then((h) => h.attach(el), (e) => {
+  })))).then((h) => h.attach(el), (e) => {
     if (pkg && host.incarnation !== generation) return;
-    if (pkg) host.packageNative = null;
-    else host.nativeHost = null;
     st.state = st.missingFactory ? "error" : "unavailable";
     st.error = pkg ? `${st.missingFactory}: ${e?.message ?? e}` : st.missingFactory ?? String(e?.message ?? e);
     log(`native ${st.name} #${id}: ${st.state}: ${st.error}`);
@@ -143,7 +143,7 @@ export function listView(el, id, collection) {
     return;
   }
   lists.set(el, { id });
-  host.listSelectionLoading ??= new Promise((resolve) => requestAnimationFrame(() => resolve(loadAfterPaint("./list-selection.js", "installListSelection")))).then((install) => {
+  loadOnce(host, "listSelectionLoading", () => new Promise((resolve) => requestAnimationFrame(() => resolve(loadAfterPaint("./list-selection.js", "installListSelection")))).then((install) => {
     host.listSelection = install({
       root,
       lists,
@@ -155,7 +155,7 @@ export function listView(el, id, collection) {
       }
     });
     host.listSelection.sync();
-  }).catch(console.error);
+  }), console.error);
 }
 export function syncLists() {
   host.listSelection?.sync();
@@ -233,21 +233,20 @@ export function refreshSymbols() {
       el,
       point: parseFloat(cs.fontSize) * (parseFloat(cs.getPropertyValue("--exact-symbol-scale")) || 1),
       weight: Number(cs.fontWeight),
-      objectFit: cs.objectFit
+      objectFit: cs.objectFit,
+      rtl: cs.direction === "rtl"
     };
   });
-  for (const { el, point, weight } of configs) {
-    const path = el.getAttribute("data-symbol-path"), filled = el.hasAttribute("data-symbol-fill"), box = el.getAttribute("data-symbol-viewbox") || "0 0 24 24", source = el.getAttribute("data-symbol-source"), key = `${path}:${filled}:${point}:${weight}:${box}:${el.hasAttribute("data-symbol-nonzero")}:${source}`;
+  for (const { el, point, weight, rtl } of configs) {
+    const path = el.getAttribute("data-symbol-path"), filled = el.hasAttribute("data-symbol-fill"), nonzero = el.hasAttribute("data-symbol-nonzero"), mirror = rtl && el.hasAttribute("data-symbol-mirror"), box = el.getAttribute("data-symbol-viewbox") || "0 0 24 24", source = el.getAttribute("data-symbol-source"), key = `${path}:${filled}:${point}:${weight}:${box}:${nonzero}:${mirror}:${source}`;
     if (!path && !el.dataset.symbolSource?.startsWith("symbol:sf/") && el.dataset.symbolSource !== "symbol:" && el.symbolRefusal !== el.dataset.symbolSource) {
       log(`image ${el.dataset.symbolSource} refused: unknown symbol role`);
       el.symbolRefusal = el.dataset.symbolSource;
     }
     if (el.symbolKey !== key) {
       el.symbolKey = key;
-      const stroke = 1.1 + (Math.max(100, Math.min(900, weight)) - 100) / 400;
-      const paint = filled ? `fill="black" fill-rule="${el.hasAttribute("data-symbol-nonzero") ? "nonzero" : "evenodd"}"` : `fill="none" stroke="black" stroke-width="${stroke}" stroke-linecap="round" stroke-linejoin="round"`;
       const [width, height] = symbolSize(box, point, source);
-      el.symbolMask = `url("data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" ${width === height ? `width="${width}" height="${height}" ` : ""}viewBox="${symbolBox(box).join(" ")}">${path.split(";").map((d) => `<path d="${d}" ${paint}/>`).join("")}</svg>`)}")`;
+      el.symbolMask = symbolMask(path, filled, nonzero, box, width, height, weight, mirror);
       el.symbolPlaceholder = symbolPlaceholder(width, height);
     }
     syncSymbolPlaceholder(el, refreshSymbols);
@@ -264,7 +263,7 @@ export function refreshSymbols() {
     tintFit(el);
   }
 }
-export function writeValue(el, value) {
+export function writeValue(el, value, filtered = host.inputField === el) {
   // An option's value getter falls back to its label, so a bound value equal to the label is written still: the
   // attribute holds it when the label changes.
   if (el.localName === "option") {
@@ -274,40 +273,24 @@ export function writeValue(el, value) {
     return;
   }
   if (el.exactMarkup) {
-    el.exactMarkup.setValue(value);
+    el.exactMarkup.setValue(value, filtered);
     return;
   }
   if (el instanceof HTMLTextAreaElement) {
     el.exactSourceValue = String(value);
   }
+  value = fieldText(el, value);
   const old = el.value;
   if (old === value) {
     heldValues.delete(el);
     return;
   }
   if (composing.has(el)) {
-    heldValues.set(el, value);
+    heldValues.set(el, [value, filtered]);
     return;
   }
   heldValues.delete(el);
-  if (typeof el.setRangeText !== "function" || valuedControl(el) || old === "" || document.activeElement !== el) {
-    el.value = value;
-    return;
-  }
-  let a = 0, z = 0;
-  while (a < old.length && a < value.length && old[a] === value[a]) {
-    a++;
-  }
-  while (z < old.length - a && z < value.length - a && old[old.length - 1 - z] === value[value.length - 1 - z]) {
-    z++;
-  }
-  const end = old.length - z, text = value.slice(a, value.length - z), { selectionStart: s0, selectionEnd: s1 } = el, carry = (p) => p <= a ? p : p >= end ? p + text.length - (end - a) : a + text.length;
-  el.setRangeText(text, a, end, "preserve");
-  if (el.value !== value) {
-    el.value = value;
-  } else {
-    el.setSelectionRange(carry(s0), Math.max(carry(s0), carry(s1)));
-  }
+  replaceFieldText(el, value, filtered);
 }
 export function syncMarkup(el) {
   if (el.exactMarkup) {
@@ -323,7 +306,7 @@ export function syncMarkup(el) {
     return;
   }
   markupPending.add(el);
-  (host.markupModule ??= moduleReady.then(() => loadAfterPaint("./markup-editor.js", "installMarkupEditor"))).then((install) => {
+  (loadOnce(host, "markupModule", () => moduleReady.then(() => loadAfterPaint("./markup-editor.js", "installMarkupEditor")))).then((install) => {
     const id = Number(el.dataset.view), live = (node) => views.get(id) === node && node.isConnected && !retiredViews.has(node);
     if (composing.has(el)) {
       return;
@@ -348,7 +331,10 @@ export function syncMarkup(el) {
         }
       }
     });
-  }).catch((error) => console.error("exact: Markdown editor:", error));
+  }).catch((error) => {
+    markupPending.delete(el);
+    console.error("exact: Markdown editor:", error);
+  });
 }
 // @ref LLP 1094.000 D6 — the first node that turns draggable loads the drag-out glue, which then hears every drag from
 // the app's live views. Until it listens, a node the app made draggable waits, written `false`, and a drag that begins
@@ -373,7 +359,7 @@ function waitingView(el) {
 export function loadDragOut() {
   if (host.dragOutTimer) return;
   const tries = host.dragOutTries ?? 0;
-  host.dragOutModule ??= loadAfterPaint(tries ? `./drag-out.js?try=${tries}` : "./drag-out.js", "listenDragOut").then((listen) => {
+  loadOnce(host, "dragOutModule", () => loadAfterPaint(tries ? `./drag-out.js?try=${tries}` : "./drag-out.js", "listenDragOut").then((listen) => {
     const controller = new AbortController(), live = new Set([...(host.dragOutWaiting ?? [])].filter(waitingView));
     try {
       listen(document, liveView, { signal: controller.signal, input: waitingInput, waiting: live });
@@ -388,8 +374,7 @@ export function loadDragOut() {
     host.dragOutListening = true;
     dragOutWait.abort();
     host.dragOutWaiting = null;
-  }).catch((e) => {
-    host.dragOutModule = null;
+  }), (e) => {
     host.dragOutTries = tries + 1;
     log(`drag-out module: ${e}`);
     host.dragOutTimer = setTimeout(() => {
@@ -420,7 +405,7 @@ function waitingDrag(event) {
   const target = event.target;
   if (target.matches?.('[draggable="true" i]') && !waitingView(target)) return;
   if (target.localName === "img") {
-    const path = lightDomDragPath(event);
+    const path = dragPathFrom(waitingInput, event);
     if (path.length) {
       if (waits(path)) event.preventDefault();
       return;

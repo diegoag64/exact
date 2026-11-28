@@ -37,7 +37,8 @@
 //! so an agent seeks instead of waiting — the same clock discipline as
 //! `exact-motion`.
 
-#![forbid(unsafe_code)]
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(test, deny(unsafe_code))]
 #![deny(missing_docs)]
 
 pub mod activation;
@@ -151,15 +152,16 @@ pub use runner::{
     AuthLinks, BackgroundState, BlockPlacement, CallOrigin, CanvasEngine, CanvasLink, CanvasList,
     Carried, Checkpoint, Command, Completion, CompletionCapability, CompletionReply,
     CompletionSubscription, Console, ControlValue, DataError, DataSource, DataSourceWrapper,
-    DeviceLinks, DrawReply, DrawRequest, Drawn, DropEvent, Event, FieldSelection, FormatLink,
-    Geometry, GeometryLink, Hold, HoldAnswer, InFlight, InputDetails, Interrupt, Intersection,
-    KeyModifiers, KeyboardEvent, Limits, ListTextPolicy, ListTextPosition, MouseEvent, Native,
-    NativeCall, NativeHandler, Overlaid, Picked, PickerLinks, PickerRequest, PointerEvent,
-    PreloadWake, Report, Reporter, ResizeRect, ResourceChange, RouteInspector, RouterChange,
-    RouterLink, Routing, Runner, RunnerError, RunnerLinks, ScrollEvent, SelectionDirection,
-    SnapshotModule, SocketReader, SocketState, StackSplit, StreamCount, SurfaceAnswer, Target,
-    Timed, UploadEnd, UploadMark, WheelEvent, Write, BACKGROUND, JOURNAL_RING, MAX_CLOCK_MS,
-    PICKED, QUEUE_BOUND, RESIZE_UNDELIVERED, TIMER_FIRE_LIMIT, VIRTUAL_FRAME_MS,
+    DeviceLinks, DrawReply, DrawRequest, Drawn, DropEffect, DropEvent, Event, FieldSelection,
+    FormatLink, Geometry, GeometryLink, Hold, HoldAnswer, InFlight, InputDetails, Interrupt,
+    Intersection, KeyModifiers, KeyboardEvent, Limits, ListTextPolicy, ListTextPosition,
+    MouseEvent, Native, NativeCall, NativeHandler, Overlaid, Picked, PickerLinks, PickerRequest,
+    PointerEvent, PreloadWake, Report, Reporter, ResizeRect, ResourceChange, RouteInspector,
+    RouterChange, RouterLink, Routing, Runner, RunnerError, RunnerLinks, ScrollEvent,
+    SelectionDirection, SnapshotModule, SocketReader, SocketState, StackSplit, StreamCount,
+    SurfaceAnswer, Target, Timed, UploadEnd, UploadMark, WheelEvent, Write, BACKGROUND,
+    JOURNAL_RING, MAX_CLOCK_MS, PICKED, QUEUE_BOUND, RESIZE_UNDELIVERED, TIMER_FIRE_LIMIT,
+    VIRTUAL_FRAME_MS,
 };
 pub use runner::{AppState, Forma, LiveApplied, LiveRefusal, Place};
 pub use runner::{

@@ -124,9 +124,9 @@ public final class Bridge: ExactPackage {
       seam: resolve(import.meta.dir, '../host/apple/modules/ExactPackage.swift') });
     const copied = resolve(compiler.graph[0].path, 'Sources/Lib/Value.swift'), captured = readFileSync(copied);
     writeFileSync(copied, 'public func value() -> Int { 0 }');
-    assert.throws(() => compiler.place(dest), /cached Swift package changed/);
+    await assert.rejects(() => compiler.place(dest), /cached Swift package changed/);
     writeFileSync(copied, captured);
-    compiler.place(dest);
+    await compiler.place(dest);
     assert.ok(readFileSync(resolve(dest, 'libExactPkg_probe.dylib')).length);
     const [{ identity }] = swiftPackageInventories(app, bound([local]), 'macos');
     assert.equal(swiftPackageInputChanged(dir, identity), false);
@@ -1058,6 +1058,19 @@ test('host.android.launchImage takes a PNG in the app up to the starting window\
     // A native input: the Android binary's record names it, so an update cannot change it.
     assert.deepEqual(nativeManifestMetadata(manifest, 'android').host.launchImage, { src: 'logo.png', width: 192 });
     for (const host of ['ios', 'android']) {
+      // The base picture is held to the dark one's rule: an existing file outside the app, or reached through a link
+      // out of it, is refused (#1595).
+      const outside = resolve(dir, '..', `${basename(dir)}-outside.png`);
+      writeFileSync(outside, 'png');
+      symlinkSync(outside, resolve(dir, 'linked.png'));
+      try {
+        assert.throws(() => read({ src: `../${basename(outside)}`, width: 128 }, host), new RegExp(`host\\.${host}\\.launchImage: \\.\\./.*-outside\\.png must name a PNG inside the app directory`));
+        assert.throws(() => read({ src: outside, width: 128 }, host), /launchImage: .* must name a PNG inside the app directory/);
+        assert.throws(() => read({ src: 'linked.png', width: 128 }, host), /launchImage: linked\.png must name a PNG inside the app directory/);
+      } finally { rmSync(outside); rmSync(resolve(dir, 'linked.png')); }
+      mkdirSync(resolve(dir, 'folder.png'));
+      assert.throws(() => read({ src: 'folder.png', width: 128 }, host), /launchImage\.src: folder\.png must be a PNG file/);
+      rmSync(resolve(dir, 'folder.png'), { recursive: true });
       const launch = { src: 'logo.png', width: 128, color_scheme_dark: { src: 'night.png' } };
       assert.throws(() => read(launch, host), /launchImage.color_scheme_dark: night.png.*does not exist/);
       assert.throws(() => read({ ...launch, color_scheme_dark: { src: '../outside.png' } }, host), /inside the app directory/);
@@ -1465,5 +1478,19 @@ test('the module roster validates each tag once and checks factories on their ho
     assert.deepEqual(roster.tagsFor('ios'), ['shared-view', 'other-view']);
     checkModuleRoster(roster.tagsFor('ios'), ['shared-view', 'other-view', 'phone-view'], 'ios', true);
     assert.throws(() => checkModuleRoster(roster.tagsFor('android'), ['shared-view', 'other-view'], 'android', true), /phone-view/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('manifest app and variant display names reject control characters and blank strings', async () => {
+  const { readManifest } = await import('./app.mjs');
+  const dir = mkdtempSync(resolve(tmpdir(), 'manifest-display-name-'));
+  const read = value => { writeFileSync(resolve(dir, 'app.json'), JSON.stringify(value)); return readManifest(dir, 'name-check'); };
+  try {
+    assert.equal(read({ name: 'A/B Tester', app: { id: 'dev.exact.ab', name: 'A/B Tester' }, variants: { dev: { idSuffix: '.dev', name: 'A/B Dev' } } }).app.name, 'A/B Tester');
+    for (const bad of ['Foo\necho pwned', 'Foo\rBar', 'Foo\x00Bar', 'Foo\u2028Bar', '   ']) {
+      assert.throws(() => read({ name: bad, app: { id: 'dev.exact.ab', name: 'Safe' } }), /name/);
+      assert.throws(() => read({ name: 'Safe', app: { id: 'dev.exact.ab', name: bad } }), /app\.name/);
+      assert.throws(() => read({ name: 'Safe', app: { id: 'dev.exact.ab', name: 'Safe' }, variants: { dev: { idSuffix: '.dev', name: bad } } }), /variants\.dev\.name/);
+    }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

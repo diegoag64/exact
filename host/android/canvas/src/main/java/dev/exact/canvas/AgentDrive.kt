@@ -32,13 +32,19 @@ internal fun agentCarried(): Boolean {
  * with an empty page or only bars. A `screenshot` is not answered here: the picture is the device's, and the carrier
  * takes it (`screencap`).
  */
-class AgentDrive(name: String) : Drive {
+class AgentDrive(name: String, private val waitSeed: Boolean = false) : Drive {
     private val server = LocalServerSocket(name)
     private val presented = CountDownLatch(1)
     private val entered = CountDownLatch(1)
+    private val seeded = CountDownLatch(if (waitSeed) 1 else 0)
 
     init {
         Thread({ serve() }, "exact-agent").apply { isDaemon = true }.start()
+    }
+
+    /** Wait for the relay's pre-boot secret seed over the private agent socket (LLP 1018.000 D4). */
+    fun awaitSeed(timeoutMs: Long = 15_000) {
+        if (waitSeed) seeded.await(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
     }
 
     override fun contentReady() = presented.countDown()
@@ -57,6 +63,17 @@ class AgentDrive(name: String) : Drive {
         val lines = socket.inputStream.bufferedReader(Charsets.UTF_8)
         val out = socket.outputStream
         fun say(line: String) { out.write((line + "\n").toByteArray(Charsets.UTF_8)); out.flush() }
+        if (waitSeed && seeded.count > 0) {
+            try {
+                val first = lines.readLine()
+                val msg = first?.let { runCatching { JSONObject(it) }.getOrNull() }
+                if (msg?.optString("op") == "seed" && msg.has("stored")) {
+                    android.system.Os.setenv("EXACT_AGENT_STORED", msg.optString("stored"), true)
+                }
+            } finally {
+                seeded.countDown()
+            }
+        }
         presented.await()
         say(Exact.agent("{\"op\":\"ready\"}"))
         var finger: AgentModuleFinger? = null
@@ -65,6 +82,18 @@ class AgentDrive(name: String) : Drive {
                 val line = lines.readLine() ?: return
                 if (line.isBlank()) continue
                 val request = runCatching { JSONObject(line) }.getOrNull()
+                if (request?.optString("op") == "clean_store") {
+                    val appId = request.optString("appId")
+                    val store = request.optString("store")
+                    val cache = Exact.reader?.get()?.cacheDir
+                    if (cache != null && appId.isNotEmpty() && store.isNotEmpty()
+                        && !appId.contains('/') && !appId.contains("..")
+                        && !store.contains('/') && !store.contains("..")) {
+                        java.io.File(cache, "exact/$appId/agent/$store").deleteRecursively()
+                    }
+                    say("{\"ok\":true}")
+                    continue
+                }
                 val phase = request?.optString("phase").orEmpty()
                 val held = finger
                 if (request?.optString("op") == "moduleMotion") {

@@ -52,7 +52,7 @@ pub struct OwnerUpdate {
 
 /// What an owner's host reports of its chrome (D6's `chrome`, D4, D15), which no layout reads:
 /// each quantity `None` where the host does not have it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct OwnerChrome {
     /// The edge UIKit prefers for the iPhone Duo's vertical bar, the owner view's
     /// `verticalBarEdge` trait (iOS 27.1), whether or not the bar shows.
@@ -60,6 +60,26 @@ pub struct OwnerChrome {
     /// Whether the sidebar of the tab controller holding the owner is available
     /// (`UITabBarController.Sidebar.isAvailable`, iOS 27), which is not whether it shows.
     pub sidebar_available: Option<bool>,
+    /// The unobscured area of the owner's screen to the top left of its camera housing
+    /// (`NSScreen.auxiliaryTopLeftArea`), x y width height in the owner's space: an empty
+    /// rectangle where the screen has none there, `None` where the host has no such quantity.
+    pub auxiliary_top_left: Option<[f32; 4]>,
+    /// The unobscured area of the owner's screen to the top right of its camera housing
+    /// (`NSScreen.auxiliaryTopRightArea`), x y width height in the owner's space: an empty
+    /// rectangle where the screen has none there, `None` where the host has no such quantity.
+    pub auxiliary_top_right: Option<[f32; 4]>,
+}
+
+impl OwnerChrome {
+    /// Why the chrome is refused, if it is: an auxiliary area with a nonfinite number or a
+    /// negative size.
+    pub(super) fn refusal(&self) -> Option<&'static str> {
+        let bad = |r: &[f32; 4]| !r.iter().all(|v| v.is_finite()) || r[2] < 0.0 || r[3] < 0.0;
+        let areas = [self.auxiliary_top_left, self.auxiliary_top_right];
+        areas.iter().flatten().any(bad).then_some(
+            "an auxiliary area with a nonfinite number or a negative size; report each as AppKit gives it, converted to the owner's space",
+        )
+    }
 }
 
 /// UIKit's `UIVerticalBarEdge`, by its raw value.
@@ -151,6 +171,9 @@ impl Kernel {
         if let Some(why) = update.segments.as_ref().and_then(SegmentGrid::refusal) {
             return Err(LayoutError::OwnerSegments(why).into());
         }
+        if let Some(why) = update.chrome.as_ref().and_then(OwnerChrome::refusal) {
+            return Err(LayoutError::NativeTarget(why).into());
+        }
         if let Some(why) = WindowMap::refusal(update.window_map.as_ref()) {
             return Err(LayoutError::NativeTarget(why).into());
         }
@@ -218,13 +241,14 @@ impl OwnerUpdate {
     /// frame in its window (a rect); a chain entry
     /// a target and its kinds' bits (`u8`, `Kind::bit`); a relation its
     /// index in [`Relation::ALL`] (`u8`) and a target; the margins their
-    /// root, plain and minimum insets and the readable width (`f32`); the
+    /// root and plain insets, then the optional minimum insets and the
+    /// optional readable width (`f32`); the
     /// keyboard a byte, 0 unreported, 1 dismissed or 2 shown, a shown one's
     /// frame and a docked byte, 0 or 1, after it; segments their columns
     /// and rows (`u8` each) and the `cols × rows` rects, row-major; then each edge's bar region,
     /// top right bottom left, its distance and its two sides (`f32` each); then the chrome, its
-    /// vertical bar edge's raw value (`u8`) and its sidebar's availability (a byte, 0 or 1), each
-    /// optional; then the window map after a presence byte, its six terms `f32` each, the
+    /// vertical bar edge's raw value (`u8`), its sidebar's availability (a byte, 0 or 1) and its
+    /// auxiliary areas, top left then top right (a rect each), each optional; then the window map after a presence byte, its six terms `f32` each, the
     /// configuration's identity after one, a `u64`, and the reserved regions after one, as
     /// `regions_out` writes them.
     pub fn encode(&self) -> Vec<u8> {
@@ -240,8 +264,8 @@ impl OwnerUpdate {
         optional(&mut w, self.margins.as_ref(), |w, m| {
             floats(w, &m.root);
             floats(w, &m.plain);
-            floats(w, &m.minimum);
-            w.f32(m.readable_width);
+            optional(w, m.minimum.as_ref(), |w, minimum| floats(w, minimum));
+            optional(w, m.readable_width.as_ref(), |w, width| w.f32(*width));
         });
         keyboard_out(&mut w, &self.keyboard);
         optional(&mut w, self.segments.as_ref(), |w, g| {
@@ -261,6 +285,8 @@ impl OwnerUpdate {
         optional(&mut w, self.chrome.as_ref(), |w, c| {
             optional(w, c.vertical_bar_edge.as_ref(), |w, e| w.u8(*e as u8));
             optional(w, c.sidebar_available.as_ref(), |w, a| w.u8(u8::from(*a)));
+            optional(w, c.auxiliary_top_left.as_ref(), |w, r| floats(w, r));
+            optional(w, c.auxiliary_top_right.as_ref(), |w, r| floats(w, r));
         });
         window_map_out(&mut w, self.window_map.as_ref());
         optional(&mut w, self.configuration.as_ref(), |w, c| w.u64(*c));
@@ -318,8 +344,11 @@ fn read(r: &mut Reader<'_>) -> Option<OwnerUpdate> {
         true => Some(OwnerMargins {
             root: four(r)?,
             plain: four(r)?,
-            minimum: four(r)?,
-            readable_width: r.f32().ok()?,
+            minimum: optional_four(r)?,
+            readable_width: match present(r)? {
+                true => Some(r.f32().ok()?),
+                false => None,
+            },
         }),
         false => None,
     };
@@ -361,6 +390,8 @@ fn read(r: &mut Reader<'_>) -> Option<OwnerUpdate> {
                 true => Some(present(r)?),
                 false => None,
             },
+            auxiliary_top_left: optional_four(r)?,
+            auxiliary_top_right: optional_four(r)?,
         }),
         false => None,
     };

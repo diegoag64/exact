@@ -128,6 +128,7 @@ impl<D: DataSource> Runner<D> {
             let p = self.pending.remove(pos);
             self.note_retired(&p);
             let t = p.ticket;
+            self.cancel_stream_fixture(t);
             self.note_let_go(t, target);
             self.let_go_request(p);
             self.forgot = true;
@@ -230,6 +231,7 @@ impl<D: DataSource> Runner<D> {
     fn held_for_agent(&self, p: &PendingReq) -> bool {
         self.device_holds.iter().any(|h| h.ticket == p.ticket)
             || self.holds_token(p.continuation)
+            || self.holds_data_request(p.ticket)
             || self.presence_holds(p.ticket)
     }
 

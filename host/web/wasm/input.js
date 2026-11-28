@@ -2,6 +2,8 @@ import { host, root, views, authoredDisabled, motion, focusAutofocus, messageFra
 import { guestMessageAuthorized, scrollDrag, sourceField, controlEvent, onSelection, inertAncestor } from "../navigation.js";
 import { send } from "./commit.js";
 import { writeValue, syncMarkup, imageEvents } from "./views.js";
+import { loadOnce } from '../load-once.js';
+
 export function setInputReady(ready) {
   host.inputReady = ready;
   root.setAttribute("aria-busy", String(!ready));
@@ -129,7 +131,7 @@ export function attach(el, id, handlers) {
           return;
         }
         if (heldValues.has(el)) {
-          writeValue(el, heldValues.get(el));
+          writeValue(el, ...heldValues.get(el));
         }
         markupPending.delete(el);
         syncMarkup(el);
@@ -273,7 +275,7 @@ export function attach(el, id, handlers) {
         host.sizes.delete(first);
       });
       el.exactResize = landed;
-      (host.resizes ??= Promise.all([loadAfterPaint("./resize-glue.js", "observeResize"), host.geometryLoading?.catch(() => {})]).then(([o]) => o)).then((observe) => {
+      (loadOnce(host, "resizes", () => Promise.all([loadAfterPaint("./resize-glue.js", "observeResize"), host.geometryLoading?.catch(() => {})]).then(([o]) => o))).then((observe) => {
         observe(el, (r) => {
           try {
             if (views.get(id) === el && !retiredViews.has(el)) {
@@ -306,7 +308,7 @@ export function attach(el, id, handlers) {
       });
       el.exactIntersect = landed;
       // (a view retired before it is observed lets go at once)
-      (host.intersects ??= loadAfterPaint("./intersect-glue.js", "observeIntersect")).then((observe) => {
+      (loadOnce(host, "intersects", () => loadAfterPaint("./intersect-glue.js", "observeIntersect"))).then((observe) => {
         if (views.get(id) !== el || retiredViews.has(el)) {
           landed();
           return;
@@ -438,6 +440,17 @@ export function attach(el, id, handlers) {
       if (kind === "drop") {
         on("dragover", (e) => go("dragover", e));
       }
+    } else if (kind === "dragstart" || kind === "dragend") {
+      // A drag of the node itself, which drag-out.js tells a node so marked (LLP 1094.000 D16): the point it began at,
+      // and at its end what it did
+      el.exactDragEvents = true;
+      on(`exact${kind}`, ({ detail: d }) => {
+        if (views.get(id) !== el || retiredViews.has(el)) {
+          return;
+        }
+        const line = `${d.x},${d.y},${d.shift ? "Shift+" : ""}${d.ctrl ? "Control+" : ""}${d.alt ? "Alt+" : ""}${d.meta ? "Meta+" : ""}`;
+        send(host.wasm.exact_dispatch(id, kind === "dragstart" ? 69 : 70, writeIn(kind === "dragend" ? `${line}\n${d.effect}` : line), now()));
+      });
     } else if ((kind === "change" || kind === "cancel") && el.type === "file") {
       // a picker's files, or its dismissal (LLP 1069.002 D2, D3)
       on(kind, () => {
@@ -447,7 +460,12 @@ export function attach(el, id, handlers) {
       });
     } else if (kind === "input" || kind === "change" || kind === "select" && !el.exactMarkup) {
       // navigation.js `controlEvent`: a control's value, a text field's selection
-      controlEvent(el, kind, on, (k, text) => send(host.wasm.exact_dispatch(id, k, writeIn(text), now())));
+      controlEvent(el, kind, on, (k, text) => {
+        const outer = host.inputField;
+        if (kind === "input") host.inputField = el;
+        try { return send(host.wasm.exact_dispatch(id, k, writeIn(text), now())); }
+        finally { host.inputField = outer; }
+      });
     } else if (kind === "hover") {
       // pointerenter/pointerleave: the element's own, not a bubbling mouseover.
       on("pointerenter", () => send(host.wasm.exact_dispatch(id, 2, 0, now())));

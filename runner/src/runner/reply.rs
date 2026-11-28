@@ -160,9 +160,23 @@ impl<D: DataSource> Runner<D> {
             return self.message(pos, outcome, &summary);
         }
         // Messages that waited together (LLP 1016.000 D4): one commit.
-        if let (Some(_), Outcome::Messages(_)) = (self.pending[pos].stream, &outcome) {
+        // An empty batch marks a parked/empty stream fixture open so `clock data`
+        // no longer waits on it while `pending(r)` still waits for a mapped value.
+        if let (Some(_), Outcome::Messages(ms)) = (self.pending[pos].stream, &outcome) {
+            if ms.is_empty() {
+                if self.pending[pos]
+                    .stream_meta
+                    .as_deref()
+                    .is_some_and(|m| m.fixture)
+                {
+                    self.pending[pos].fixture_opened = true;
+                    self.sync_pending_flags();
+                }
+                return Ok(None);
+            }
             return self.message(pos, outcome, &summary);
         }
+        self.cancel_stream_fixture(ticket);
         // A re-ask's wait was never sent (`overrun.rs`): only its invocation's end fails it.
         if self.pending[pos].reask_at.is_some() {
             return self.reask_answered(ticket, outcome, &summary);
@@ -177,6 +191,7 @@ impl<D: DataSource> Runner<D> {
         }
         let what = super::lines::fulfilling(ticket, &self.target_name(p.target), &summary);
         let target = p.target;
+        let again = p.ask_again;
         // An answer lands as a commit of its request's origin (LLP 1133.002
         // D12), with every cause the request has (LLP 1133.035 D16 item 6).
         let cause = self.ticket_cause(ticket);
@@ -211,7 +226,8 @@ impl<D: DataSource> Runner<D> {
                 );
             }
         }
-        result.map(Some)
+        self.as_cause(cause, |r| r.after_kept_read(target, ticket, again, result))
+            .map(Some)
     }
 
     /// One message of the open stream at `pos` (LLP 1016.000 D1): parsed
@@ -311,9 +327,9 @@ impl<D: DataSource> Runner<D> {
             }
             (_, outcome) => outcome,
         };
-        self.store.set_clock_ms(self.now_ms);
-        let (reads_before, revision_before) = (self.store.reads(), self.store.revision());
-        let draws_before = self.store.entropy_draws();
+        self.sync_store_clock();
+        let obs_before = self.store.observations();
+        let revision_before = self.store.revision();
         let parsed = if Self::activity_send(&p.source) {
             Self::activity_reply(&self.plan, ty, outcome).map(Some)
         } else if self.plan.module_named(&p.source).is_some() {
@@ -357,9 +373,12 @@ impl<D: DataSource> Runner<D> {
         if let Target::Resource(i) = p.target {
             // A read in a later turn (after an `await`) makes a store reader
             // as one in the first does (LLP 1146 §2.3).
-            if self.store.reads() > reads_before {
-                let contents = self.note_reads(i, reads_before, draws_before);
-                self.module_work.reply_reader = Some((i, contents));
+            if self.store.reads() > obs_before.0 || self.store.clock_reads() > obs_before.2 {
+                let store_read = self.store.reads() > obs_before.0;
+                let contents = self.note_reads(i, obs_before);
+                if store_read {
+                    self.module_work.reply_reader = Some((i, contents));
+                }
             }
             for topic in self.store.take_topics() {
                 if !self.resources[i].watching.contains(&topic) {
@@ -501,8 +520,13 @@ impl<D: DataSource> Runner<D> {
                     let end = super::UploadEnd::Answered(value.clone());
                     self.upload_over(p.ticket, p.sent || !failed_end, end);
                 }
-                if p.ask_again {
-                    self.log(super::lines::asked_again(p.ticket, &name));
+                if p.ask_again.context {
+                    self.resources[i].landing_read = true;
+                }
+                if p.ask_again.refresh {
+                    if !p.ask_again.context {
+                        self.log(super::lines::asked_again(p.ticket, &name, false));
+                    }
                     self.force_refresh(i);
                 }
                 self.resources[i].state = Some(ResourceState {
@@ -576,7 +600,9 @@ impl<D: DataSource> Runner<D> {
             .iter_mut()
             .filter(|n| n.target == previous.target)
         {
-            next.ask_again |= previous.ask_again;
+            next.ask_again.refresh |= previous.ask_again.refresh;
+            next.ask_again.context |=
+                previous.ask_again.context && next.stream.is_none() && !next.upload;
             next.module_again = next.module_again.or(previous.module_again);
             next.origin = previous.origin;
             next.inspection_generation = previous.inspection_generation;

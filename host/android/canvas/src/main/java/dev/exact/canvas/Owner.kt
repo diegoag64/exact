@@ -352,6 +352,10 @@ internal class Owner(private val hwbuf: Boolean, private val fast: Boolean, prio
 
     /** The window ([Native.window]): told before [boot] so the host is laid out in it from its first frame, and
      * whenever its size, the display's density or an inset changes, when the host lays the page out again. */
+    fun keyboardProgress(depth: Int) {
+        handler.post { Native.keyboardProgress(depth) }
+    }
+
     fun window(width: Int, height: Int, scale: Float, insets: IntArray) {
         val number = ++windowSent
         handler.post {
@@ -605,6 +609,14 @@ internal class Owner(private val hwbuf: Boolean, private val fast: Boolean, prio
         // native code reads moves no paint (one inputs call per binding).
         Formas.turned()
         if (fresh == null && (told != null || fields != null || bars != null || access != null)) {
+            if (bars != null) {
+                val pics = Native.pendingPictures()
+                if (pics.isNotEmpty()) {
+                    android.os.Trace.beginSection("exact pictures")
+                    for (k in pics.indices step 3) if (!made.containsKey(pics[k])) made[pics[k]] = makePicture(pics[k], pics[k + 1], pics[k + 2], hwbuf)
+                    android.os.Trace.endSection()
+                }
+            }
             queue.add(Pub(timerReports.publish(), null, true, seq, 0, told, fields, bars, access))
             Native.timerObservation(readerScrolling, readerSampling, true, false)
             if (!notifying.getAndSet(true)) postMain { notifying.set(false); published() }
@@ -864,6 +876,9 @@ internal object Exact {
     fun frameLoaded(id: Int, slot: Int, generation: Int, session: Long) =
         field { Native.frameLoaded(id, slot, generation, session) }
 
+    fun frameMessage(id: Int, slot: Int, generation: Int, session: Long, text: String) =
+        field { Native.frameMessage(id, slot, generation, session, text) }
+
     fun frameFocused(id: Int, slot: Int, generation: Int, session: Long, focused: Boolean) =
         field { Native.frameFocused(id, slot, generation, session, focused) }
 
@@ -920,12 +935,13 @@ internal object Exact {
     fun dragLeft() = dragged { Native.dragLeft() }
     fun dragDropped(x: Float, y: Float) = dragged { Native.dragDropped(x, y) }
 
-    /** The drag was released at ([x], [y]) px: the drop's number, 0 when nothing there takes it. Waited for, since
-     * Android is answered with whether the window took the drop, and published after the answer. */
-    fun dropReleased(x: Float, y: Float): Int {
-        val o = owner ?: return Native.dropReleased(x, y).also { mainThreadTurned() }
+    /** The drag, the app's own lift [lift] or another app's (0), was released at ([x], [y]) px: the drop's number, 0
+     * when nothing there takes it. Waited for, since Android is answered with whether the window took the drop, and
+     * published after the answer. */
+    fun dropReleased(x: Float, y: Float, lift: Int): Int {
+        val o = owner ?: return Native.dropReleased(x, y, lift).also { mainThreadTurned() }
         o.input()
-        return o.sync(publish = false) { Native.dropReleased(x, y) }.also { o.call {} }
+        return o.sync(publish = false) { Native.dropReleased(x, y, lift) }.also { o.call {} }
     }
 
     /** Who takes a drop Android gives field [id]'s view at ([x], [y]) px ([Native.fieldDrop]), asked once as it lands. */
@@ -933,6 +949,11 @@ internal object Exact {
 
     /** Drop [id]'s items arrived ([DropItems.json]). */
     fun dropLanded(id: Int, items: String) = dragged { Native.dropLanded(id, items) }
+
+    /** The platform began lift [lift], or it ended, taken or not ([DragOut], LLP 1094.000 D16): on exact2's thread,
+     * which sends its node `dragstart` or `dragend`. */
+    fun liftBegan(lift: Int) = dragged { Native.liftBegan(lift) }
+    fun liftEnded(lift: Int, taken: Boolean) = dragged { Native.liftEnded(lift, taken) }
 
     private fun dragged(f: () -> Unit) { val o = owner; if (o != null) o.call(f) else { f(); mainThreadTurned() } }
 

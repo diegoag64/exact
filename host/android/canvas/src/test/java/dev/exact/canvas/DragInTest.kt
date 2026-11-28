@@ -28,7 +28,7 @@ import java.io.File
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [29, 33], manifest = Config.NONE, shadows = [DragInTest.Journal::class])
 class DragInTest {
-    @Before fun begin() { Journal.lines.clear(); Journal.drags.clear(); Journal.release = 0; Journal.owner = 2; Journal.asked = 0 }
+    @Before fun begin() { Journal.lines.clear(); Journal.drags.clear(); Journal.release = 0; Journal.owner = 2; Journal.asked = 0; Journal.lastFieldDrop = null }
 
     /** exact2's journal, as the reader writes to it with no owner. */
     @Implements(Native::class, isInAndroidSdk = false)
@@ -47,11 +47,16 @@ class DragInTest {
             /** Who takes a drop on a field's view, as exact2 answers as it lands: -1 not the field, 0 the field, 1 its
              * own node, 2 one above it. */
             var owner = 2
-            @JvmStatic @Implementation fun dropReleased(x: Float, y: Float): Int { drags += "released ${x.toInt()} ${y.toInt()}"; return release }
+            @JvmStatic @Implementation fun dropReleased(x: Float, y: Float, lift: Int): Int {
+                drags += if (lift == 0) "released ${x.toInt()} ${y.toInt()}" else "released ${x.toInt()} ${y.toInt()} lift $lift"
+                return release
+            }
             @JvmStatic @Implementation fun dropLanded(id: Int, items: String) { drags += "landed $id $items" }
+            @JvmStatic @Implementation fun liftEnded(lift: Int, taken: Boolean) { drags += "lift $lift ended $taken" }
             /** How often exact2 was asked who takes a drop on a field. */
             var asked = 0
-            @JvmStatic @Implementation fun fieldDrop(id: Int, x: Float, y: Float): Int { asked++; return owner }
+            var lastFieldDrop: Pair<Int, Int>? = null
+            @JvmStatic @Implementation fun fieldDrop(id: Int, x: Float, y: Float): Int { asked++; lastFieldDrop = x.toInt() to y.toInt(); return owner }
         }
     }
 
@@ -133,7 +138,7 @@ class DragInTest {
 
     /** A drag event as Android's window sends one: the platform's own `DragEvent.obtain`, whose parameters differ by
      * API level, given each by its type (the action, the point and then zero offsets, the description and the clip). */
-    private fun event(action: Int, x: Float = 0f, y: Float = 0f, clip: ClipData? = null, description: ClipDescription? = clip?.description, local: Any? = null): DragEvent {
+    private fun event(action: Int, x: Float = 0f, y: Float = 0f, clip: ClipData? = null, description: ClipDescription? = clip?.description, local: Any? = null, result: Boolean = false): DragEvent {
         val obtain = DragEvent::class.java.declaredMethods
             .filter { it.name == "obtain" && it.parameterTypes.firstOrNull() == Int::class.javaPrimitiveType }
             .maxBy { it.parameterCount }
@@ -142,7 +147,7 @@ class DragInTest {
             when (type) {
                 Int::class.javaPrimitiveType -> action
                 Float::class.javaPrimitiveType -> floats.removeFirstOrNull() ?: 0f
-                Boolean::class.javaPrimitiveType -> false
+                Boolean::class.javaPrimitiveType -> result
                 ClipDescription::class.java -> description
                 ClipData::class.java -> clip
                 Any::class.java -> local
@@ -183,6 +188,28 @@ class DragInTest {
         val took = root.dispatchDragEvent(event(DragEvent.ACTION_DROP, x, y, clip, local = local))
         root.dispatchDragEvent(event(DragEvent.ACTION_DRAG_ENDED, description = clip.description, local = local))
         return took
+    }
+
+    /** LLP 1094.000 D16: the end of the window's own lift is told once Android's call returns, after the leave the
+     * window owes the drag, with whether a destination took it; another window's lift and another app's drag tell
+     * none. */
+    @Test fun theEndOfTheWindowsOwnLiftIsToldAfterItsLeave() {
+        val two = twoFields(state = 1)
+        val clip = ClipData.newPlainText("drag", "Fuji")
+        fun end(local: Any?, result: Boolean) {
+            two.root.dispatchDragEvent(event(DragEvent.ACTION_DRAG_STARTED, description = clip.description, local = local))
+            two.root.dispatchDragEvent(event(DragEvent.ACTION_DRAG_LOCATION, 170f, 400f, description = clip.description, local = local))
+            two.root.dispatchDragEvent(event(DragEvent.ACTION_DRAG_ENDED, description = clip.description, local = local, result = result))
+        }
+        end(DragOut.Lift(5, two.root.context), true)
+        assertEquals(listOf("over 170 400", "left"), Journal.drags)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertEquals(listOf("over 170 400", "left", "lift 5 ended true"), Journal.drags)
+        Journal.drags.clear()
+        end(DragOut.Lift(6, Any()), true)
+        end(null, false)
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        assertEquals(listOf("over 170 400", "left", "over 170 400", "left"), Journal.drags)
     }
 
     @Test fun aTextDropReachesEitherOfTwoFieldsWhichInsertsIt() {
@@ -272,7 +299,8 @@ class DragInTest {
             val two = twoFields(state = 1 or 4)
             Journal.release = 7
             val clip = ClipData("photo", arrayOf("image/png"), ClipData.Item(photo)).apply { addItem(ClipData.Item("Glasshouse")) }
-            assertTrue(drag(two.root, 200f, 330f, clip, local = DragOut.OWN))
+            assertTrue(drag(two.root, 200f, 330f, clip, local = DragOut.Lift(1, two.root.context)))
+            assertTrue("the window's own lift names itself as it drops", "released 200 330 lift 1" in Journal.drags)
             assertTrue("the copy began reading", held.reading.await(5, java.util.concurrent.TimeUnit.SECONDS))
             idle()
             assertEquals("the drag ended, and its copy is still reading", emptyList<String>(), landed())
@@ -303,6 +331,49 @@ class DragInTest {
         assertEquals(listOf(0, 0), (two.second.parent as View).let { listOf(it.width, it.height) })
         drag(two.root, 170f, 230f)
         assertEquals("2", two.second.text.toString())
+    }
+
+    @Test fun insetPageTranslatesRootAndFieldDragsIntoPagePixels() {
+        val activity = Robolectric.buildActivity(Activity::class.java).setup().get()
+        val root = Root(activity)
+        val fields = Fields(activity)
+        val page = View(activity)
+        val insetX = 48
+        val insetY = 96
+        fun insetParams() = FrameLayout.LayoutParams(400 - insetX, 400 - insetY).apply {
+            gravity = android.view.Gravity.TOP or android.view.Gravity.LEFT
+            leftMargin = insetX
+            topMargin = insetY
+        }
+        root.addView(fields, insetParams())
+        root.addView(page, insetParams())
+        root.drags.page = page
+        activity.setContentView(root)
+        val two = Two(root, fields, FieldText(activity), FieldText(activity))
+        two.tell(state = 1)
+        root.measure(View.MeasureSpec.makeMeasureSpec(400, View.MeasureSpec.EXACTLY), View.MeasureSpec.makeMeasureSpec(400, View.MeasureSpec.EXACTLY))
+        root.layout(0, 0, 400, 400)
+        val texts = (0 until fields.childCount).map { (fields.getChildAt(it) as FrameLayout).getChildAt(0) as FieldText }
+        val second = texts.first { it.text.toString() == "2" }
+
+        // A drag over the page outside any field goes through Root.onDragEvent and subtracts the page inset.
+        drag(root, insetX + 10f, insetY + 15f)
+        assertEquals(listOf("over 10 15", "released 10 15"), Journal.drags)
+
+        // A drag onto a hosted field kept by the field reports page-local coordinates to dragOver, fieldDrop and dragDropped.
+        Journal.drags.clear()
+        Journal.owner = 2
+        drag(root, insetX + 170f, insetY + 230f)
+        assertEquals(170 to 230, Journal.lastFieldDrop)
+        assertEquals(listOf("over 170 230", "dropped 170 230"), Journal.drags)
+        assertTrue(second.text.toString(), second.text.toString().contains("Fuji"))
+
+        // A drag onto a hosted field taken by an Exact drop node reports page-local coordinates to fieldDrop and dropReleased.
+        Journal.drags.clear()
+        Journal.owner = 1
+        drag(root, insetX + 170f, insetY + 70f)
+        assertEquals(170 to 70, Journal.lastFieldDrop)
+        assertEquals(listOf("over 170 70", "released 170 70"), Journal.drags)
     }
 
     class Folders : android.content.ContentProvider() {

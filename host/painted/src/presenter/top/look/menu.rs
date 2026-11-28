@@ -58,7 +58,7 @@ impl Layout {
         for item in &mut self.items {
             match item {
                 Item::Text(_, at, _, _) => at.1 += shift,
-                Item::Rule(rect, _) | Item::Symbol(_, rect, _) => rect.1 += shift,
+                Item::Rule(rect, _) | Item::Symbol(_, rect, _, _) => rect.1 += shift,
             }
         }
         true
@@ -81,7 +81,7 @@ impl Layout {
             match item {
                 Item::Rule(rect, _) => rect.2 += more,
                 Item::Text(_, at, _, _) if rtl => at.0 += more,
-                Item::Symbol(_, rect, _) if rtl => rect.0 += more,
+                Item::Symbol(_, rect, _, _) if rtl => rect.0 += more,
                 _ => {}
             }
         }
@@ -215,7 +215,9 @@ mod tests {
                 Direction::Ltr,
             )),
             symbol: Some("settings".into()),
+            symbol_direction: Direction::Ltr,
             checked: true,
+            checkable: true,
             enabled: true,
             destructive: false,
             cancel: false,
@@ -246,13 +248,13 @@ mod tests {
                 window: (260., 500.),
                 room: 500.,
             };
-            let layout = super::super::menu(&mut engine, &entries, &inputs, false);
+            let layout = super::super::menu(&mut engine, &entries, None, &inputs, false);
             let row = layout.targets[0].rect;
             let icons: Vec<_> = layout
                 .items
                 .iter()
                 .filter_map(|item| match item {
-                    Item::Symbol(name, rect, _) => Some((name.as_str(), rect.0)),
+                    Item::Symbol(name, rect, _, _) => Some((name.as_str(), rect.0)),
                     _ => None,
                 })
                 .collect();

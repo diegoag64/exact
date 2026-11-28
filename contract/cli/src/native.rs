@@ -451,6 +451,9 @@ pub fn android_uses(plan: &exact_plan::Plan) -> Vec<&'static str> {
         exact_kernel::NodeType::from_wire(node.node_type) == Some(exact_kernel::NodeType::Video)
     }) {
         uses.push("video");
+        if exact_runner::uses::uses_picture_in_picture(plan) {
+            uses.push("videoPictureInPicture");
+        }
     }
     uses
 }
@@ -703,16 +706,21 @@ pub fn rust_hatches(
     let variant = |word: &str| {
         let name: String = word
             .split('-')
-            .map(|part| part[..1].to_ascii_uppercase() + &part[1..])
+            .enumerate()
+            .map(|(i, part)| match part.as_bytes().first() {
+                None => "_".to_owned(),
+                Some(c) if i > 0 && c.is_ascii_digit() => format!("_{part}"),
+                _ => part[..1].to_ascii_uppercase() + &part[1..],
+            })
             .collect();
         match name.as_str() {
-            "Self" => "Self_".to_owned(),
+            "Self" => "_Self".to_owned(),
             _ => name,
         }
     };
     let list = |each: &dyn Fn(&String) -> String| words.iter().map(each).collect::<String>();
     let mut text = String::from(
-        "/// One of the app's `hatch` words this platform handles (app.json `hatches`).\n#[allow(dead_code)]\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum HatchKey {\n",
+        "/// One of the app's `hatch` words this platform handles (app.json `hatches`).\n#[allow(dead_code, non_camel_case_types)]\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum HatchKey {\n",
     );
     text += &list(&|w| format!("    /// `hatch=\"{w}\"`.\n    {},\n", variant(w)));
     text += "}\n#[allow(dead_code)]\nimpl HatchKey {\n    /// The words this platform's hatches were built to handle.\n    pub const WORDS: &'static [&'static str] = &[";
@@ -748,7 +756,7 @@ fn hatch_table(manifest: &Manifest) -> Result<Vec<HatchRow>, String> {
         .map(|(word, on)| {
             if !contract_lower::dataset::is_word(word) {
                 return Err(format!(
-                    "app.json `hatches`: \"{word}\" is not a word: lowercase words of letters and digits joined by `-` (LLP 1075.003 Q2)"
+                    "app.json `hatches`: \"{word}\" is not a word: a lowercase letter followed by lowercase letters, digits or `-` (LLP 1075.003 Q2)"
                 ));
             }
             let listed = on.as_array().ok_or_else(|| {
@@ -827,7 +835,7 @@ fn words(manifest: &Manifest, kind: &Words) -> Result<Vec<String>, String> {
                 "app.json `{key}`: `{w}` is written by the web host on its own elements (LLP 1075.003 §3.3)"
             )),
             _ => Err(format!(
-                "app.json `{key}`: {word} is not a word: lowercase words of letters and digits joined by `-` (LLP 1075.003 Q2)"
+                "app.json `{key}`: {word} is not a word: a lowercase letter followed by lowercase letters, digits or `-` (LLP 1075.003 Q2)"
             )),
         })
         .collect()

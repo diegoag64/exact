@@ -9,9 +9,12 @@ import { deferred, source } from './glue-fixture.mjs';
 import { glueDeclarations } from './tests/glue-fixture.mjs';
 import { EXTENSION_TYPES } from '../../scripts/share-target.mjs';
 import { carried, listen, start, typeOf, writeDraggable } from './drag-out.js';
-import { downForDrag, elementOf, lightDomDragPath, observeDragInput, pressedAt } from './drag-input.js';
+import { downForDrag, dragPathFrom, elementOf, observeDragInput, pressedAt } from './drag-input.js';
+import { loadOnce } from './load-once.js';
 
 const BASE = 'https://example.com/app/';
+// A node's style as the drag's start reads it, a content box at its border box's corner
+globalThis.getComputedStyle ??= () => ({ borderLeftWidth: '0', paddingLeft: '0', borderTopWidth: '0', paddingTop: '0' });
 const node = (attrs) => ({
   parentElement: null,
   getAttribute: (name) => attrs[name] ?? null,
@@ -56,6 +59,7 @@ class El {
   removeAttribute(name) { delete this.attrs[name]; }
   get parentElement() { return this.parent; }
   getBoundingClientRect() { return { left: 10, top: 20 }; }
+  dispatchEvent(event) { (this.told ??= []).push([event.type, event.detail]); }
   addEventListener(type, fn, options) {
     (this.listeners ??= []).push([type, fn, options === true || !!options?.capture]);
   }
@@ -251,6 +255,34 @@ afterEach(() => {
   for (const cleanup of cleanups.splice(0)) cleanup();
 });
 
+test('one window listener records an image drag’s path as its dispatch began, kept across the handoff', async () => {
+  const root = page(), wait = new AbortController(), loaded = new AbortController();
+  const recorders = () => root.defaultView.heard.filter(([type, , capture]) => type === 'dragstart' && capture);
+  const input = observeDragInput(root, wait.signal);
+  // The loaded listener's bundle has its own copy of the module
+  const bundled = await import('./drag-input.js?bundle');
+  expect(bundled.observeDragInput).not.toBe(observeDragInput);
+  bundled.observeDragInput(root, loaded.signal, input);
+  const [[, record]] = recorders();
+  expect(recorders()).toHaveLength(1);
+  wait.abort();
+  expect(recorders().map(([, fn]) => fn)).toEqual([record]);
+  const card = new El('div'), image = new El('img', {}, card);
+  const event = { type: 'dragstart', target: image, composedPath: () => [image, card, root] };
+  root.defaultView.fire('dragstart', event, true);
+  const recorded = bundled.dragPathFrom(input, event);
+  expect(recorded).toEqual([image, card]);
+  // A later listener's move changes what the path reads now, not what it read as the drag began
+  event.composedPath = () => [image, root];
+  expect(dragPathFrom(input, event)).toBe(recorded);
+  const unrecorded = { type: 'dragstart', target: card, composedPath: () => [card, root] };
+  root.defaultView.fire('dragstart', unrecorded, true);
+  unrecorded.composedPath = () => [card];
+  expect(dragPathFrom(input, unrecorded)).toEqual([card]);
+  loaded.abort();
+  expect(recorders()).toEqual([]);
+});
+
 function listenOn(root, input) {
   const controller = new AbortController();
   cleanups.push(() => {
@@ -271,9 +303,9 @@ test('a primary down in a field turns the drag of every node the app made dragga
   expect(root.heard.map(([type, , capture, signal]) => [type, capture, signal === controller.signal]))
     .toEqual([['pointerdown', true, true], ['mousedown', true, true], ['pointerup', true, true], ['pointercancel', true, true],
       ['mouseup', true, true], ['pointermove', true, true], ['dragstart', true, true], ['dragend', true, true],
-      ['dragstart', true, true], ['dragstart', false, true]]);
+      ['dragstart', true, true], ['dragstart', false, true], ['dragend', true, true]]);
   expect(root.defaultView.heard.map(([type, , capture, signal]) => [type, capture, signal === controller.signal]))
-    .toEqual([['blur', false, true]]);
+    .toEqual([['dragstart', true, false], ['blur', false, true], ['dragenter', true, true], ['drop', true, true]]);
   const draggable = () => [outer, card, foreign, unowned].map((el) => el.getAttribute('draggable'));
   root.fire('pointerdown', { isPrimary: true, pointerType: 'mouse', target: field });
   root.fire('pointerdown', { isPrimary: true, pointerType: 'mouse', target: range });
@@ -1108,7 +1140,8 @@ test('capture cancels a drag whose composed source already moved into a frame', 
 test.each(['element', 'text'])('a connected shadow-root %s keeps the card’s drag through bubble', (kind) => {
   const root = page(), card = declared('div', { 'data-datatransfertext': 'card' }), shadow = {};
   const inner = kind === 'element' ? Object.assign(new El('img'), { shadow })
-    : { nodeType: 3, parentElement: null, isConnected: true, shadow, getRootNode: El.prototype.getRootNode };
+    : { nodeType: 3, parentElement: null, isConnected: true, shadow, getRootNode: El.prototype.getRootNode,
+      addEventListener: El.prototype.addEventListener, removeEventListener: El.prototype.removeEventListener };
   const drag = Object.assign(dragstart(card), { composedPath: () => [inner, shadow, card] });
   listenOn(root);
   root.fire('dragstart', drag, true);
@@ -1199,7 +1232,7 @@ function wasmGlue(loadAfterPaint) {
     constructor() { super(); cleanups.push(() => this.abort()); }
   }
   const context = vm.createContext({ host: {}, document, views, retiredViews, log: (line) => logs.push(line), loadAfterPaint, exact,
-    downForDrag, elementOf, lightDomDragPath, observeDragInput, pressedAt, AbortController: Controller,
+    downForDrag, dragPathFrom, elementOf, loadOnce, observeDragInput, pressedAt, AbortController: Controller,
     setTimeout: (fn, ms) => timers.push([fn, ms]) });
   vm.runInContext(DECLARATIONS, context);
   const element = (id, view, parent = null, localName = 'div', attrs = {}) => {
@@ -1353,4 +1386,74 @@ test('a listener that fails as it starts leaves nothing of itself, and the next 
   expect([logs, context.host.dragOutModule, context.host.dragOutListening, timers.length, signal.aborted, card.attrs.draggable,
     'listenDragOut' in exact, guards.some(([type]) => type === 'pointerdown')])
     .toEqual([['drag-out module: Error: no document'], null, undefined, 1, true, 'false', false, true]);
+});
+
+// LLP 1094.000 D16: the node hears its drag's start once the browser's dispatch ended uncancelled, before the page's
+// first event of the drag, and its end with the browser's `dropEffect`, the point the drag began at in both.
+test('the node hears its drag begin before the page hears the drag, and end with what it did', () => {
+  const root = page(), timers = [], schedule = globalThis.setTimeout;
+  globalThis.setTimeout = (fn) => timers.push(fn);
+  const told = (el) => (el.told ?? []).map(([type, d]) => [type, d.x, d.y, d.effect, d.shift, d.alt]);
+  // A node whose target binds `dragstart` or `dragend`, as both mark it
+  const heard = (el) => Object.assign(el, { exactDragEvents: true });
+  try {
+    listenOn(root);
+    const card = heard(declared('div', { 'data-datatransfertext': 'card' }));
+    const drag = Object.assign(dragstart(card), { shiftKey: true });
+    root.fire('dragstart', drag, true);
+    root.fire('dragstart', drag, false);
+    expect(told(card)).toEqual([]);
+    root.defaultView.fire('dragenter', {}, true);
+    expect(told(card)).toEqual([['exactdragstart', 40, 50, 'none', true, undefined]]);
+    for (const run of timers.splice(0)) run();
+    root.fire('dragend', { dataTransfer: { dropEffect: 'copy' }, altKey: true }, true);
+    root.fire('dragend', { dataTransfer: { dropEffect: 'copy' } }, true);
+    expect(told(card)).toEqual([['exactdragstart', 40, 50, 'none', true, undefined]], 'the end waits for the dispatch');
+    for (const run of timers.splice(0)) run();
+    expect(told(card)).toEqual([['exactdragstart', 40, 50, 'none', true, undefined], ['exactdragend', 40, 50, 'copy', undefined, true]]);
+    // A start a later listener cancels tells nothing, then or at an end.
+    const cancelled = heard(declared('div', { 'data-datatransfertext': 'cancelled' })), stopped = dragstart(cancelled);
+    root.fire('dragstart', stopped, true);
+    root.fire('dragstart', stopped, false);
+    stopped.preventDefault();
+    for (const run of timers.splice(0)) run();
+    root.fire('dragend', { dataTransfer: { dropEffect: 'none' } }, true);
+    expect(told(cancelled)).toEqual([]);
+    // A drag begun at a picture inside the node is the node's: WebKit sends the picture a listener removed its end
+    // alone, which the node hears after its start, the timer not yet run.
+    const framed = heard(declared('div', { 'data-datatransfertext': 'framed' })), picture = new El('img', {}, framed);
+    const lifted = dragstart(picture);
+    root.fire('dragstart', lifted, true);
+    root.fire('dragstart', lifted, false);
+    picture.isConnected = false;
+    picture.fire('dragend', { dataTransfer: { dropEffect: 'none' } });
+    for (const run of timers.splice(0)) run();
+    expect(told(framed).map(([type, , , effect]) => [type, effect])).toEqual([['exactdragstart', 'none'], ['exactdragend', 'none']]);
+    // A listener at the node that stops the start's propagation leaves the drag followed from capture
+    const stopping = heard(declared('div', { 'data-datatransfertext': 'stopping' })), halted = dragstart(stopping);
+    root.fire('dragstart', halted, true);
+    for (const run of timers.splice(0)) run();
+    root.fire('dragend', { dataTransfer: { dropEffect: 'copy' } }, true);
+    for (const run of timers.splice(0)) run();
+    expect(told(stopping).map(([type, , , effect]) => [type, effect])).toEqual([['exactdragstart', 'none'], ['exactdragend', 'copy']]);
+    // A node gone from the page by the end hears none.
+    const gone = heard(declared('div', { 'data-datatransfertext': 'gone' })), going = dragstart(gone);
+    root.fire('dragstart', going, true);
+    root.fire('dragstart', going, false);
+    for (const run of timers.splice(0)) run();
+    gone.isConnected = false;
+    root.fire('dragend', { dataTransfer: { dropEffect: 'copy' } }, true);
+    for (const run of timers.splice(0)) run();
+    expect(told(gone).map(([type]) => type)).toEqual(['exactdragstart']);
+    // A node that hears neither is not followed: its drag reads nothing of its box
+    const quiet = declared('div', { 'data-datatransfertext': 'quiet' }), plain = dragstart(quiet);
+    quiet.getBoundingClientRect = () => { throw new Error('read'); };
+    root.fire('dragstart', plain, true);
+    root.fire('dragstart', plain, false);
+    for (const run of timers.splice(0)) run();
+    root.fire('dragend', { dataTransfer: { dropEffect: 'copy' } }, true);
+    expect(told(quiet)).toEqual([]);
+  } finally {
+    globalThis.setTimeout = schedule;
+  }
 });

@@ -324,7 +324,8 @@ fn a_sheet_drags_to_its_tallest_detent_and_down_out_of_the_window() {
     // From the handle, up past half way to the top: it rests at the top.
     let y = frame.1 + 10.0;
     p.pointer_down(200., y, t).unwrap();
-    for (k, dy) in [-4.0, -100.0, -250.0, -300.0].iter().enumerate() {
+    // The sheet moves from the sample that crosses the slop.
+    for (k, dy) in [-4.0, -10.0, -100.0, -250.0, -300.0].iter().enumerate() {
         p.pointer_move(200., y + dy, t + 50. * (k + 1) as f64)
             .unwrap();
     }
@@ -336,6 +337,7 @@ fn a_sheet_drags_to_its_tallest_detent_and_down_out_of_the_window() {
     let t = p.host().now();
     let y = frame.1 + 10.0;
     p.pointer_down(200., y, t).unwrap();
+    p.pointer_move(200., y + 10., t + 10.).unwrap();
     p.pointer_move(200., y + 200., t + 50.).unwrap();
     p.pointer_move(200., y + 500., t + 100.).unwrap();
     p.pointer_up(200., y + 520., t + 110.).unwrap();
@@ -480,6 +482,55 @@ fn a_sheets_drag_and_a_back_preview_follow_the_finger() {
     assert!(p.back_progress(0, 0.0, 1, t));
     assert!(p.back_progress(1, 0.2, 1, t + 8.));
     assert!(p.stage_follows_finger(), "Back's preview");
+}
+
+/// A sheet dragged directly moves from the event that crossed the slop, as
+/// Material's `ViewDragHelper` captures its view there: that event moves
+/// nothing, however far past the slop it lands, and the sheet follows the
+/// finger one to one after it (expo/exact#656).
+#[test]
+fn a_sheets_drag_starts_from_the_event_that_crossed_the_slop() {
+    let mut p = phone();
+    tap(&mut p, "open-info");
+    after(&mut p, 1000.0);
+    let (_, rest) = p.top_sheet().unwrap();
+    let top = |p: &Presenter<()>| p.top_sheet().unwrap().1 .1;
+    // Down, from just past the slop, then on.
+    let t = p.host().now();
+    let y = rest.1 + 10.0;
+    p.pointer_down(200., y, t).unwrap();
+    p.pointer_move(200., y + 12., t + 16.).unwrap();
+    assert!(p.stage_follows_finger(), "past the slop");
+    assert!(
+        near(top(&p), rest.1),
+        "the crossing moves nothing: {}",
+        top(&p)
+    );
+    p.pointer_move(200., y + 30., t + 32.).unwrap();
+    assert!(near(top(&p), rest.1 + 18.), "then 1:1: {}", top(&p));
+    p.pointer_cancel(t + 40.).unwrap();
+    after(&mut p, 1000.0);
+    assert!(near(top(&p), rest.1), "back at rest: {}", top(&p));
+    // A first sample 100 points down is no jump either.
+    let t = p.host().now();
+    p.pointer_down(200., y, t).unwrap();
+    p.pointer_move(200., y + 100., t + 16.).unwrap();
+    assert!(
+        near(top(&p), rest.1),
+        "a large crossing moves nothing: {}",
+        top(&p)
+    );
+    p.pointer_move(200., y + 120., t + 32.).unwrap();
+    assert!(near(top(&p), rest.1 + 20.), "{}", top(&p));
+    p.pointer_cancel(t + 40.).unwrap();
+    after(&mut p, 1000.0);
+    // Upward, the same.
+    let t = p.host().now();
+    p.pointer_down(200., y, t).unwrap();
+    p.pointer_move(200., y - 60., t + 16.).unwrap();
+    assert!(near(top(&p), rest.1), "{}", top(&p));
+    p.pointer_move(200., y - 70., t + 32.).unwrap();
+    assert!(near(top(&p), rest.1 - 10.), "{}", top(&p));
 }
 
 #[test]
@@ -690,6 +741,211 @@ fn a_push_and_a_pop_cross_on_the_shared_x_axis() {
     assert!(left < 0.0, "{left}");
     after(&mut p, 400.0);
     assert!(near(rect(&mut p, "home-body").0, 0.0));
+}
+
+#[test]
+fn rtl_shared_x_mirrors_push_and_pop_by_container_direction() {
+    // 1. RTL container: push brings the arriving route in from the left (`dx < 0`),
+    // and pop brings the revealed route back from the right (`dx > 0`).
+    let rtl_app = APP.replace("main navigationKey", "main direction=\"rtl\" navigationKey");
+    let mut p = phone_source(&rtl_app);
+    tap(&mut p, "open-detail");
+    after(&mut p, 0.0);
+    assert!(p.stage_moving());
+    after(&mut p, 150.0);
+    let push_x = rect(&mut p, "detail-body").0;
+    assert!(
+        push_x < 0.0 && push_x > -AXIS_SHIFT,
+        "RTL push enters from left: {push_x}"
+    );
+    after(&mut p, 400.0);
+    assert!(near(rect(&mut p, "detail-body").0, 0.0));
+    assert!(p.system_back(p.host().now()));
+    p.run_commands(|| ());
+    after(&mut p, 0.0);
+    let pop_x = rect(&mut p, "home-body").0;
+    assert!(pop_x > 0.0, "RTL pop enters from right: {pop_x}");
+    after(&mut p, 400.0);
+    assert!(near(rect(&mut p, "home-body").0, 0.0));
+
+    // 2. Mixed direction: an RTL container pushing an LTR detail route stays
+    // symmetric across push and pop (both governed by the container, not the arriving route).
+    let mixed = rtl_app.replace(
+        "testId=\"route-detail\"",
+        "testId=\"route-detail\" direction=\"ltr\"",
+    );
+    let mut p = phone_source(&mixed);
+    tap(&mut p, "open-detail");
+    after(&mut p, 150.0);
+    assert!(
+        rect(&mut p, "detail-body").0 < 0.0,
+        "RTL container pushes LTR detail from left"
+    );
+    after(&mut p, 400.0);
+    assert!(p.system_back(p.host().now()));
+    p.run_commands(|| ());
+    after(&mut p, 0.0);
+    assert!(
+        rect(&mut p, "home-body").0 > 0.0,
+        "popping LTR detail inside RTL container reverses push (enters from right)"
+    );
+
+    // 3. Push and pop inside an RTL modal sheet mirror identically, even when the
+    // outer stack has the opposite direction (both outer=ltr/sheet=rtl and outer=rtl/sheet=ltr).
+    let ltr_outer_rtl_sheet = APP.replace(
+        "testId=\"route-info\"",
+        "testId=\"route-info\" direction=\"rtl\"",
+    );
+    let mut p = phone_source(&ltr_outer_rtl_sheet);
+    tap(&mut p, "open-info");
+    after(&mut p, 1000.0);
+    tap(&mut p, "open-settings");
+    after(&mut p, 150.0);
+    assert!(
+        rect(&mut p, "settings-body").0 < 0.0,
+        "RTL sheet inside LTR stack pushes from left"
+    );
+    after(&mut p, 400.0);
+    assert!(p.system_back(p.host().now()));
+    p.run_commands(|| ());
+    after(&mut p, 0.0);
+    assert!(
+        rect(&mut p, "info-body").0 > 0.0,
+        "RTL sheet inside LTR stack pops from right"
+    );
+
+    let rtl_outer_ltr_sheet = rtl_app.replace(
+        "testId=\"route-info\"",
+        "testId=\"route-info\" direction=\"ltr\"",
+    );
+    let mut p = phone_source(&rtl_outer_ltr_sheet);
+    tap(&mut p, "open-info");
+    after(&mut p, 1000.0);
+    tap(&mut p, "open-settings");
+    after(&mut p, 150.0);
+    assert!(
+        rect(&mut p, "settings-body").0 > 0.0,
+        "LTR sheet inside RTL stack pushes from right"
+    );
+    after(&mut p, 400.0);
+    assert!(p.system_back(p.host().now()));
+    p.run_commands(|| ());
+    after(&mut p, 0.0);
+    assert!(
+        rect(&mut p, "info-body").0 < 0.0,
+        "LTR sheet inside RTL stack pops from left"
+    );
+
+    // 4. A tabpanel with its own `direction="rtl"` mirrors crossings inside that tab
+    // even when the outer navigation root is LTR.
+    let tabbed = r##"routes nav
+  home "/"
+    detail "/detail"
+component App
+  action open(url: string)
+    nav = push(nav, url)
+  view
+    main navigationKey=`${top(nav).id}` navigationBack="back" direction="ltr" viewport-fit="cover" width="100%" height="100%"
+      column role="tabpanel" id="panel-a" direction="rtl" position="absolute" inset=0
+        for e in stack(nav) key=e.id
+          if e.name == "home"
+            column navigationKey=`${e.id}` testId="route-home" position="absolute" inset=0 background-color="#ffffff"
+              text "Home" testId="home-body"
+              button press=open("/detail") testId="open-detail" height=40
+                text "Detail"
+          if e.name == "detail"
+            column navigationKey=`${e.id}` testId="route-detail" position="absolute" inset=0 background-color="#ffffff"
+              text "Detail" testId="detail-body"
+      row role="tablist" position="absolute" bottom=0
+        button role="tab" aria-controls="panel-a" aria-selected=true
+          text "Tab"
+"##;
+    let mut p = phone_source(tabbed);
+    tap(&mut p, "open-detail");
+    after(&mut p, 150.0);
+    assert!(
+        rect(&mut p, "detail-body").0 < 0.0,
+        "RTL tabpanel pushes from left"
+    );
+    after(&mut p, 400.0);
+    assert!(p.system_back(p.host().now()));
+    p.run_commands(|| ());
+    after(&mut p, 0.0);
+    assert!(
+        rect(&mut p, "home-body").0 > 0.0,
+        "RTL tabpanel pops from right"
+    );
+
+    // 5. Predictive Back in RTL keeps physical finger direction from either edge,
+    // restores rest on cancel, and commits cleanly from the preview pose.
+    for edge in [0i32, 1i32] {
+        // Cancel restores rest.
+        let mut p = phone_source(&rtl_app);
+        tap(&mut p, "open-detail");
+        after(&mut p, 1000.0);
+        let rest = rect(&mut p, "detail-body");
+        let rest_center = rest.0 + rest.2 / 2.0;
+        let now = p.host().now();
+        assert!(p.back_progress(0, 0.0, edge, now));
+        assert!(p.back_progress(1, 0.5, edge, now + 50.));
+        after(&mut p, 50.0);
+        let preview = rect(&mut p, "detail-body");
+        let preview_center = preview.0 + preview.2 / 2.0;
+        if edge == 0 {
+            assert!(
+                preview_center > rest_center,
+                "left-edge swipe shifts center right: {preview_center} vs {rest_center}"
+            );
+        } else {
+            assert!(
+                preview_center < rest_center,
+                "right-edge swipe shifts center left: {preview_center} vs {rest_center}"
+            );
+        }
+        p.back_progress(2, 0.0, edge, now + 60.);
+        after(&mut p, 400.0);
+        assert!(
+            near(rect(&mut p, "detail-body").0, rest.0),
+            "cancelled RTL predictive back restores rest (edge {edge})"
+        );
+        assert!(has(&p, "route-detail"));
+
+        // Commit continues from the preview pose (incoming home stays at rest without snapping,
+        // outgoing detail exits in the preview edge's physical direction) and settles on home.
+        let now = p.host().now();
+        assert!(p.back_progress(0, 0.0, edge, now));
+        assert!(p.back_progress(1, 0.5, edge, now + 50.));
+        after(&mut p, 50.0);
+        let (preview_out, _) = p.shift_poses(p.host().now(), None);
+        assert!(p.system_back(p.host().now()));
+        p.run_commands(|| ());
+        after(&mut p, 60.0);
+        assert!(!has(&p, "route-detail"));
+        assert!(
+            near(rect(&mut p, "home-body").0, 0.0),
+            "committed RTL predictive back keeps revealed home at rest (edge {edge})"
+        );
+        let (commit_out, commit_in) = p.shift_poses(p.host().now(), None);
+        assert_eq!(commit_in, Pose::REST);
+        if edge == 0 {
+            assert!(
+                commit_out.dx > preview_out.dx,
+                "left-edge commit continues moving right: {} vs {}",
+                commit_out.dx,
+                preview_out.dx
+            );
+        } else {
+            assert!(
+                commit_out.dx < preview_out.dx,
+                "right-edge commit continues moving left: {} vs {}",
+                commit_out.dx,
+                preview_out.dx
+            );
+        }
+        after(&mut p, 400.0);
+        assert!(!p.stage_moving());
+        assert!(near(rect(&mut p, "home-body").0, 0.0));
+    }
 }
 
 #[test]
@@ -918,4 +1174,230 @@ fn a_fit_content_sheet_taller_than_the_keyboard_leaves_goes_to_its_tallest() {
     after(&mut p, 1000.0);
     let (_, frame) = p.top_sheet().unwrap();
     assert!(near(frame.1, STATUS), "{frame:?}");
+}
+
+#[test]
+fn terminal_fit_content_ceiling_adapts_stops_keyboard_and_resize() {
+    let source = r##"routes nav
+  home "/"
+    short "/short"
+    mid "/mid"
+    tall "/tall"
+    clamped "/clamped"
+component App
+  state extra = false
+  action open(url: string)
+    nav = push(nav, url)
+  action toggle
+    extra = not extra
+  view
+    main navigationKey=`${top(nav).id}` navigationBack="back" viewport-fit="cover" width="100%" height="100%"
+      for e in stack(nav) key=e.id
+        if e.name == "home"
+          column navigationKey=`${e.id}` position="absolute" inset=0 padding=16
+            button press=open("/short") testId="open-short" height=40
+              text "Short"
+            button press=open("/mid") testId="open-mid" height=40
+              text "Mid"
+            button press=open("/tall") testId="open-tall" height=40
+              text "Tall"
+            button press=open("/clamped") testId="open-clamped" height=40
+              text "Clamped"
+        if e.name == "short"
+          column navigationKey=`${e.id}` navigationPresentation="modal" navigationDetent="medium fit-content" testId="route-short" position="absolute" inset=0 padding=16
+            column height=120
+            if extra
+              column height=400
+            button press=toggle testId="grow" height=40
+              text "Grow"
+        if e.name == "mid"
+          column navigationKey=`${e.id}` navigationPresentation="modal" navigationDetent="medium fit-content" testId="route-mid" position="absolute" inset=0 padding=16
+            column height=(extra ? 120 : 480)
+            button press=toggle testId="shrink" height=40
+              text "Shrink"
+        if e.name == "tall"
+          column navigationKey=`${e.id}` navigationPresentation="modal" navigationDetent="medium fit-content" testId="route-tall" position="absolute" inset=0 padding=16
+            column height=1100
+        if e.name == "clamped"
+          column navigationKey=`${e.id}` navigationPresentation="modal" navigationDetent="30% 60% fit-content" navigationInitialDetent="60%" testId="route-clamped" position="absolute" inset=0 padding=16
+            column height=300
+"##;
+    let tallest = H - STATUS;
+    let medium = tallest / 2.0 + FOOT;
+
+    // 1. Short content <= 50%: single stop at content height; keyboard lifts without adding `medium`;
+    //    growing past 50% keeps the sheet expanded at `fit-content`.
+    let mut p = phone_source(source);
+    tap(&mut p, "open-short");
+    after(&mut p, 1000.0);
+    assert_eq!(
+        p.stage.sheets[0].heights.len(),
+        1,
+        "short sheet omits medium"
+    );
+    let short_h = p.stage.sheets[0].heights[0];
+    let resting = p.top_sheet().unwrap().1 .1;
+    assert!(short_h < medium, "short_h={short_h} medium={medium}");
+    assert_eq!(p.set_window(keyboard(300.0)), None);
+    after(&mut p, 1000.0);
+    assert_eq!(
+        p.stage.sheets[0].heights.len(),
+        1,
+        "keyboard lift on a short sheet never introduces a spurious medium stop"
+    );
+    assert!(near(p.top_sheet().unwrap().1 .1, resting - 300.0 + FOOT));
+    assert_eq!(p.set_window(WINDOW), None);
+    after(&mut p, 1000.0);
+    tap(&mut p, "grow");
+    after(&mut p, 1000.0);
+    assert_eq!(
+        p.stage.sheets[0].heights.len(),
+        2,
+        "grown sheet gains medium"
+    );
+    assert_eq!(
+        p.stage.sheets[0].at, 1,
+        "short sheet growing past medium stays expanded on fit-content"
+    );
+
+    // 1b. Under `interactive-widget="overlays-content"`, IME lift pushes display_fit above medium
+    //     while natural_fit stays below medium; medium must still stay omitted.
+    let overlay_source = source.replace(
+        r#"viewport-fit="cover""#,
+        r#"viewport-fit="cover" interactive-widget="overlays-content""#,
+    );
+    let mut p = phone_source(&overlay_source);
+    tap(&mut p, "open-short");
+    after(&mut p, 1000.0);
+    assert_eq!(p.stage.sheets[0].heights.len(), 1);
+    let short_overlay_h = p.stage.sheets[0].heights[0];
+    assert_eq!(p.set_window(keyboard(300.0)), None);
+    after(&mut p, 1000.0);
+    assert_eq!(
+        p.stage.sheets[0].heights.len(),
+        1,
+        "overlays-content IME lift past medium never introduces a spurious medium stop"
+    );
+    assert!(p.stage.sheets[0].heights[0] > medium);
+    assert!(near(
+        p.stage.sheets[0].heights[0],
+        short_overlay_h - FOOT + 300.0
+    ));
+
+    // 1c. Under default `resizes-content`, a 320 dp sheet stays below unobscured medium (456 dp)
+    //     even when a 300 dp keyboard shrinks `tallest` to 564 dp (half = 282 dp); medium stays omitted.
+    let resize_source = source.replace("height=220", "height=320");
+    let mut p = phone_source(&resize_source);
+    tap(&mut p, "open-short");
+    after(&mut p, 1000.0);
+    assert_eq!(p.stage.sheets[0].heights.len(), 1);
+    assert_eq!(p.set_window(keyboard(300.0)), None);
+    after(&mut p, 1000.0);
+    assert_eq!(
+        p.stage.sheets[0].heights.len(),
+        1,
+        "resizes-content keyboard shrinkage never introduces a spurious medium stop"
+    );
+
+    // 2. Medium-tall content (50% < content < tallest): opens at medium, expands to content height
+    //    (not tallest); shrinking <= 50% while resting at medium collapses cleanly to fit-content.
+    let mut p = phone_source(source);
+    tap(&mut p, "open-mid");
+    after(&mut p, 1000.0);
+    assert_eq!(p.stage.sheets[0].heights.len(), 2);
+    assert!(near(p.stage.sheets[0].heights[0], medium));
+    assert!(p.stage.sheets[0].heights[1] > medium && p.stage.sheets[0].heights[1] < tallest);
+    assert_eq!(p.stage.sheets[0].at, 0, "opens at medium");
+    tap(&mut p, "shrink");
+    after(&mut p, 1000.0);
+    assert_eq!(p.stage.sheets[0].heights.len(), 1);
+    assert_eq!(p.stage.sheets[0].at, 0);
+    assert!(p.stage.sheets[0].heights[0] < medium);
+
+    // 3. Overflowing content > tallest: opens at medium, expands to tallest.
+    let mut p = phone_source(source);
+    tap(&mut p, "open-tall");
+    after(&mut p, 1000.0);
+    assert_eq!(p.stage.sheets[0].heights.len(), 2);
+    assert!(near(p.stage.sheets[0].heights[0], medium));
+    assert!(near(p.stage.sheets[0].heights[1], tallest));
+    assert_eq!(p.stage.sheets[0].at, 0);
+
+    // 4. Dropped `navigationInitialDetent` ("60%" when content is ~45%) clamps to fit-content, not 30%.
+    let mut p = phone_source(source);
+    tap(&mut p, "open-clamped");
+    after(&mut p, 1000.0);
+    assert_eq!(p.stage.sheets[0].heights.len(), 2);
+    assert_eq!(
+        p.stage.sheets[0].at, 1,
+        "clamps to fit-content instead of 30%"
+    );
+
+    // 5. Collapsed tie keeps every authored alias word: "300 900 large" with initial="large"
+    //    on an 864 dp screen opens at the shared 864 dp stop, not 300.
+    let tie_source = r##"routes nav
+  home "/"
+    tied "/tied"
+component App
+  action open
+    nav = push(nav, "/tied")
+  view
+    main navigationKey=`${top(nav).id}` navigationBack="back" viewport-fit="cover" width="100%" height="100%"
+      for e in stack(nav) key=e.id
+        if e.name == "home"
+          column navigationKey=`${e.id}` position="absolute" inset=0 padding=16
+            button press=open testId="open" height=40
+              text "Open"
+        if e.name == "tied"
+          column navigationKey=`${e.id}` navigationPresentation="modal" navigationDetent="300 900 large" navigationInitialDetent="large" position="absolute" inset=0 padding=16
+            text "Tied"
+"##;
+    let mut p = phone_source(tie_source);
+    tap(&mut p, "open");
+    after(&mut p, 1000.0);
+    assert_eq!(p.stage.sheets[0].heights.len(), 2);
+    assert_eq!(
+        p.stage.sheets[0].at, 1,
+        "large opens at the collapsed 900/large stop, not 300"
+    );
+    assert!(near(p.stage.sheets[0].heights[1], tallest));
+}
+
+#[test]
+fn wide_screen_fit_content_sheet_measures_at_capped_sheet_width_on_first_frame() {
+    let source = r##"routes nav
+  home "/"
+    wrap "/wrap"
+component App
+  action open
+    nav = push(nav, "/wrap")
+  view
+    main navigationKey=`${top(nav).id}` navigationBack="back" viewport-fit="cover" width="100%" height="100%"
+      for e in stack(nav) key=e.id
+        if e.name == "home"
+          column navigationKey=`${e.id}` position="absolute" inset=0 padding=16
+            button press=open testId="open" height=40
+              text "Open"
+        if e.name == "wrap"
+          column navigationKey=`${e.id}` navigationPresentation="modal" navigationDetent="medium fit-content" testId="route-wrap" position="absolute" inset=0 padding=16
+            text "Lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor incididunt ut labore et dolore magna aliqua ut enim ad minim veniam quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat duis aute irure dolor in reprehenderit."
+"##;
+    let wide = Window {
+        size: (1100.0, 900.0),
+        bars: [STATUS, 0.0, FOOT, 0.0],
+        ..WINDOW
+    };
+    let mut p = phone_source(source);
+    assert_eq!(p.set_window(wide), None);
+    tap(&mut p, "open");
+    let frame1_h = p.stage.sheets[0].heights.last().copied().unwrap();
+    after(&mut p, 1000.0);
+    let settled_h = p.stage.sheets[0].heights.last().copied().unwrap();
+    // A second sync after layout must produce the exact same height as frame 1 (not grow from 1100 dp width).
+    p.sync_stage();
+    let second_h = p.stage.sheets[0].heights.last().copied().unwrap();
+    assert!(
+        near(frame1_h, settled_h) && near(frame1_h, second_h),
+        "frame1={frame1_h} settled={settled_h} second={second_h}"
+    );
 }

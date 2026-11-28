@@ -120,6 +120,9 @@ mod box_motion_tests;
 #[path = "canvas_link_tests.rs"]
 mod canvas_link_tests;
 #[cfg(test)]
+#[path = "clip_motion_tests.rs"]
+mod clip_motion_tests;
+#[cfg(test)]
 #[path = "filter_motion_tests.rs"]
 mod filter_motion_tests;
 #[path = "layout.rs"]
@@ -137,6 +140,8 @@ mod share_in;
 #[path = "snapshot.rs"]
 pub(crate) mod snapshot;
 pub(crate) use scale::LaunchLayout;
+#[path = "clip_handover.rs"]
+mod clip_handover;
 #[cfg(test)]
 #[path = "spacing_tests.rs"]
 mod spacing_tests;
@@ -195,6 +200,8 @@ pub(crate) struct Mirror {
     props: exact_kernel::SortedMap<&'static str, String>,
     /// The style the presenter last heard, one allocation per text ([`paragraph::StyleTexts`]).
     style: std::rc::Rc<str>,
+    /// The kernel inputs of the last run table sent for this paragraph.
+    paragraph: Option<Box<exact_kernel::ParagraphStamp>>,
     children: Box<[ViewId]>,
     frame: Option<(f32, f32, f32, f32)>,
     content: Option<(f32, f32)>,
@@ -946,7 +953,7 @@ impl<D: DataSource> Host<D> {
         };
         // An authored test's store starts empty every run (`agent --test`):
         // emptied at the boot that read it, so this is a no-op unless that failed.
-        crate::picker::empty_fresh_tree(source.app_id())?;
+        crate::picker::empty_fresh_tree(source.app_id(), source.grants())?;
         // What `app:/` names for the picker and an image's source (LLP
         // 1069.002 D4, D7); the last launch's picks go.
         crate::picker::set_roots(data.clone(), cache.clone(), temporary.clone());
@@ -1054,7 +1061,7 @@ impl<D: DataSource> Host<D> {
     }
 
     /// Admission failures remain on the runner's current tickets, not a queue.
-    pub fn refuse_request(&mut self, ticket: u64, reason: &'static str, ordered: bool) {
+    pub fn refuse_request(&mut self, ticket: u64, reason: impl Into<String>, ordered: bool) {
         self.runner.refuse_request(ticket, reason, ordered);
     }
 

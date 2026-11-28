@@ -133,15 +133,26 @@ impl Em<'_> {
     }
 
     /// A development build's binding `k` of node `i`, counted (LLP 1079 D1,
-    /// perf.js): declared once, as `p{i}_{k}`, which every write it feeds
-    /// reads, so a mapped write does not make a counter per evaluation.
-    pub(super) fn counted(&mut self, i: u32, k: usize, f: String) -> String {
+    /// perf.js): declared once, which every write it feeds reads, so a mapped
+    /// write does not make a counter per evaluation.
+    pub(super) fn counted(
+        &mut self,
+        i: u32,
+        e: &str,
+        k: usize,
+        scope: &crate::code::Scope,
+        f: String,
+    ) -> String {
         if !self.site_attrs {
             return f;
         }
         let pf = self.uses.rt("pf");
-        let _ = write!(self.out, "const p{i}_{k}={pf}({i},{f});");
-        format!("p{i}_{k}")
+        let site = self.site_number(scope, i);
+        let name = e
+            .strip_prefix('e')
+            .map_or_else(|| format!("p{e}_{k}"), |n| format!("p{n}_{k}"));
+        let _ = write!(self.out, "const {name}={pf}({site},{f});");
+        name
     }
 
     pub(super) fn style_row(
@@ -473,15 +484,33 @@ impl Em<'_> {
                 one(&name, Some("v=>v==null||/^\\s*none\\s*$/i.test(v)?null:v".into()))
             }
             // Animate the authored transform bases under the press factors
-            StyleId::Translate if shift => ["x", "y", "z"].iter().enumerate().map(|(i, axis)| (
-                format!("--exact-translate-{axis}"), String::new(), Some(format!(
-                    r#"v=>{{const text=String(v??'').trim();if(!CSS.supports('translate',text))return '0px';const p=text.match(/calc\([^)]*\)|[^\s]+/g)??[];return !p.length||/^(none|unset|initial)$/i.test(p[0])?'0px':p[{i}]??'0px'}}"#
-                ))
-            )).chain(one("translate", None)).chain(one("--exact-base-translated", Some("v=>CSS.supports('translate',String(v))&&!/^(none|unset|initial|revert|revert-layer)$/i.test(String(v).trim())?'1':null".into()))).collect(),
-            StyleId::Scale if press => ["--exact-scale", "--exact-scale-y"]
-                .into_iter().enumerate()
-                .map(|(i, name)| (name.into(), String::new(), Some(scale_axis(i))))
-                .collect(),
+            StyleId::Translate if shift => {
+                let tp = self.uses.rt("translateParts");
+                ["x", "y", "z"]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, axis)| {
+                        (
+                            format!("--exact-translate-{axis}"),
+                            String::new(),
+                            Some(format!("v=>{tp}(v)?.[{i}]??'0px'")),
+                        )
+                    })
+                    .chain(one("translate", None))
+                    .chain(one(
+                        "--exact-base-translated",
+                        Some(format!("v=>{tp}(v)?'1':null")),
+                    ))
+                    .collect()
+            }
+            StyleId::Scale if press => {
+                let sa = self.uses.rt("scaleAxis");
+                ["--exact-scale", "--exact-scale-y"]
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, name)| (name.into(), String::new(), Some(format!("v=>{sa}(v,{i})"))))
+                    .collect()
+            }
             StyleId::Animation if press || shift => {
                 let names: Vec<String> = self.press_keyframes.clone();
                 let names = serde_json::to_string(&names).unwrap();
@@ -1098,13 +1127,6 @@ fn sandboxed_source<'a>(
             && !navigable(v)
             && frame_navigable(v, Some(""))
     })
-}
-
-/// A scale factor for a registered numeric press base, including percentages.
-fn scale_axis(axis: usize) -> String {
-    format!(
-        r#"v=>{{const t=String(v??'').trim();if(!CSS.supports('scale',t)||/^(none|unset|initial|revert|revert-layer)$/i.test(t))return '1';const p=t.split(/\s+/),n=p[{axis}]??p[0];return n.endsWith('%')?parseFloat(n)/100:n}}"#
-    )
 }
 
 #[cfg(test)]

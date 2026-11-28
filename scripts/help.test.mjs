@@ -13,7 +13,7 @@ import { HELP, appleBuildRefusal, guardFlags, helpText, indexText, knownFlags } 
 import { scriptFlags } from './help-parity.mjs';
 
 const ROOT = resolve(import.meta.dir, '..');
-const APP_VERBS = ['web', 'web-build', 'serve', 'test', 'agent', 'verify', 'ios', 'mac', 'share', 'linux', 'windows', 'android', 'deploy', 'push', 'update', 'lock', 'add', 'contract', 'forma', 'hatch', 'snapback', 'backend', 'pattern', 'docs', 'feedback'];
+const APP_VERBS = ['dev', 'web', 'web-build', 'serve', 'test', 'agent', 'verify', 'ios', 'mac', 'share', 'linux', 'windows', 'android', 'deploy', 'push', 'update', 'lock', 'add', 'contract', 'forma', 'hatch', 'snapback', 'backend', 'pattern', 'docs', 'feedback'];
 const timed = (args, options) => {
   const t = performance.now(), r = spawnSync(process.execPath, args, { encoding: 'utf8', timeout: 15_000, ...options });
   return { ...r, ms: performance.now() - t };
@@ -129,8 +129,13 @@ test('a flag that takes a value is refused by name when the value is missing or 
   for (const [verb, argv] of [['ios', ['--ios', '--sim', 'iPhone 17', '--optimize', 'size']], ['web', ['--port', '-1']], ['agent', ['macos', '--login']], ['agent', ['macos', '--login', 'hidden', 'tree']]]) {
     assert.deepEqual(guarded(verb, argv), [0, ''], argv.join(' '));
   }
-  assert.equal(appleBuildRefusal(['--ios', '--link', 'all']), '--link takes plan, not all');
-  assert.equal(appleBuildRefusal(['--ios', '--link', 'plan']), null);
+  assert.equal(appleBuildRefusal(['--ios', '--link', 'all'], {}, 'darwin'), '--link takes plan, not all');
+  assert.equal(appleBuildRefusal(['--ios', '--link', 'plan'], {}, 'darwin'), null);
+  assert.match(appleBuildRefusal(['--ios', '--logs'], {}, 'darwin'), /--logs requires a simulator --run/);
+  assert.match(appleBuildRefusal(['--device', '--run', '--logs'], {}, 'darwin'), /--logs requires a simulator --run/);
+  assert.equal(appleBuildRefusal(['--ios', '--run', '--logs'], {}, 'darwin'), null);
+  assert.match(appleBuildRefusal(['--device', '--pick'], {}, 'darwin'), /--pick selects a simulator/);
+  assert.equal(appleBuildRefusal(['--ios', '--run', '--pick'], {}, 'darwin'), null);
 });
 
 test('forma help lists every binding language', () => {
@@ -284,4 +289,24 @@ test('unsigned device builds and archives refuse incompatible options before bui
   assert.equal(result.status, 1);
   assert.match(result.stderr, process.platform === 'linux' ? /--run needs an iOS simulator/ : /--unsigned takes no --run/);
   assert.doesNotMatch(result.stderr, /no app at/);
+});
+
+test('an unsigned Mac distribution input requires --distribution and refuses incompatible options and credentials', async () => {
+  const { appleBuildRefusal } = await import('./help.mjs');
+  for (const flags of [['--distribution', '--unsigned', '--json'], ['--distribution', '--unsigned', '--bundle', '--json']]) {
+    assert.equal(appleBuildRefusal(flags, {}, 'darwin'), null);
+    assert.equal(appleBuildRefusal(flags, { EXACT_DEVELOPER_ID: '-' }, 'darwin'), null);
+  }
+  const flags = ['--distribution', '--unsigned', '--bundle', '--json'];
+  for (const flag of ['--run', '--ios', '--tvos', '--appstore', '--ad-hoc', '--sandbox', '--development',
+    '--archive', '--host', '--embed', '--test', '--prebuild', '--url', '--painted-benchmark', '--extensions'])
+    assert.ok(appleBuildRefusal([...flags, flag], {}, 'darwin'), flag);
+  assert.match(appleBuildRefusal(['--ios', '--distribution', '--unsigned'], {}, 'darwin'), /macOS bundles only/);
+  assert.match(appleBuildRefusal(['--ios', '--device', '--distribution', '--unsigned'], {}, 'darwin'), /macOS bundles only/);
+  assert.match(appleBuildRefusal(['--device', '--unsigned', '--test'], {}, 'darwin'), /--unsigned takes no --test/);
+  assert.ok(appleBuildRefusal(['--unsigned'], {}, 'darwin'));
+  assert.ok(appleBuildRefusal(flags, { EXACT_DEV_PLAN: 'plan' }, 'darwin'));
+  assert.match(appleBuildRefusal(flags, { EXACT_DEVELOPER_ID: 'ABCDEF0123456789' }, 'darwin'), /EXACT_DEVELOPER_ID/);
+  assert.match(appleBuildRefusal(flags, { EXACT_MAC_PROFILE: '/tmp/a.provisionprofile' }, 'darwin'), /EXACT_MAC_PROFILE/);
+  assert.match(appleBuildRefusal(flags, { EXACT_PROFILE: '/tmp/a.provisionprofile' }, 'darwin'), /EXACT_PROFILE/);
 });

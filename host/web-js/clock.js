@@ -62,7 +62,7 @@ export function advance(to, wall, stop, timers = true) {
       then = null,
       head = null;
     const execution = t => (t.change || t.presentation ? Math.max(t.due, clock.now) : (Link.timerWait?.execution(t, wall) ?? t.due)),
-      priority = t => (t.presentation ? 3 : t.hatch || t.data ? 2 : t.wait === 4 ? 1 : 0);
+      priority = t => (t.presentation ? 3 : t.hatch || t.data || t.streamFixture ? 2 : t.wait === 4 ? 1 : 0);
     // Run authored tasks before hatch and data callbacks due at the same time
     for (const t of clock.timers)
       if (
@@ -114,7 +114,7 @@ export function advance(to, wall, stop, timers = true) {
             ? beatAfter(at, next.ms, Math.max(clock.now, wall ? to : clock.now))
             : next.due + next.ms;
     }
-    if (!head && !then && !next.hatch && !next.data && !next.presentation) {
+    if (!head && !then && !next.hatch && !next.data && !next.streamFixture && !next.presentation) {
       const counts = (clock.timerFirings ??= Array(7).fill(0));
       counts[next.frame ? 6 : wall && next.wait ? 5 : (next.wait ?? 0)]++;
     }
@@ -133,8 +133,8 @@ export function advance(to, wall, stop, timers = true) {
           ? beatAfter(at, next.ms, Math.max(clock.now, wall ? to : clock.now))
           : clock.now + next.ms;
     if (ok !== true) return journal.at(-1);
-    // Hatch and data callbacks have their own limits
-    if (head || then || (!next.hatch && !next.data)) {
+    // Hatch, data, and stream fixture callbacks have their own limits
+    if (head || then || (!next.hatch && !next.data && !next.streamFixture)) {
       fired++;
     }
     if (!head && !then && next.change) return true;
@@ -165,10 +165,10 @@ export function drive() {
   if (clock.agent || Poisoned) return;
   let next = Infinity;
   // no timer while a wake runs unseen (wakes.js)
-  for (const t of [...(clock.stopped ? clock.timers.filter(t => t.presentation) : clock.timers), ...Mutations])
+  for (const t of clock.stopped ? clock.timers.filter(t => t.presentation) : clock.timers)
     if (!t.frame && (!t.change || t.ready))
       next = Math.min(next, Link.timerWait?.wake(t) ?? t.due + (t.tolerance ?? 0));
-  for (const m of Mutations) if (m.next < next) next = m.next;
+  for (const m of Mutations) next = Math.min(next, m.due, m.next);
   if (!isFinite(next)) return;
   const token = Link.timerWait?.generation();
   driving = setTimeout(
